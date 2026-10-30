@@ -385,3 +385,68 @@ export async function createPullRequest(
   }
   return number;
 }
+
+/**
+ * A line that states a verdict — and nothing else on the line.
+ *
+ * The same pattern the review gate uses. The verdict is the whole value of the
+ * line: `**Verdict:** pass` is a verdict, and `**Verdict:** pass or fail` is a
+ * sentence about verdicts.
+ */
+export const VERDICT_LINE =
+  /^\s*\**\s*verdict\s*\**\s*:\s*\**\s*(pass|fail)\s*\**\s*\.?\s*$/i;
+
+/**
+ * The body of a review comment.
+ *
+ * It opens with the marker — the check wants the marker to be the first thing
+ * the comment says, so a comment that quotes the format is not a review — and
+ * it ends with exactly one verdict line.
+ *
+ * A finding that looks like a verdict is quoted, so that the comment states one
+ * verdict and not two. A comment that states two decides nothing, and the
+ * check says so rather than picking one.
+ */
+export function reviewCommentBody(options: {
+  readonly verdict: "pass" | "fail";
+  readonly findings?: readonly string[];
+}): string {
+  const findings = (options.findings ?? []).map((finding) =>
+    finding
+      .split("\n")
+      .map((line) => (VERDICT_LINE.test(line) ? `> ${line}` : line))
+      .join("\n"),
+  );
+  const lines: string[] = [REVIEW_MARKER, "## Agent review", ""];
+  if (findings.length > 0) {
+    lines.push(...findings, "");
+  }
+  lines.push(`**Verdict:** ${options.verdict}`);
+  return lines.join("\n");
+}
+
+/** The arguments that post a comment on a pull request. */
+export function postCommentArgs(
+  repo: string,
+  pullRequest: number,
+  body: string,
+): string[] {
+  return [
+    "pr",
+    "comment",
+    String(pullRequest),
+    "--repo",
+    repo,
+    "--body",
+    body,
+  ];
+}
+
+/** The arguments that add a label to a pull request. */
+export function addPullRequestLabelArgs(
+  repo: string,
+  pullRequest: number,
+  label: string,
+): string[] {
+  return ["pr", "edit", String(pullRequest), "--repo", repo, "--add-label", label];
+}

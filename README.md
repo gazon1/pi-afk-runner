@@ -70,6 +70,96 @@ import { assertInstalledPiVersion } from "pi-afk-runner";
 await assertInstalledPiVersion(); // throws PiVersionMismatch outside the pinned range
 ```
 
+## Install
+
+The runner is a **Pi package**: Pi loads it, and the components it is built from are Pi packages
+too.
+
+### From a checkout
+
+```bash
+git clone <this repository> pi-afk-runner
+cd pi-afk-runner
+npm ci                 # install what the lockfile says
+npm run build          # compile, and copy the prompt files next to the module
+pi install -l --approve ./
+```
+
+That last command registers the extension with the Pi in this directory. Pi reads
+`.pi/settings.json`, which lists the nine components the runner is built from, and loads them
+along with the extension itself.
+
+**`--approve` is not optional.** Project-local packages load only when the project is trusted, and
+the trust is granted **per run** — there is no persistent trusted-project list. A session started
+without the flag loads the global packages and silently ignores `.pi/settings.json`, and the
+runner's components are simply not there. `pi list` does not show project-local packages either; to
+see what this project actually depends on, read `.pi/settings.json`.
+
+### From npm, once it is published
+
+```bash
+pi install npm:pi-afk-runner
+```
+
+### What the install brings
+
+| Package | What it does |
+|---|---|
+| `pi-subagents` | the reviewer: delegation in an isolated context, in its own process |
+| `pi-advisor-flow` | the executor/advisor flow |
+| `@quintinshaw/pi-dynamic-workflows` | the multi-step workflow |
+| `pi-lens` | live lint and format feedback inside the turn |
+| `@gotgenes/pi-permission-system` | the guard: what must never be touched |
+| `agents-cron` | cron, isolated runs, the run store |
+| `@signalridge/pi-worktree` | the worktree |
+| `@narumitw/pi-github-pr` | the pull request and its checks |
+| `@drix10/agent-flow` | the builder / reviewer / QA roles, as skills |
+
+Two things are **not** packages, on purpose. The **guardrail** — the rule that an issue body is
+data — is a string in the code, because the CLI's `--append-system-prompt` silently ignores a
+missing file and a rule read from disk can vanish without a word. And the **version gate** — the
+refusal to run against a Pi this package was not written for — is the same kind of thing.
+
+## Run
+
+### From Pi — the live chat
+
+```bash
+cd /path/to/the/repository/you/want/to/work/in
+pi
+```
+
+The extension loads with the session. It registers one command:
+
+```
+/afk-runner-version
+```
+
+which says which Pi the session is running against and whether that Pi is one this extension
+supports.
+
+### From the CLI — unattended
+
+```bash
+pi-afk-runner --run-once
+pi-afk-runner --run-once --repo gazon1/sing
+```
+
+A timer or a systemd unit runs it every N minutes; one invocation takes one issue from the queue
+and works it to the end of its journey — claim, worktree, agent, push, pull request, review — and
+then stops.
+
+> **The CLI entry point does not exist yet.** It is task T011 of the plan, and this section
+> describes the command it will provide. Until then the extension loads in Pi and the pieces can be
+> driven by hand, but there is nothing to run unattended.
+
+### What a run leaves behind
+
+- a pull request on the branch `agent/issue-<N>`, carrying a review that opens with
+  `<!-- agent-review -->`;
+- the `agent-reviewed` label on that pull request, which is what makes the review gate count it;
+- a record under `build/diagnostics/issue-<N>/` in the worktree.
+
 ## Development
 
 ```bash

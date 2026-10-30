@@ -42,8 +42,12 @@ import {
   RECOUNT_LABEL,
   REVIEW_MARKER,
   claimedArgs,
+  VERDICT_LINE,
+  addPullRequestLabelArgs,
   createPullRequestArgs,
   issueArgs,
+  postCommentArgs,
+  reviewCommentBody,
   parseIssues,
   pullRequestBody,
   parsePullRequest,
@@ -60,6 +64,8 @@ import {
   ensureRegistryEntry,
   openPullRequest,
   publishWork,
+  readCiVerdict,
+  reviewPullRequest,
   verdictFile,
   prepareWorktree,
   isStale,
@@ -1216,5 +1222,209 @@ describe("the pull request", () => {
     });
     expect(fresh.number).toBe(91);
     expect(fresh.created).toBe(true);
+  });
+});
+
+describe("the review", () => {
+  it("test_the_review_comment_opens_with_the_marker", () => {
+    const comment = reviewCommentBody({ verdict: "pass" });
+
+    // The marker has to be the first thing the comment says: a comment that
+    // quotes the format is not a review.
+    const first = comment.split("\n").find((line) => line.trim() !== "");
+    expect(first?.trim()).toBe("<!-- agent-review -->");
+
+    // And the gate's own reader agrees — it is the same rule, read the same
+    // way.
+    expect(comment.startsWith("<!-- agent-review -->")).toBe(true);
+  });
+
+  it("test_the_verdict_line_is_the_whole_value", () => {
+    const comment = reviewCommentBody({ verdict: "fail" });
+    const verdictLines = comment.split("\n").filter((line) => VERDICT_LINE.test(line));
+
+    // Exactly one verdict, and its value is the whole line.
+    expect(verdictLines).toHaveLength(1);
+    expect(verdictLines[0]?.trim()).toBe("**Verdict:** fail");
+
+    // A finding that looks like a verdict is quoted, so the comment states one
+    // verdict and not two — a comment that states two decides nothing.
+    const withFinding = reviewCommentBody({
+      verdict: "pass",
+      findings: ["all good", "**Verdict:** fail"],
+    });
+    const stated = withFinding
+      .split("\n")
+      .filter((line) => VERDICT_LINE.test(line));
+    expect(stated).toHaveLength(1);
+    expect(stated[0]?.trim()).toBe("**Verdict:** pass");
+  });
+
+  it("test_ci_is_retriggered_after_the_review_comment", async () => {
+    const calls: string[] = [];
+    const gh = async (args: readonly string[]): Promise<string> => {
+      calls.push(`gh ${args.join(" ")}`);
+      return "";
+    };
+    const factory = async (options: {
+      cwd: string;
+      systemPromptSections: Record<string, string>;
+      tools?: readonly unknown[];
+    }): Promise<AgentSession> => {
+      calls.push(`session in ${options.cwd}`);
+      return {
+        async prompt(text) {
+          calls.push(`prompt ${text.slice(0, 20)}`);
+          // The reviewer ends on the verdict tool.
+          const tool = options.tools?.[0] as {
+            execute: (id: string, params: unknown) => Promise<unknown>;
+          };
+          await tool.execute("call-1", { verdict: "pass", findings: [] });
+        },
+        async abort() {},
+        dispose() {},
+      };
+    };
+
+    const outcome = await reviewPullRequest({
+      repo: "gazon1/sing",
+      pullRequest: 1040,
+      cwd: "/tmp/does-not-matter",
+      factory: factory as never,
+      gh,
+      run: async () => "",
+      deadlineMs: 60_000,
+    });
+
+    expect(outcome.verdict).toBe("pass");
+    expect(outcome.posted).toBe(true);
+
+    // The comment goes first, and then the label: a label applied before the
+    // comment re-counts a run that finds no review.
+    const commentAt = calls.findIndex((call) => call.startsWith("gh pr comment"));
+    const labelAt = calls.findIndex((call) => call.startsWith("gh pr edit"));
+    expect(commentAt).toBeGreaterThanOrEqual(0);
+    expect(labelAt).toBeGreaterThan(commentAt);
+
+    // And the label is the one that re-counts the review gate.
+    expect(calls[labelAt]).toContain("agent-reviewed");
+  });
+
+  it("test_a_failed_verdict_leaves_the_pull_request_red", async () => {
+    const calls: string[] = [];
+    const gh = async (args: readonly string[]): Promise<string> => {
+      calls.push(`gh ${args.join(" ")}`);
+      return "";
+    };
+    const factory = async (options: {
+      cwd: string;
+      systemPromptSections: Record<string, string>;
+      tools?: readonly unknown[];
+    }): Promise<AgentSession> => ({
+      async prompt() {
+        const tool = options.tools?.[0] as {
+          execute: (id: string, params: unknown) => Promise<unknown>;
+        };
+        await tool.execute("call-1", {
+          verdict: "fail",
+          findings: ["the guard does not fire"],
+        });
+      },
+      async abort() {},
+      dispose() {},
+    });
+
+    const outcome = await reviewPullRequest({
+      repo: "gazon1/sing",
+      pullRequest: 1040,
+      cwd: "/tmp/does-not-matter",
+      factory: factory as never,
+      gh,
+      run: async () => "",
+      deadlineMs: 60_000,
+    });
+
+    expect(outcome.verdict).toBe("fail");
+    expect(outcome.comment).toContain("**Verdict:** fail");
+    expect(outcome.comment).toContain("the guard does not fire");
+
+    // One comment, and no second one: a `fail` is not a retry.
+    expect(calls.filter((call) => call.startsWith("gh pr comment"))).toHaveLength(1);
+  });
+
+  it("test_the_runner_makes_no_bare_ci_claim", async () => {
+    // The claim about CI names the workflow, the run and the conclusion, or
+    // the runner says nothing at all.
+    const run = async (spec: {
+      command: string;
+      args: readonly string[];
+      cwd: string;
+    }): Promise<string> => {
+      expect(spec.command).toBe("python3");
+      expect(spec.args[0]).toBe("scripts/ci-verdict.py");
+      return "ci.yml  run 39888579980  failure  https://github.com/gazon1/sing/actions/runs/39888579980\n";
+    };
+
+    const verdict = await readCiVerdict(run, "/tmp/does-not-matter", {
+      ref: "1040",
+      repo: "gazon1/sing",
+    });
+    expect(verdict).toContain("ci.yml");
+    expect(verdict).toContain("39888579980");
+    expect(verdict).toContain("failure");
+
+    // When the tool cannot read it, the runner says nothing — a missing run
+    // is not a pass.
+    const unreadable = await readCiVerdict(
+      async () => {
+        throw new Error("no runs");
+      },
+      "/tmp/does-not-matter",
+      { ref: "1040", repo: "gazon1/sing" },
+    );
+    expect(unreadable).toBeNull();
+  });
+
+  it("test_the_review_is_posted_once", async () => {
+    // The gate decides on the newest marked comment, so a second review of
+    // the same pull request would override this one.
+    const calls: string[] = [];
+    const gh = async (args: readonly string[]): Promise<string> => {
+      calls.push(`gh ${args.join(" ")}`);
+      return "";
+    };
+    const factory = async (options: {
+      cwd: string;
+      systemPromptSections: Record<string, string>;
+      tools?: readonly unknown[];
+    }): Promise<AgentSession> => ({
+      async prompt() {
+        const tool = options.tools?.[0] as {
+          execute: (id: string, params: unknown) => Promise<unknown>;
+        };
+        await tool.execute("call-1", { verdict: "pass", findings: [] });
+      },
+      async abort() {},
+      dispose() {},
+    });
+
+    await reviewPullRequest({
+      repo: "gazon1/sing",
+      pullRequest: 1040,
+      cwd: "/tmp/does-not-matter",
+      factory: factory as never,
+      gh,
+      run: async () => "",
+      deadlineMs: 60_000,
+    });
+
+    expect(calls.filter((call) => call.startsWith("gh pr comment"))).toHaveLength(1);
+    expect(calls.filter((call) => call.startsWith("gh pr edit"))).toHaveLength(1);
+
+    // And the arguments are the ones the gate and the reviewer expect.
+    expect(postCommentArgs("gazon1/sing", 1040, "x")).toContain("--body");
+    expect(addPullRequestLabelArgs("gazon1/sing", 1040, "agent-reviewed")).toContain(
+      "agent-reviewed",
+    );
   });
 });

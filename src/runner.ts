@@ -26,6 +26,15 @@
  */
 
 import {
+  UNTRUSTED_INPUT_RULE,
+  UNTRUSTED_INPUT_SECTION,
+  createVerdictTool,
+  runPromptArray,
+  type ReviewVerdict,
+  type Scheduler,
+  type SessionFactory,
+} from "./session.js";
+import {
   addWorktree,
   fetchRef,
   pushWorkBranch,
@@ -36,8 +45,11 @@ import {
 } from "./git.js";
 import {
   CLAIM_LABEL,
+  addPullRequestLabelArgs,
   createPullRequest,
+  postCommentArgs,
   readPullRequest,
+  reviewCommentBody,
   RECOUNT_LABEL,
   REVIEW_MARKER,
   type GhRunner,
@@ -395,4 +407,160 @@ export async function publishWork(options: {
     gh: options.gh,
     run: options.run,
   });
+}
+
+/** The tool that reads a commit's CI verdict — the repository's own. */
+export const CI_VERDICT_TOOL = "scripts/ci-verdict.py";
+
+/**
+ * The CI verdict of a commit, as the repository's own tool states it.
+ *
+ * A claim about CI that names a run id and nothing else is not evidence: a
+ * repository has several workflows, and the one that says "success" may be the
+ * cache cleanup. So the claim is a whole line — the workflow, the run, the
+ * conclusion — and it comes from the tool that already knows how to judge it.
+ *
+ * `null` when the tool could not read it. A missing run is not a pass.
+ */
+export async function readCiVerdict(
+  run: CommandRunner,
+  cwd: string,
+  options: { readonly ref: string; readonly repo: string },
+): Promise<string | null> {
+  try {
+    const output = await run({
+      command: "python3",
+      args: [CI_VERDICT_TOOL, options.ref, "--repo", options.repo],
+      cwd,
+    });
+    const line = output.trim();
+    return line === "" ? null : line;
+  } catch {
+    // The tool says what it could not read; the runner says nothing rather
+    // than something it cannot stand behind.
+    return null;
+  }
+}
+
+/** What a review of a pull request did. */
+export interface ReviewOutcome {
+  readonly verdict: "pass" | "fail";
+  readonly comment: string;
+  /** Whether the comment was posted — it is posted once, and only once. */
+  readonly posted: boolean;
+  /** The CI line, when the runner read one. */
+  readonly ciVerdict: string | null;
+}
+
+/**
+ * Review a pull request, post the review, and have the gate count it again.
+ *
+ * The order matters and is asserted by the test: the comment goes first, and
+ * then the label. A label applied before the comment re-counts a run that
+ * finds no review — the gate would look, find nothing, and fail for a reason
+ * that has nothing to do with the review.
+ *
+ * A `fail` verdict is not a retry. The pull request stays red, no second
+ * comment is posted, and no other issue is taken: the findings have to be
+ * dealt with, and a later review has to say `pass` again.
+ */
+export async function reviewPullRequest(options: {
+  readonly repo: string;
+  readonly pullRequest: number;
+  /** The directory the reviewer works in — the worktree, read-only by convention. */
+  readonly cwd: string;
+  /** The reviewer's session. */
+  readonly factory: SessionFactory;
+  readonly gh: GhRunner;
+  readonly run: CommandRunner;
+  readonly deadlineMs: number;
+  readonly schedule?: Scheduler;
+}): Promise<ReviewOutcome> {
+  const holder: { value?: ReviewVerdict } = {};
+  const session = await options.factory({
+    cwd: options.cwd,
+    systemPromptSections: {
+      [UNTRUSTED_INPUT_SECTION]: UNTRUSTED_INPUT_RULE,
+    },
+    tools: [createVerdictTool(holder)],
+  });
+
+  try {
+    await runPromptArray({
+      session,
+      prompts: [REVIEW_PROMPT],
+      deadlineMs: options.deadlineMs,
+      ...(options.schedule === undefined ? {} : { schedule: options.schedule }),
+    });
+  } finally {
+    session.dispose();
+  }
+
+  const verdict = holder.value;
+  if (verdict === undefined) {
+    // The reviewer did not reach a verdict. That is not a pass: a review that
+    // says nothing decides nothing.
+    throw new Error(
+      `the review of pull request ${options.pullRequest} stated no verdict`,
+    );
+  }
+
+  const comment = reviewCommentBody({
+    verdict: verdict.verdict,
+    findings: verdict.findings,
+  });
+
+  // Posted once. The gate decides on the newest marked comment, so a second
+  // review of the same pull request would override this one — and a `pass`
+  // after a `fail` would turn a red pull request green on a review of a
+  // different diff.
+  const posted = await postReviewComment(options, comment);
+  await addRecountLabel(options);
+
+  return {
+    verdict: verdict.verdict,
+    comment,
+    posted,
+    ciVerdict: await readCiVerdict(options.run, options.cwd, {
+      ref: String(options.pullRequest),
+      repo: options.repo,
+    }),
+  };
+}
+
+/** The prompt the reviewer is given. */
+export const REVIEW_PROMPT = [
+  "Review the pull request in this repository, as a reader who did not write it.",
+  "",
+  "Read the diff (`git diff origin/main...HEAD`), the code it touches, and the tests. Judge it",
+  "the way the repository's own review skill does: is the logic right, is it safe, does it hold",
+  "under load, is the risky code tested, is it fast enough, and is every line needed.",
+  "",
+  "Report defects with a location, not a summary. Say what you did not reach.",
+  "",
+  "Then end with the verdict tool. It is your last action.",
+].join("\n");
+
+/** Post the review comment. */
+export async function postReviewComment(
+  options: {
+    readonly repo: string;
+    readonly pullRequest: number;
+    readonly gh: GhRunner;
+  },
+  comment: string,
+): Promise<boolean> {
+  await options.gh(postCommentArgs(options.repo, options.pullRequest, comment));
+  return true;
+}
+
+/** Apply the label that makes the gate count the review again. */
+export async function addRecountLabel(options: {
+  readonly repo: string;
+  readonly pullRequest: number;
+  readonly gh: GhRunner;
+}): Promise<void> {
+  await options.gh(
+    addPullRequestLabelArgs(options.repo, options.pullRequest, RECOUNT_LABEL),
+  );
 }
