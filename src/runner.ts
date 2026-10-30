@@ -25,6 +25,14 @@
  * takes it over.
  */
 
+import {
+  CLAIM_LABEL,
+  RECOUNT_LABEL,
+  REVIEW_MARKER,
+  type IssueSummary,
+  type PullRequestSummary,
+} from "./gh.js";
+
 /** The states that can be derived from the observables. */
 export type DerivedState =
   | "Queue"
@@ -99,4 +107,64 @@ export function deriveState(observables: Observables): DerivedState {
     return "Pushed";
   }
   return observables.stale ? "Orphaned" : "Claimed";
+}
+
+/**
+ * Pick the issue this run will work.
+ *
+ * The queue query already excludes the claimed issues — the exclusion is in the
+ * search form, so the claimed issues are never fetched. This is the second
+ * half of the same rule: the runner does not *trust* the query to have done
+ * it. A queue that somehow carries a claimed issue is a bug in the query, and
+ * working it anyway would put two runs on one issue — the exact thing the
+ * claim exists to prevent.
+ */
+export function selectIssue(
+  queue: readonly IssueSummary[],
+): IssueSummary | undefined {
+  return queue.find((issue) => !issue.labels.includes(CLAIM_LABEL));
+}
+
+/**
+ * What a pull request says about itself.
+ *
+ * `reviewComment` is true only for a comment that **opens** with the marker:
+ * the gate wants the marker on the first non-blank line, so a comment that
+ * quotes the format somewhere in the middle is not a review.
+ */
+export function observePullRequest(
+  pullRequest: PullRequestSummary | null,
+): { readonly reviewComment: boolean; readonly recountLabel: boolean } {
+  if (pullRequest === null) {
+    return { reviewComment: false, recountLabel: false };
+  }
+  const reviewComment = pullRequest.comments.some((body) =>
+    body.trimStart().startsWith(REVIEW_MARKER),
+  );
+  return {
+    reviewComment,
+    recountLabel: pullRequest.labels.includes(RECOUNT_LABEL),
+  };
+}
+
+/**
+ * Is the claim old enough to take over?
+ *
+ * The window is a parameter, not a constant, because its value is a decision
+ * the plan has not made: too short and a slow run loses its issue to a second
+ * runner, too long and a killed run keeps the issue out of the queue for
+ * hours. The caller supplies it.
+ */
+export function isStale(
+  updatedAt: string,
+  now: Date,
+  staleAfterMs: number,
+): boolean {
+  const updated = Date.parse(updatedAt);
+  if (Number.isNaN(updated)) {
+    // An issue whose last-update time cannot be read is not treated as stale:
+    // guessing wrong in that direction takes an issue from a live run.
+    return false;
+  }
+  return now.getTime() - updated >= staleAfterMs;
 }

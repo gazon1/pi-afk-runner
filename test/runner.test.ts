@@ -2,7 +2,27 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import { describe, expect, it } from "vitest";
 
-import { UNCLAIMED, deriveState, type Observables } from "../src/runner.js";
+import {
+  GH_DEFAULT_PAGE_SIZE,
+  QUEUE_LABEL,
+  CLAIM_LABEL,
+  RECOUNT_LABEL,
+  REVIEW_MARKER,
+  claimedArgs,
+  parseIssues,
+  parsePullRequest,
+  queueArgs,
+  readClaimed,
+  readQueue,
+} from "../src/gh.js";
+import {
+  UNCLAIMED,
+  deriveState,
+  isStale,
+  observePullRequest,
+  selectIssue,
+  type Observables,
+} from "../src/runner.js";
 import {
   PINNED_PI_RANGE,
   PiVersionMismatch,
@@ -211,5 +231,173 @@ describe("the state the runner derives", () => {
         recountLabel: true,
       }),
     ).toBe("Claimed");
+  });
+});
+
+/** The value that follows a flag, or a failure that says which flag is missing. */
+function valueAfter(args: readonly string[], flag: string): string {
+  const index = args.indexOf(flag);
+  if (index < 0) {
+    throw new Error(`\`${flag}\` is not in the arguments`);
+  }
+  const value = args[index + 1];
+  if (value === undefined) {
+    throw new Error(`\`${flag}\` is the last argument and has no value`);
+  }
+  return value;
+}
+
+describe("the queue", () => {
+  it("test_selection_excludes_claimed_issues", async () => {
+    const args = queueArgs("gazon1/sing");
+
+    // The exclusion is in the query itself: the claimed issues are never
+    // fetched, so they cannot be worked by accident.
+    expect(args).toContain("-label:agent-in-progress");
+    // And it is the minus form. The `no:label:` form returns nothing at all,
+    // because there is no such thing as an issue with no labels — measured
+    // against this repository, not assumed.
+    expect(args).not.toContain("no:label:agent-in-progress");
+    expect(args.join(" ")).not.toContain("no:label:");
+    expect(args).not.toContain(`no:label:${CLAIM_LABEL}`);
+
+    // The query asks for the label a human applies, and only open issues.
+    expect(args).toContain(QUEUE_LABEL);
+    expect(args).toContain("--state");
+    expect(args).toContain("open");
+
+    // And the selection refuses a claimed issue even if one turns up in the
+    // queue anyway. The query is not the only thing standing between two runs
+    // and one issue.
+    const claimed = {
+      number: 1,
+      title: "claimed",
+      updatedAt: "2026-10-30T00:00:00Z",
+      labels: [QUEUE_LABEL, CLAIM_LABEL],
+    };
+    const free = {
+      number: 2,
+      title: "free",
+      updatedAt: "2026-10-30T00:00:00Z",
+      labels: [QUEUE_LABEL],
+    };
+    expect(selectIssue([claimed, free])?.number).toBe(2);
+    expect(selectIssue([claimed])).toBeUndefined();
+    expect(selectIssue([])).toBeUndefined();
+  });
+
+  it("test_selection_uses_the_minus_search_form", () => {
+    const args = queueArgs("gazon1/sing");
+
+    // The exclusion is a *search*, and it is the minus form.
+    const search = valueAfter(args, "--search");
+    expect(search).toBe(`-label:${CLAIM_LABEL}`);
+    expect(search.startsWith("-")).toBe(true);
+    expect(search.startsWith("no:")).toBe(false);
+
+    // `gh`'s default page size is 30 and the queue is larger than that, so the
+    // limit is not optional: without it the runner sees the first thirty
+    // issues and believes it has seen them all.
+    const limit = Number(valueAfter(args, "--limit"));
+    expect(limit).toBeGreaterThan(GH_DEFAULT_PAGE_SIZE);
+    expect(args).toContain("--limit");
+  });
+
+  it("reads the claimed issues with a query of its own", () => {
+    // The queue excludes the claimed issues by construction, so a claim left
+    // behind by a run that died would be invisible to every later run. The
+    // claimed set is read separately — with both labels, which means both.
+    const args = claimedArgs("gazon1/sing");
+    const labels = args.filter((_, index) => args[index - 1] === "--label");
+    expect(labels).toEqual([QUEUE_LABEL, CLAIM_LABEL]);
+    expect(args).not.toContain("--search");
+  });
+
+  it("parses what gh returns", () => {
+    const issues = parseIssues(
+      JSON.stringify([
+        { number: 7, title: "an issue", updatedAt: "2026-10-30T09:00:00Z", labels: [{ name: QUEUE_LABEL }] },
+      ]),
+    );
+    expect(issues).toEqual([
+      {
+        number: 7,
+        title: "an issue",
+        updatedAt: "2026-10-30T09:00:00Z",
+        labels: [QUEUE_LABEL],
+      },
+    ]);
+
+    const pullRequest = parsePullRequest(
+      JSON.stringify({
+        number: 3,
+        headRefName: "agent/issue-7",
+        labels: [{ name: RECOUNT_LABEL }],
+        comments: [{ body: `<!-- agent-review -->\n\n**Verdict:** pass` }],
+      }),
+    );
+    expect(pullRequest?.headRefName).toBe("agent/issue-7");
+    expect(pullRequest?.labels).toEqual([RECOUNT_LABEL]);
+    expect(pullRequest?.comments).toHaveLength(1);
+  });
+
+  it("reads the queue and the claimed set through the gh it is given", async () => {
+    const seen: string[][] = [];
+    const gh = async (args: readonly string[]): Promise<string> => {
+      seen.push([...args]);
+      return "[]";
+    };
+
+    await readQueue("gazon1/sing", gh);
+    await readClaimed("gazon1/sing", gh);
+
+    expect(seen).toHaveLength(2);
+    expect(seen[0]).toEqual(queueArgs("gazon1/sing"));
+    expect(seen[1]).toEqual(claimedArgs("gazon1/sing"));
+  });
+});
+
+describe("what a pull request says about itself", () => {
+  it("counts a review only when the comment opens with the marker", () => {
+    const withReview = {
+      number: 3,
+      headRefName: "agent/issue-7",
+      labels: [] as string[],
+      comments: [`${REVIEW_MARKER}\n\n**Verdict:** pass`],
+    };
+    expect(observePullRequest(withReview).reviewComment).toBe(true);
+
+    // A comment that quotes the format is not a review: the gate wants the
+    // marker on the first non-blank line.
+    const quoting = {
+      ...withReview,
+      comments: ["The marker is <!-- agent-review -->, in case you were wondering."],
+    };
+    expect(observePullRequest(quoting).reviewComment).toBe(false);
+
+    // Leading blank lines are still "opening with" it.
+    const padded = { ...withReview, comments: ["\n\n  " + REVIEW_MARKER] };
+    expect(observePullRequest(padded).reviewComment).toBe(true);
+
+    // No pull request at all.
+    expect(observePullRequest(null)).toEqual({ reviewComment: false, recountLabel: false });
+
+    // The recount label is read from the pull request's own labels.
+    const recounted = { ...withReview, labels: [RECOUNT_LABEL] };
+    expect(observePullRequest(recounted).recountLabel).toBe(true);
+  });
+});
+
+describe("the staleness of a claim", () => {
+  it("is a comparison against a window the caller supplies", () => {
+    const updated = "2026-10-30T09:00:00Z";
+    const sixHours = 6 * 60 * 60 * 1000;
+
+    expect(isStale(updated, new Date("2026-10-30T12:00:00Z"), sixHours)).toBe(false);
+    expect(isStale(updated, new Date("2026-10-30T16:00:00Z"), sixHours)).toBe(true);
+
+    // A claim whose last-update time cannot be read is not treated as stale:
+    // guessing wrong in that direction takes an issue from a live run.
+    expect(isStale("not a date", new Date("2027-01-01T00:00:00Z"), sixHours)).toBe(false);
   });
 });
