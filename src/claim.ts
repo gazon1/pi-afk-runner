@@ -167,7 +167,16 @@ export async function removeClaimLabel(
   ]);
 }
 
-/** Release a claim: the label comes off and the ref goes away. */
+/**
+ * Release a claim: the ref goes away and the label comes off.
+ *
+ * The order is the safety. The label is what a human sees and what the queue
+ * read excludes by, so it comes off **last**: an issue whose label is off
+ * while its claim ref is still there looks free to the next runner, and the
+ * next runner cannot claim it — a claim nobody can take is an issue nobody can
+ * take either. The other order leaves an issue that looks claimed and is not,
+ * and *that* the reclaim path finds and takes over.
+ */
 export async function releaseClaim(options: {
   readonly repo: string;
   readonly remote: string;
@@ -176,9 +185,9 @@ export async function releaseClaim(options: {
   readonly git: GitRunner;
   readonly gh: GhRunner;
 }): Promise<void> {
-  await removeClaimLabel(options.gh, options.repo, options.issueNumber);
   await deleteClaim(options.git, options.cwd, {
     remote: options.remote,
     issueNumber: options.issueNumber,
   });
+  await removeClaimLabel(options.gh, options.repo, options.issueNumber);
 }

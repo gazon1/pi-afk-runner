@@ -22,14 +22,17 @@ import {
   allowedPushRefs,
   assertPushableRef,
   pushRef,
+  pushWorkBranch,
   claimRef,
   claimRefName,
   readClaimBase,
+  runCommand,
   runGit,
   workBranch,
 } from "../src/git.js";
 import { createFixtureRepository, gitOutput } from "./git-sandbox.js";
 import { cp } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { execFile } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -61,17 +64,21 @@ import {
   computeDocumentsDigest,
   deriveState,
   ensureRegistryEntry,
+  newRunId,
   openPullRequest,
   parseCiVerdict,
   publishWork,
   readCiVerdict,
+  releaseRun,
   reviewPullRequest,
+  runSteps,
   verdictFile,
   prepareWorktree,
   isStale,
   observePullRequest,
   selectIssue,
   type Observables,
+  type Step,
 } from "../src/runner.js";
 import {
   PINNED_PI_RANGE,
@@ -1581,5 +1588,218 @@ describe("the review", () => {
     expect(addPullRequestLabelArgs("gazon1/sing", 1040, "agent-reviewed")).toContain(
       "agent-reviewed",
     );
+  });
+});
+
+/**
+ * What a run does when it fails, and what it leaves behind.
+ *
+ * The failure path and the record are the two halves of one promise: an
+ * unattended run that dies leaves a human with nothing to read, and an issue
+ * that stays claimed is an issue nobody can take.
+ */
+describe("the failure path and the record", () => {
+  it("test_a_handled_failure_releases_the_claim", async () => {
+    const fixture = await createFixtureRepository({
+      files: { "scripts/setup-worktree.sh": "#!/usr/bin/env bash\nset -euo pipefail\n" },
+    });
+    try {
+      const calls: string[] = [];
+      const gh = async (args: readonly string[]): Promise<string> => {
+        calls.push(`gh ${args.join(" ")}`);
+        if (args[0] === "pr" && args[1] === "list") {
+          return "[]";
+        }
+        if (args[0] === "pr" && args[1] === "create") {
+          throw new CommandFailed(
+            1,
+            "gh",
+            [...args],
+            "",
+            "the pull request could not be opened",
+          );
+        }
+        return "";
+      };
+      const git = (args: readonly string[], options: { cwd: string; input?: string }) =>
+        runGit(args, options);
+      const repo = "gazon1/sing";
+      const worktreePath = join(fixture.root, "worktree-issue-42");
+      let base = "";
+
+      // The run, in the order the runner runs it: the claim first, because the
+      // worktree is made from the commit the claim was taken against.
+      const steps: Step[] = [
+        {
+          name: "claim",
+          run: async () => {
+            const outcome = await claimIssue({
+              issue: { number: 42, title: "an issue", updatedAt: "", labels: [] },
+              repo,
+              remote: fixture.remote,
+              baseBranch: "main",
+              cwd: fixture.repo,
+              git,
+              gh,
+              nonce: "nonce-42",
+              now: new Date("2026-10-30T09:00:00Z"),
+            });
+            if (!outcome.claimed) {
+              throw new Error(outcome.reason);
+            }
+            base = outcome.base;
+            return "claimed";
+          },
+        },
+        {
+          name: "worktree",
+          run: async () => {
+            await prepareWorktree({
+              repo: fixture.repo,
+              remote: fixture.remote,
+              baseBranch: "main",
+              baseSha: base,
+              issueNumber: 42,
+              worktreePath,
+              cwd: fixture.repo,
+              git,
+            });
+            return "prepared";
+          },
+        },
+        {
+          name: "push",
+          run: async () => {
+            await writeFile(join(worktreePath, "work.txt"), "the work\n", "utf8");
+            await runGit(["add", "-A"], { cwd: worktreePath });
+            await runGit(
+              [
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.com",
+                "commit",
+                "-q",
+                "-m",
+                "the work",
+              ],
+              { cwd: worktreePath },
+            );
+            const sha = (await runGit(["rev-parse", "HEAD"], { cwd: worktreePath })).trim();
+            await pushWorkBranch(git, fixture.repo, {
+              remote: fixture.remote,
+              issueNumber: 42,
+              sha,
+            });
+            return sha;
+          },
+        },
+        {
+          name: "pull request",
+          run: async () => {
+            const opened = await openPullRequest({
+              repo,
+              branch: workBranch(42),
+              title: "an issue",
+              body: pullRequestBody({ issueNumber: 42, title: "an issue" }),
+              gh,
+              run: runCommand,
+            });
+            return `opened #${opened.number}`;
+          },
+        },
+      ];
+
+      const failure = await runSteps({
+        issue: 42,
+        runId: "2026-10-30T09-00-00-000Z-abcdef12",
+        root: fixture.root,
+        steps,
+        release: async () => {
+          await releaseRun({
+            repo,
+            remote: fixture.remote,
+            cwd: fixture.repo,
+            issueNumber: 42,
+            worktreePath,
+            git,
+            gh,
+          });
+        },
+      }).then(
+        () => null,
+        (error: unknown) => error,
+      );
+
+      // The run failed, and it said which step failed.
+      expect(failure).toBeInstanceOf(Error);
+      expect((failure as Error).message).toContain("the pull request step");
+
+      // The claim is released: the label comes off.
+      expect(calls.some((call) => call.includes("--remove-label agent-in-progress"))).toBe(true);
+
+      // The claim ref is gone, so the next runner can take the issue.
+      const claimBase = await readClaimBase(git, fixture.repo, {
+        remote: fixture.remote,
+        issueNumber: 42,
+      });
+      expect(claimBase).toBeNull();
+
+      // The worktree is gone.
+      expect(existsSync(worktreePath)).toBe(false);
+      const worktrees = await runGit(["worktree", "list"], { cwd: fixture.repo });
+      expect(worktrees).not.toContain(worktreePath);
+
+      // And the work branch is **not**: the work a failed run did is durable.
+      const pushed = await gitOutput(["ls-remote", fixture.remote, workBranch(42)], {
+        cwd: fixture.repo,
+        env: fixture.env,
+      });
+      expect(pushed).not.toBe("");
+
+      // The record names the step that failed, so a reader knows where the
+      // run stopped without the runner's process.
+      const record = await readFile(
+        join(fixture.root, "build", "diagnostics", "issue-42", "2026-10-30T09-00-00-000Z-abcdef12.md"),
+        "utf8",
+      );
+      expect(record).toContain("pull request — failed");
+      expect(record).toContain("release — ok");
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("test_the_run_leaves_a_record_named_for_the_issue", async () => {
+    const root = await mkdtemp(join(tmpdir(), "afk-record-"));
+    try {
+      const outcome = await runSteps({
+        issue: 42,
+        runId: "2026-10-30T09-00-00-000Z-abcdef12",
+        root,
+        steps: [
+          { name: "claim", run: async () => "claimed" },
+          { name: "worktree", run: async () => "prepared" },
+        ],
+      });
+
+      // The record is under a directory named for the issue.
+      expect(outcome.record).toContain(join("build", "diagnostics", "issue-42"));
+      expect(existsSync(outcome.record)).toBe(true);
+
+      // And it names the issue, the steps and the outcome — enough to
+      // reconstruct the run's timeline without the runner's process.
+      const record = await readFile(outcome.record, "utf8");
+      expect(record).toContain("issue: 42");
+      expect(record).toContain("outcome: completed");
+      expect(record).toContain("claim — ok");
+      expect(record).toContain("worktree — ok");
+
+      // The run's identifier is a file name, so it carries nothing a file
+      // system would refuse.
+      expect(newRunId(new Date("2026-10-30T09:00:00Z"))).not.toContain(":");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });

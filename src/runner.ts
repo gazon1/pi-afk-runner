@@ -25,6 +25,11 @@
  * takes it over.
  */
 
+import { randomUUID } from "node:crypto";
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+
+import { releaseClaim } from "./claim.js";
 import {
   UNTRUSTED_INPUT_RULE,
   UNTRUSTED_INPUT_SECTION,
@@ -39,6 +44,7 @@ import {
   addWorktree,
   fetchRef,
   pushWorkBranch,
+  removeWorktree,
   runCommand,
   workBranch,
   type CommandRunner,
@@ -607,5 +613,246 @@ export async function addRecountLabel(options: {
 }): Promise<void> {
   await options.gh(
     addPullRequestLabelArgs(options.repo, options.pullRequest, RECOUNT_LABEL),
+  );
+}
+
+/** What one step of a run did. */
+export interface StepRecord {
+  readonly step: string;
+  readonly outcome: "ok" | "failed";
+  /** The first line the step printed — enough to tell two failures apart. */
+  readonly detail: string;
+}
+
+/** One step of a run. */
+export interface Step {
+  readonly name: string;
+  readonly run: () => Promise<string>;
+}
+
+/** What a run did. */
+export interface RunOutcome {
+  readonly issue: number;
+  readonly runId: string;
+  readonly outcome: "completed" | "failed";
+  readonly steps: readonly StepRecord[];
+  /** Where the record was written. */
+  readonly record: string;
+}
+
+/** The message of a failure, whatever it was thrown as. */
+function errorMessage(failure: unknown): string {
+  return failure instanceof Error ? failure.message : String(failure);
+}
+
+/** The first line of what a step printed. */
+function firstLine(text: string): string {
+  for (const line of text.split("\n")) {
+    if (line.trim() !== "") {
+      return line.trim();
+    }
+  }
+  return "";
+}
+
+/**
+ * Take the credentials out of what goes into the record.
+ *
+ * The record holds what the steps printed, and a step that failed may have
+ * printed a command line with a token in it. The record is read by a human and
+ * is not a secret store, so a token-shaped string is replaced rather than
+ * written down.
+ */
+function redact(text: string): string {
+  return text
+    .replace(/\bgh[pousr]_[A-Za-z0-9]{16,}\b/g, "gh_…")
+    .replace(/\b(GH_TOKEN|GITHUB_TOKEN|GH_ENTERPRISE_TOKEN)=(\S+)/g, "$1=…");
+}
+
+/**
+ * The identifier that tells two runs of the same issue apart.
+ *
+ * The issue number alone is not enough: the same issue can be reclaimed and
+ * worked twice, and the two runs are two records.
+ */
+export function newRunId(now: Date = new Date()): string {
+  return `${now.toISOString().replace(/[:.]/g, "-")}-${randomUUID().slice(0, 8)}`;
+}
+
+/**
+ * Where the record of a run lives.
+ *
+ * `build/diagnostics/issue-<N>/` — the repository's own convention for "here is
+ * what happened", with the issue's number in the directory's name.
+ */
+export function recordDirectory(root: string, issue: number): string {
+  return join(root, "build", "diagnostics", `issue-${issue}`);
+}
+
+/** The record's own text. */
+function renderRecord(options: {
+  readonly issue: number;
+  readonly runId: string;
+  readonly outcome: "completed" | "failed";
+  readonly steps: readonly StepRecord[];
+}): string {
+  const lines = [
+    `# Run issue-${options.issue}`,
+    "",
+    `- issue: ${options.issue}`,
+    `- run: ${options.runId}`,
+    `- outcome: ${options.outcome}`,
+    "",
+    "## Steps",
+    "",
+  ];
+  for (const step of options.steps) {
+    const detail = step.detail === "" ? "" : ` — ${step.detail}`;
+    lines.push(`- ${step.step} — ${step.outcome}${detail}`);
+  }
+  lines.push("");
+  return lines.join("\n");
+}
+
+/**
+ * Write the record of a run.
+ *
+ * The record names the issue, the steps the run took and what came of each, so
+ * a reader can reconstruct the run's timeline without the runner's process.
+ */
+export async function writeRunRecord(options: {
+  readonly root: string;
+  readonly issue: number;
+  readonly runId: string;
+  readonly outcome: "completed" | "failed";
+  readonly steps: readonly StepRecord[];
+}): Promise<string> {
+  const directory = recordDirectory(options.root, options.issue);
+  await mkdir(directory, { recursive: true });
+  const path = join(directory, `${options.runId}.md`);
+  await writeFile(path, renderRecord(options), "utf8");
+  return path;
+}
+
+/**
+ * Release everything the run took.
+ *
+ * The worktree goes first: it is the one that can fail, and a release that
+ * stops half-way leaves the issue claimed — which the next run finds and takes
+ * over. The other order leaves the issue looking free while the work is still
+ * on the machine.
+ *
+ * The branch is not the worktree: removing the worktree leaves the branch and
+ * its commits alone, so the work a failed run did is durable.
+ */
+export async function releaseRun(options: {
+  readonly repo: string;
+  readonly remote: string;
+  readonly cwd: string;
+  readonly issueNumber: number;
+  readonly worktreePath: string;
+  readonly git: GitRunner;
+  readonly gh: GhRunner;
+}): Promise<void> {
+  await removeWorktree(options.git, options.cwd, options.worktreePath);
+  await releaseClaim({
+    repo: options.repo,
+    remote: options.remote,
+    cwd: options.cwd,
+    issueNumber: options.issueNumber,
+    git: options.git,
+    gh: options.gh,
+  });
+}
+
+/**
+ * Run the steps in order, and release the claim when one of them fails.
+ *
+ * The record is written **whatever** happens: a run that died is exactly the
+ * run a human has to read about, and a record written only on success is
+ * missing precisely when it is needed.
+ *
+ * A failure is thrown rather than returned. A caller that ignored a returned
+ * failure would exit zero having done nothing, and "looked healthy while
+ * selecting nothing" is the one outcome this runner must never have.
+ */
+export async function runSteps(options: {
+  readonly issue: number;
+  readonly runId: string;
+  /** The checkout the record goes under. */
+  readonly root: string;
+  readonly steps: readonly Step[];
+  /** What a failure releases: the claim, the worktree, the ref. */
+  readonly release?: () => Promise<void>;
+}): Promise<RunOutcome> {
+  const steps: StepRecord[] = [];
+  let failure: { readonly step: string; readonly error: Error } | null = null;
+
+  for (const step of options.steps) {
+    try {
+      const output = await step.run();
+      steps.push({ step: step.name, outcome: "ok", detail: redact(firstLine(output)) });
+    } catch (error) {
+      const cause = error instanceof Error ? error : new Error(String(error));
+      steps.push({
+        step: step.name,
+        outcome: "failed",
+        detail: redact(firstLine(cause.message)),
+      });
+      failure = { step: step.name, error: cause };
+      break;
+    }
+  }
+
+  // The claim goes, even though the run failed: a claim nobody is working is
+  // an issue nobody can take.
+  if (failure !== null && options.release !== undefined) {
+    try {
+      await options.release();
+      steps.push({ step: "release", outcome: "ok", detail: "" });
+    } catch (releaseError) {
+      steps.push({
+        step: "release",
+        outcome: "failed",
+        detail: redact(firstLine(errorMessage(releaseError))),
+      });
+    }
+  }
+
+  const outcome = failure === null ? "completed" : "failed";
+  let record: string;
+  try {
+    record = await writeRunRecord({
+      root: options.root,
+      issue: options.issue,
+      runId: options.runId,
+      outcome,
+      steps,
+    });
+  } catch (recordError) {
+    if (failure === null) {
+      throw recordError;
+    }
+    throw new Error(
+      `the run stopped at the ${failure.step} step: ${failure.error.message} — ` +
+        `and the record could not be written: ${errorMessage(recordError)}`,
+      { cause: failure.error },
+    );
+  }
+
+  if (failure === null) {
+    return {
+      issue: options.issue,
+      runId: options.runId,
+      outcome,
+      steps,
+      record,
+    };
+  }
+
+  throw new Error(
+    `the run stopped at the ${failure.step} step: ${failure.error.message} — ` +
+      `the record is at ${record}`,
+    { cause: failure.error },
   );
 }

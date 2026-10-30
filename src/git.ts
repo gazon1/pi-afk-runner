@@ -27,6 +27,7 @@
  */
 
 import { spawn } from "node:child_process";
+import { rm } from "node:fs/promises";
 
 /** Who the claim is attributed to. Part of the tag object's identity. */
 export const CLAIM_TAGGER = {
@@ -310,6 +311,27 @@ export async function addWorktree(
   },
 ): Promise<void> {
   await git(["worktree", "add", "-b", options.branch, options.path, options.baseSha], { cwd });
+}
+
+/**
+ * Remove the worktree.
+ *
+ * The directory goes and the registration is pruned, rather than
+ * `git worktree remove`, because that command refuses a path that is not a
+ * registered worktree — and a run that failed *before* the worktree existed
+ * must still be able to release its claim. Pruning a registration whose
+ * directory is gone is what git itself does when it cleans up.
+ *
+ * The branch is not the worktree: removing the worktree leaves the branch and
+ * its commits alone, so the work a failed run did is durable.
+ */
+export async function removeWorktree(
+  git: GitRunner,
+  cwd: string,
+  path: string,
+): Promise<void> {
+  await rm(path, { recursive: true, force: true });
+  await git(["worktree", "prune"], { cwd });
 }
 
 /**
