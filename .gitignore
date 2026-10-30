@@ -1,0 +1,7 @@
+# the components are installed here by `pi install -l`; they are declared in
+# .pi/settings.json, not committed
+.pi/npm/
+
+node_modules/
+dist/
+*.log
