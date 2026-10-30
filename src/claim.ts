@@ -31,6 +31,7 @@ import {
   claimRef,
   createClaimObject,
   deleteClaim,
+  headRef,
   pushClaim,
   readRemoteSha,
   type GitRunner,
@@ -96,7 +97,7 @@ export async function claimIssue(options: ClaimOptions): Promise<ClaimOutcome> {
   ]);
 
   try {
-    const base = await readRemoteSha(git, cwd, { remote, ref: baseBranch });
+    const base = await readRemoteSha(git, cwd, { remote, ref: headRef(baseBranch) });
     if (base === null) {
       throw new Error(`${remote} has no ${baseBranch} to take the claim from`);
     }
@@ -115,12 +116,35 @@ export async function claimIssue(options: ClaimOptions): Promise<ClaimOutcome> {
     // It lost the race, or something else went wrong. Either way it must not
     // leave a label behind: a claim nobody is working is an issue nobody can
     // take.
-    await removeClaimLabel(gh, repo, issue.number);
+    //
+    // The release can fail too — a network error while taking the label off.
+    // When it does, the **original** cause is the one worth reporting: "the
+    // claim was rejected" says what happened, and "gh issue edit failed" does
+    // not.
+    let releaseError: string | null = null;
+    try {
+      await removeClaimLabel(gh, repo, issue.number);
+    } catch (releaseFailure) {
+      releaseError =
+        releaseFailure instanceof Error ? releaseFailure.message : String(releaseFailure);
+    }
+
     if (failure instanceof GitCommandFailed) {
       return {
         claimed: false,
-        reason: `the claim on issue ${issue.number} was rejected: ${failure.stderr.trim()}`,
+        reason:
+          `the claim on issue ${issue.number} was rejected: ${failure.stderr.trim()}` +
+          (releaseError === null
+            ? ""
+            : ` — and the claim label could not be taken off: ${releaseError}`),
       };
+    }
+    if (releaseError !== null) {
+      throw new Error(
+        `${failure instanceof Error ? failure.message : String(failure)} ` +
+          `— and the claim label could not be taken off: ${releaseError}`,
+        { cause: failure },
+      );
     }
     throw failure;
   }

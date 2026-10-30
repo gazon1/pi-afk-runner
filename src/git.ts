@@ -221,6 +221,16 @@ export async function deleteClaim(
   await git(["push", options.remote, "--delete", claimRefName(options.issueNumber)], { cwd });
 }
 
+/**
+ * The full ref of a branch.
+ *
+ * `git ls-remote` matches the **tail** of a ref, so `main` would also match
+ * `refs/tags/main`. The head is named exactly.
+ */
+export function headRef(branch: string): string {
+  return branch.startsWith("refs/") ? branch : `refs/heads/${branch}`;
+}
+
 /** The commit a ref points at on the remote, or null when it has none. */
 export async function readRemoteSha(
   git: GitRunner,

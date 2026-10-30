@@ -22,7 +22,10 @@
  */
 
 import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+
+import { readIssue, type GhRunner } from "./gh.js";
 
 /**
  * The rule that keeps an issue body as data.
@@ -60,11 +63,22 @@ export function installUntrustedInputRule(event: SystemPromptEvent): void {
   event.systemPromptOptions.sections[UNTRUSTED_INPUT_SECTION] = UNTRUSTED_INPUT_RULE;
 }
 
+/**
+ * Defang a closing tag inside untrusted text.
+ *
+ * A body that closes its own fence puts the rest of itself **outside** the
+ * part the system prompt's rule covers — and the rule only covers what is
+ * inside. The repository is public, so anybody can write such a body.
+ */
+function neutralise(text: string, tag: string): string {
+  return text.replaceAll(`</${tag}>`, `<\\/${tag}>`);
+}
+
 /** The fence the issue body arrives in. */
 export function fenceIssueBody(body: string): string {
   return [
     "<issue-body source=\"github-issue\" trust=\"untrusted\">",
-    body,
+    neutralise(body, "issue-body"),
     "</issue-body>",
   ].join("\n");
 }
@@ -73,7 +87,7 @@ export function fenceIssueBody(body: string): string {
 export function fenceIssueComments(comments: readonly string[]): string {
   return [
     "<issue-comments source=\"github-issue-comments\" trust=\"untrusted\">",
-    ...comments,
+    ...comments.map((comment) => neutralise(comment, "issue-comments")),
     "</issue-comments>",
   ].join("\n");
 }
@@ -102,10 +116,10 @@ export async function readPrompts(directory: string = promptsDirectory()): Promi
   const prompts: string[] = [];
   for (const name of PROMPT_FILES) {
     try {
-      prompts.push(await readFile(`${directory}${name}`, "utf8"));
+      prompts.push(await readFile(join(directory, name), "utf8"));
     } catch (failure) {
       throw new Error(
-        `the runner's prompt file is missing: ${directory}${name} — the agent is not started`,
+        `the runner's prompt file is missing: ${join(directory, name)} — the agent is not started`,
         { cause: failure },
       );
     }
@@ -145,6 +159,8 @@ export interface PromptArrayResult {
   readonly completed: number;
   /** Whether the deadline cut the run short. */
   readonly aborted: boolean;
+  /** What the abort said, when the abort itself failed. */
+  readonly abortError: string | null;
 }
 
 /**
@@ -169,23 +185,60 @@ export async function runPromptArray(options: {
 }): Promise<PromptArrayResult> {
   const schedule = options.schedule ?? defaultScheduler;
   let aborted = false;
+  let abortError: string | null = null;
+
+  // The deadline is a promise the run **races**, not a signal the run hopes
+  // for. An abort that fails would otherwise leave the run waiting on a turn
+  // that never settles — and a deadline that does not bound the run is not a
+  // deadline.
+  let reachDeadline: () => void = () => {};
+  const deadline = new Promise<"deadline">((resolve) => {
+    reachDeadline = () => resolve("deadline");
+  });
 
   const cancel = schedule(() => {
     aborted = true;
-    void options.session.abort();
+    reachDeadline();
+    // The promise is caught: an unhandled rejection inside a timer ends the
+    // process, and this is the moment the runner is trying to record a run
+    // that has already gone wrong.
+    void options.session.abort().catch((error: unknown) => {
+      abortError = error instanceof Error ? error.message : String(error);
+    });
   }, options.deadlineMs);
 
+  /** Send one turn, and give up on it when the deadline arrives. */
+  const send = async (turn: string): Promise<boolean> => {
+    const sent = options.session.prompt(turn);
+    // The turn may reject after the deadline has already won the race. It is
+    // observed here, so it cannot become an unhandled rejection.
+    void sent.catch(() => {});
+    await Promise.race([sent, deadline]);
+    return !aborted;
+  };
+
+  let completed = 0;
   try {
+    // The data goes first, in turns of its own, and is not counted: only the
+    // prompts are the prompt array.
     if (options.issueBody !== undefined) {
-      await options.session.prompt(fenceIssueBody(options.issueBody));
+      if (!(await send(fenceIssueBody(options.issueBody)))) {
+        return { completed, aborted, abortError };
+      }
     }
     if (options.issueComments !== undefined && options.issueComments.length > 0) {
-      await options.session.prompt(fenceIssueComments(options.issueComments));
+      if (!(await send(fenceIssueComments(options.issueComments)))) {
+        return { completed, aborted, abortError };
+      }
     }
+
     for (const prompt of options.prompts) {
-      await options.session.prompt(prompt);
+      if (!(await send(prompt))) {
+        break;
+      }
+      completed += 1;
     }
-    return { completed: options.prompts.length, aborted };
+    return { completed, aborted, abortError };
   } finally {
     cancel();
     options.session.dispose();
@@ -202,14 +255,23 @@ export async function runPromptArray(options: {
 export async function startAgent(options: {
   readonly factory: SessionFactory;
   readonly cwd: string;
+  /** The repository the issue lives in. */
+  readonly repo: string;
+  /** The issue being worked. */
+  readonly issueNumber: number;
+  /** How the issue is read. */
+  readonly gh?: GhRunner;
   readonly systemPromptSections?: Record<string, string>;
   readonly promptsDirectory?: string;
-  readonly issueBody?: string;
-  readonly issueComments?: readonly string[];
   readonly deadlineMs: number;
   readonly schedule?: Scheduler;
 }): Promise<PromptArrayResult> {
   const prompts = await readPrompts(options.promptsDirectory ?? promptsDirectory());
+  // The issue's body and its comments are read here, because the brief is a
+  // **comment** — the contract is the comment that opens with `## Agent Brief`
+  // — and neither is in the queue read, which asks only for what the queue
+  // needs.
+  const issue = await readIssue(options.repo, options.issueNumber, options.gh);
   const session = await options.factory({
     cwd: options.cwd,
     systemPromptSections: options.systemPromptSections ?? {
@@ -219,8 +281,8 @@ export async function startAgent(options: {
   return runPromptArray({
     session,
     prompts,
-    ...(options.issueBody === undefined ? {} : { issueBody: options.issueBody }),
-    ...(options.issueComments === undefined ? {} : { issueComments: options.issueComments }),
+    issueBody: issue.body,
+    issueComments: issue.comments,
     deadlineMs: options.deadlineMs,
     ...(options.schedule === undefined ? {} : { schedule: options.schedule }),
   });

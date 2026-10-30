@@ -120,14 +120,26 @@ export function claimedArgs(repo: string): string[] {
   ];
 }
 
-/** The arguments that read one pull request, with its labels and its comments. */
+/**
+ * The arguments that read the pull request of a branch.
+ *
+ * `pr list`, not `pr view`: `pr view` exits 1 when the branch has no pull
+ * request, and "no pull request" is the common case — the runner looks
+ * before it opens one. `pr list` answers the same question with an empty
+ * list and an exit code of 0.
+ */
 export function pullRequestArgs(repo: string, branch: string): string[] {
   return [
     "pr",
-    "view",
-    branch,
+    "list",
     "--repo",
     repo,
+    "--head",
+    branch,
+    "--state",
+    "all",
+    "--limit",
+    "1",
     "--json",
     "number,headRefName,labels,comments",
   ];
@@ -252,6 +264,51 @@ export async function readPullRequest(
   branch: string,
   gh: GhRunner = runGh,
 ): Promise<PullRequestSummary | null> {
-  const json = await gh(pullRequestArgs(repo, branch));
-  return parsePullRequest(json);
+  const parsed: unknown = JSON.parse(await gh(pullRequestArgs(repo, branch)));
+  if (!Array.isArray(parsed) || parsed.length === 0) {
+    return null;
+  }
+  return parsePullRequest(JSON.stringify(parsed[0]));
+}
+
+/** The arguments that read one issue's body and its comments. */
+export function issueArgs(repo: string, issueNumber: number): string[] {
+  return [
+    "issue",
+    "view",
+    String(issueNumber),
+    "--repo",
+    repo,
+    "--json",
+    "body,comments",
+  ];
+}
+
+/** One issue's body and its comments — where the brief lives. */
+export interface IssueDetail {
+  readonly body: string;
+  readonly comments: readonly string[];
+}
+
+/**
+ * Read one issue's body and its comments.
+ *
+ * The brief is a **comment** — the contract is the comment that opens with
+ * `## Agent Brief` — so the comments matter as much as the body. Neither is
+ * in the queue read, which asks only for the fields the queue needs.
+ */
+export async function readIssue(
+  repo: string,
+  issueNumber: number,
+  gh: GhRunner = runGh,
+): Promise<IssueDetail> {
+  const parsed: unknown = JSON.parse(await gh(issueArgs(repo, issueNumber)));
+  if (typeof parsed !== "object" || parsed === null) {
+    return { body: "", comments: [] };
+  }
+  const record = parsed as Record<string, unknown>;
+  return {
+    body: typeof record.body === "string" ? record.body : "",
+    comments: commentBodies(record.comments),
+  };
 }
