@@ -2,6 +2,9 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import { describe, expect, it } from "vitest";
 
+import { claimIssue, releaseClaim } from "../src/claim.js";
+import { claimRef, claimRefName, readClaimBase, runGit, workBranch } from "../src/git.js";
+import { createFixtureRepository, gitOutput } from "./git-sandbox.js";
 import {
   GH_DEFAULT_PAGE_SIZE,
   QUEUE_LABEL,
@@ -399,5 +402,167 @@ describe("the staleness of a claim", () => {
     // A claim whose last-update time cannot be read is not treated as stale:
     // guessing wrong in that direction takes an issue from a live run.
     expect(isStale("not a date", new Date("2027-01-01T00:00:00Z"), sixHours)).toBe(false);
+  });
+});
+
+describe("the claim", () => {
+  it("test_claim_precedes_worktree_creation", async () => {
+    const calls: string[] = [];
+    const git = async (args: readonly string[]): Promise<string> => {
+      calls.push(`git ${args.join(" ")}`);
+      if (args[0] === "ls-remote") {
+        return "abc123\trefs/heads/main\n";
+      }
+      if (args[0] === "mktag") {
+        return "tagobject0000000000000000000000000000000\n";
+      }
+      return "";
+    };
+    const gh = async (args: readonly string[]): Promise<string> => {
+      calls.push(`gh ${args.join(" ")}`);
+      return "";
+    };
+
+    const outcome = await claimIssue({
+      issue: { number: 42, title: "an issue", updatedAt: "", labels: [] },
+      repo: "gazon1/sing",
+      remote: "origin",
+      baseBranch: "main",
+      cwd: "/tmp/does-not-matter",
+      git: (args) => git(args),
+      gh: (args) => gh(args),
+      nonce: "a-nonce",
+      now: new Date("2026-10-30T09:00:00Z"),
+    });
+
+    expect(outcome.claimed).toBe(true);
+
+    // The label goes on first: it is what a human sees, and what starts the
+    // issue's staleness clock. The claim ref comes second, because the ref is
+    // what makes the claim exclusive — and nothing may touch a worktree before
+    // the claim is held.
+    const labelAt = calls.findIndex((call) => call.includes("--add-label agent-in-progress"));
+    const refAt = calls.findIndex((call) => call.includes(claimRef(42)));
+    expect(labelAt).toBeGreaterThanOrEqual(0);
+    expect(refAt).toBeGreaterThan(labelAt);
+    expect(calls.some((call) => call.includes("worktree"))).toBe(false);
+  });
+
+  it("test_the_claim_label_is_not_the_lock", async () => {
+    // Two runners, one issue, the same base commit. The label cannot stop the
+    // second one — adding a label is idempotent, so both runners "win" it —
+    // and the claim ref must.
+    const fixture = await createFixtureRepository();
+    try {
+      const issue = { number: 42, title: "an issue", updatedAt: "", labels: [] as string[] };
+      const labels: string[] = [];
+
+      const gh = async (args: readonly string[]): Promise<string> => {
+        if (args.includes("--add-label")) {
+          labels.push("added");
+        }
+        if (args.includes("--remove-label")) {
+          labels.push("removed");
+        }
+        return "";
+      };
+
+      const first = await claimIssue({
+        issue,
+        repo: "gazon1/sing",
+        remote: fixture.remote,
+        baseBranch: "main",
+        cwd: fixture.repo,
+        git: (args, options) => runGit(args, options),
+        gh,
+        nonce: "nonce-one",
+        now: new Date("2026-10-30T09:00:00Z"),
+      });
+      expect(first.claimed).toBe(true);
+
+      // The label really is not a lock: adding it again succeeds.
+      await gh(["issue", "edit", "42", "--add-label", "agent-in-progress"]);
+      expect(labels.filter((entry) => entry === "added")).toHaveLength(2);
+
+      // The second runner takes the same issue from the same base and is
+      // rejected by the ref — this is a real push, against a real repository.
+      const second = await claimIssue({
+        issue,
+        repo: "gazon1/sing",
+        remote: fixture.remote,
+        baseBranch: "main",
+        cwd: fixture.repo,
+        git: (args, options) => runGit(args, options),
+        gh,
+        nonce: "nonce-two",
+        now: new Date("2026-10-30T09:00:01Z"),
+      });
+      expect(second.claimed).toBe(false);
+
+      // And it does not leave a claim behind: the label it added comes off.
+      expect(labels).toContain("removed");
+      expect(labels[labels.length - 1]).toBe("removed");
+
+      // The claim records the base it was taken from.
+      const base = await readClaimBase(
+        (args, options) => runGit(args, options),
+        fixture.repo,
+        { remote: fixture.remote, issueNumber: 42 },
+      );
+      const remoteBase = await gitOutput(["rev-parse", "main"], {
+        cwd: fixture.remote,
+        env: fixture.env,
+      });
+      expect(base).toBe(remoteBase);
+      expect(claimRefName(42)).toBe("afk-claim-issue-42");
+      expect(workBranch(42)).toBe("agent/issue-42");
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("releases a claim: the label comes off and the ref goes away", async () => {
+    const fixture = await createFixtureRepository();
+    try {
+      const calls: string[] = [];
+      const gh = async (args: readonly string[]): Promise<string> => {
+        calls.push(`gh ${args.join(" ")}`);
+        return "";
+      };
+      // A claim to release: take it, then let it go.
+      await claimIssue({
+        issue: { number: 42, title: "an issue", updatedAt: "", labels: [] },
+        repo: "gazon1/sing",
+        remote: fixture.remote,
+        baseBranch: "main",
+        cwd: fixture.repo,
+        git: (args, options) => runGit(args, options),
+        gh,
+        nonce: "nonce-for-release",
+        now: new Date("2026-10-30T09:00:00Z"),
+      });
+
+      await releaseClaim({
+        repo: "gazon1/sing",
+        remote: fixture.remote,
+        cwd: fixture.repo,
+        issueNumber: 42,
+        git: (args, options) => runGit(args, options),
+        gh,
+      });
+
+      expect(calls.some((call) => call.includes("--remove-label agent-in-progress"))).toBe(true);
+
+      // The ref is gone: a claim that has been released must not exclude the
+      // next runner.
+      const base = await readClaimBase(
+        (args, options) => runGit(args, options),
+        fixture.repo,
+        { remote: fixture.remote, issueNumber: 42 },
+      );
+      expect(base).toBeNull();
+    } finally {
+      await fixture.dispose();
+    }
   });
 });
