@@ -31,7 +31,7 @@ import {
   workBranch,
 } from "../src/git.js";
 import { createFixtureRepository, gitOutput } from "./git-sandbox.js";
-import { cp } from "node:fs/promises";
+import { chmod, cp, mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { execFile } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -71,6 +71,7 @@ import {
   readCiVerdict,
   releaseRun,
   reviewPullRequest,
+  runOnce,
   runSteps,
   verdictFile,
   prepareWorktree,
@@ -78,8 +79,11 @@ import {
   observePullRequest,
   selectIssue,
   type Observables,
+  type RunOptions,
   type Step,
 } from "../src/runner.js";
+import { takeLock } from "../src/lock.js";
+import { EXIT_LOCKED, EXIT_NO_LOCK, main } from "../src/cli.js";
 import {
   PINNED_PI_RANGE,
   PiVersionMismatch,
@@ -1802,4 +1806,203 @@ describe("the failure path and the record", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+});
+
+/**
+ * The unattended front door: the lock, the exit codes, and the run itself.
+ */
+describe("the CLI's run", () => {
+  /** A `gh` that answers the runner's calls and remembers them. */
+  function stubGh(queue: readonly { number: number; title: string }[]): {
+    gh: (args: readonly string[]) => Promise<string>;
+    calls: string[];
+  } {
+    const calls: string[] = [];
+    const gh = async (args: readonly string[]): Promise<string> => {
+      calls.push(`gh ${args.join(" ")}`);
+      if (args[0] === "issue" && args[1] === "list") {
+        return JSON.stringify(
+          queue.map((issue) => ({
+            number: issue.number,
+            title: issue.title,
+            updatedAt: "",
+            labels: [],
+          })),
+        );
+      }
+      if (args[0] === "pr" && args[1] === "list") {
+        return "[]";
+      }
+      if (args[0] === "pr" && args[1] === "create") {
+        return "https://github.com/gazon1/sing/pull/1040\n";
+      }
+      if (args[0] === "issue" && args[1] === "view") {
+        return JSON.stringify({
+          body: "the issue",
+          comments: [{ body: "## Agent Brief\n\nthe brief" }],
+        });
+      }
+      return "";
+    };
+    return { gh, calls };
+  }
+
+  /** A fixture repository with the setup script the runner runs in a worktree. */
+  async function fixtureWithSetupScript(): Promise<
+    Awaited<ReturnType<typeof createFixtureRepository>>
+  > {
+    return createFixtureRepository({
+      files: { "scripts/setup-worktree.sh": "#!/usr/bin/env bash\nset -euo pipefail\n" },
+    });
+  }
+
+  /** The run options a composition test needs. */
+  function runOptions(
+    fixture: Awaited<ReturnType<typeof createFixtureRepository>>,
+    gh: (args: readonly string[]) => Promise<string>,
+  ): RunOptions {
+    let turn = 0;
+    return {
+      repo: "gazon1/sing",
+      checkout: fixture.repo,
+      remote: fixture.remote,
+      baseBranch: "main",
+      worktreeRoot: join(fixture.root, "worktrees"),
+      git: (args, options) => runGit(args, options),
+      gh,
+      run: async () => JSON.stringify({ verdict: "ci.yml  run 1  success" }),
+      session: async ({ cwd, tools }) => {
+        if (tools !== undefined) {
+          // The reviewer: it answers with a verdict and nothing else.
+          return {
+            async prompt() {
+              const tool = tools[0] as unknown as {
+                execute: (id: string, params: unknown) => Promise<unknown>;
+              };
+              await tool.execute("call-1", { verdict: "pass", findings: [] });
+            },
+            async abort() {},
+            dispose() {},
+          };
+        }
+        // The implementer: it writes the work and commits it, once.
+        return {
+          async prompt() {
+            turn += 1;
+            if (turn > 1) {
+              return;
+            }
+            await writeFile(join(cwd, "work.txt"), "the work\n", "utf8");
+            await runGit(["add", "-A"], { cwd });
+            await runGit(
+              [
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.com",
+                "commit",
+                "-q",
+                "-m",
+                "the work",
+              ],
+              { cwd },
+            );
+          },
+          async abort() {},
+          dispose() {},
+        };
+      },
+      deadlineMs: 60_000,
+      now: new Date("2026-10-30T09:00:00Z"),
+      nonce: "nonce-42",
+      runId: "2026-10-30T09-00-00-000Z-abcdef12",
+    };
+  }
+
+  it("test_one_invocation_acts_on_one_issue", async () => {
+    const fixture = await fixtureWithSetupScript();
+    try {
+      const { gh, calls } = stubGh([
+        { number: 42, title: "the first" },
+        { number: 43, title: "the second" },
+        { number: 44, title: "the third" },
+      ]);
+
+      const result = await runOnce(runOptions(fixture, gh));
+
+      // One issue, and the record names it.
+      expect(result.issue).toBe(42);
+      expect(result.record).toContain(join("build", "diagnostics", "issue-42"));
+
+      // The other two were never claimed: one claim, one issue.
+      const claims = calls.filter((call) => call.includes("--add-label agent-in-progress"));
+      expect(claims).toHaveLength(1);
+      expect(claims[0]).toContain("42");
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("test_the_runner_never_merges", async () => {
+    const fixture = await fixtureWithSetupScript();
+    try {
+      const { gh, calls } = stubGh([{ number: 42, title: "an issue" }]);
+
+      await runOnce(runOptions(fixture, gh));
+
+      // The pull request was opened, reviewed and counted — and never merged.
+      expect(calls.some((call) => call.includes("pr create"))).toBe(true);
+      expect(calls.some((call) => call.includes("pr comment"))).toBe(true);
+      expect(calls.some((call) => call.includes("agent-reviewed"))).toBe(true);
+      expect(calls.some((call) => call.includes("merge"))).toBe(false);
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("test_a_second_runner_exits_while_the_lock_is_held", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "afk-lock-"));
+    try {
+      // The lock is held for real, by a real flock, for the whole test.
+      const held = await takeLock(directory);
+      try {
+        const { gh, calls } = stubGh([{ number: 42, title: "an issue" }]);
+        const code = await main(
+          ["--repo", "gazon1/sing", "--checkout", directory, "--lock-dir", directory],
+          { gh },
+        );
+
+        expect(code).toBe(EXIT_LOCKED);
+        // And it selected nothing: not one call, not even a read.
+        expect(calls).toHaveLength(0);
+      } finally {
+        await held.release();
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(process.getuid?.() === 0)(
+    "test_an_unwritable_lock_directory_fails_loudly",
+    async () => {
+      const directory = await mkdtemp(join(tmpdir(), "afk-lock-"));
+      const locked = join(directory, "locked");
+      await mkdir(locked, { recursive: true });
+      await chmod(locked, 0o500);
+      try {
+        const { gh, calls } = stubGh([{ number: 42, title: "an issue" }]);
+        const code = await main(["--repo", "gazon1/sing", "--lock-dir", locked], { gh });
+
+        // Loud, and non-zero: a runner that could not take the lock must never
+        // look like a runner that had nothing to do.
+        expect(code).toBe(EXIT_NO_LOCK);
+        expect(code).not.toBe(0);
+        expect(calls).toHaveLength(0);
+      } finally {
+        await chmod(locked, 0o700);
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
 });

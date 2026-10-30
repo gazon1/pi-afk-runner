@@ -29,12 +29,13 @@ import { randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-import { releaseClaim } from "./claim.js";
+import { claimIssue, releaseClaim } from "./claim.js";
 import {
   UNTRUSTED_INPUT_RULE,
   UNTRUSTED_INPUT_SECTION,
   createVerdictTool,
   runPromptArray,
+  startAgent,
   type ReviewVerdict,
   type Scheduler,
   type SessionFactory,
@@ -55,7 +56,9 @@ import {
   addPullRequestLabelArgs,
   createPullRequest,
   postCommentArgs,
+  pullRequestBody,
   readPullRequest,
+  readQueue,
   reviewCommentBody,
   RECOUNT_LABEL,
   REVIEW_MARKER,
@@ -605,7 +608,8 @@ export async function postReviewComment(
   await options.gh(postCommentArgs(options.repo, options.pullRequest, comment));
 }
 
-/** Apply the label that makes the gate count the review again. */
+/**
+ * Apply the label that makes the gate count the review again. */
 export async function addRecountLabel(options: {
   readonly repo: string;
   readonly pullRequest: number;
@@ -750,11 +754,14 @@ export async function releaseRun(options: {
   readonly remote: string;
   readonly cwd: string;
   readonly issueNumber: number;
-  readonly worktreePath: string;
+  /** The worktree, when the run created one. */
+  readonly worktreePath?: string;
   readonly git: GitRunner;
   readonly gh: GhRunner;
 }): Promise<void> {
-  await removeWorktree(options.git, options.cwd, options.worktreePath);
+  if (options.worktreePath !== undefined) {
+    await removeWorktree(options.git, options.cwd, options.worktreePath);
+  }
   await releaseClaim({
     repo: options.repo,
     remote: options.remote,
@@ -850,9 +857,358 @@ export async function runSteps(options: {
     };
   }
 
-  throw new Error(
-    `the run stopped at the ${failure.step} step: ${failure.error.message} — ` +
+  throw new RunFailed({
+    step: failure.step,
+    message:
+      `the run stopped at the ${failure.step} step: ${failure.error.message} — ` +
       `the record is at ${record}`,
-    { cause: failure.error },
+    cause: failure.error,
+    record,
+  });
+}
+
+/** A run that stopped at a step. */
+export class RunFailed extends Error {
+  /** The step the run stopped at. */
+  readonly step: string;
+  /** Where the record of the run was written. */
+  readonly record: string;
+
+  constructor(options: {
+    readonly step: string;
+    readonly message: string;
+    readonly cause: unknown;
+    readonly record: string;
+  }) {
+    super(options.message, { cause: options.cause });
+    this.name = "RunFailed";
+    this.step = options.step;
+    this.record = options.record;
+  }
+}
+
+/** What a run needs to know to do its work. */
+export interface RunOptions {
+  /** The repository the issue lives in — `owner/name`. */
+  readonly repo: string;
+  /** The checkout the worktree is made from. */
+  readonly checkout: string;
+  /** The remote the base comes from. */
+  readonly remote: string;
+  /** The branch the base is read from. */
+  readonly baseBranch: string;
+  /** Where the worktrees are created. */
+  readonly worktreeRoot: string;
+  readonly git: GitRunner;
+  readonly gh: GhRunner;
+  readonly run: CommandRunner;
+  /** The session the agent works in. */
+  readonly session: SessionFactory;
+  /** The wall-clock ceiling on one turn of the agent. */
+  readonly deadlineMs: number;
+  readonly now?: Date;
+  readonly nonce?: string;
+  readonly runId?: string;
+}
+
+/** What a run did. */
+export interface RunResult {
+  /** The issue the run worked, or null when it worked none. */
+  readonly issue: number | null;
+  readonly outcome: "completed" | "empty";
+  readonly steps: readonly StepRecord[];
+  /** Where the record was written. */
+  readonly record: string;
+}
+
+/** The commit the worktree is at. */
+async function headSha(git: GitRunner, cwd: string): Promise<string> {
+  return (await git(["rev-parse", "HEAD"], { cwd })).trim();
+}
+
+/**
+ * Commit what the runner itself wrote.
+ *
+ * The identity is passed on the command line: the repository the runner works
+ * in is not the runner's own, and a commit with no author is not a commit.
+ */
+async function commitAll(
+  git: GitRunner,
+  cwd: string,
+  message: string,
+): Promise<void> {
+  await git(["add", "-A"], { cwd });
+  const status = await git(["status", "--porcelain"], { cwd });
+  if (status.trim() === "") {
+    return;
+  }
+  await git(
+    [
+      "-c",
+      "user.name=afk-runner",
+      "-c",
+      "user.email=afk-runner@localhost",
+      "commit",
+      "-q",
+      "-m",
+      message,
+    ],
+    { cwd },
   );
 }
+
+/**
+ * The change the work landed, if it landed one.
+ *
+ * A change is a directory under `openspec/changes/`, and its name is the
+ * change's slug — the same name its registry entry and its verdict file carry.
+ */
+export async function changedChangeSlug(
+  git: GitRunner,
+  cwd: string,
+  options: { readonly base: string; readonly head: string },
+): Promise<string | null> {
+  const changed = await git(
+    ["diff", "--name-only", `${options.base}...${options.head}`],
+    { cwd },
+  );
+  for (const line of changed.split("\n")) {
+    const match = /^openspec\/changes\/([^/]+)\//.exec(line.trim());
+    if (match !== null) {
+      return match[1] ?? null;
+    }
+  }
+  return null;
+}
+
+/**
+ * The run: the steps, in the order they happen.
+ *
+ * One invocation works **one** issue. The queue is read first, because the
+ * record is written under the issue's number and the number is what the
+ * selection yields — and because an empty queue is not a run: there is nothing
+ * to record and nothing to release.
+ *
+ * The steps are: claim → worktree → session → push → pull request → review →
+ * re-count. The re-count is the label that re-triggers the pull request's CI,
+ * and it is applied by the review step, because the order between the comment
+ * and the label is fixed there; the re-count step writes the change's verdict
+ * file, which is the record that re-count is counted against.
+ */
+export async function runOnce(options: RunOptions): Promise<RunResult> {
+  const now = options.now ?? new Date();
+  const runId = options.runId ?? newRunId(now);
+
+  let queue: readonly IssueSummary[];
+  try {
+    queue = await readQueue(options.repo, options.gh);
+  } catch (failure) {
+    throw new RunFailed({
+      step: "select",
+      message: `the run stopped at the select step: ${
+        failure instanceof Error ? failure.message : String(failure)
+      }`,
+      cause: failure,
+      record: "",
+    });
+  }
+
+  const issue = selectIssue(queue);
+  if (issue === undefined) {
+    return { issue: null, outcome: "empty", steps: [], record: "" };
+  }
+
+  const state = {
+    claimed: false,
+    base: "",
+    worktreePath: "",
+    pullRequest: 0,
+    reviewedSha: "",
+    slug: null as string | null,
+    verdict: "pass" as "pass" | "fail",
+  };
+
+  const steps: Step[] = [
+    {
+      name: "claim",
+      run: async () => {
+        const outcome = await claimIssue({
+          issue,
+          repo: options.repo,
+          remote: options.remote,
+          baseBranch: options.baseBranch,
+          cwd: options.checkout,
+          git: options.git,
+          gh: options.gh,
+          nonce: options.nonce ?? randomUUID(),
+          now,
+        });
+        if (!outcome.claimed) {
+          throw new Error(outcome.reason);
+        }
+        state.claimed = true;
+        state.base = outcome.base;
+        return `claimed from ${outcome.base.slice(0, 8)}`;
+      },
+    },
+    {
+      name: "worktree",
+      run: async () => {
+        state.worktreePath = join(options.worktreeRoot, `issue-${issue.number}`);
+        const prepared = await prepareWorktree({
+          repo: options.checkout,
+          remote: options.remote,
+          baseBranch: options.baseBranch,
+          baseSha: state.base,
+          issueNumber: issue.number,
+          worktreePath: state.worktreePath,
+          cwd: options.checkout,
+          git: options.git,
+        });
+        return prepared.path;
+      },
+    },
+    {
+      name: "session",
+      run: async () => {
+        const result = await startAgent({
+          factory: options.session,
+          cwd: state.worktreePath,
+          repo: options.repo,
+          issueNumber: issue.number,
+          gh: options.gh,
+          deadlineMs: options.deadlineMs,
+        });
+        if (result.aborted) {
+          throw new Error("the agent's session was cut off by the deadline");
+        }
+        return `${result.completed} turns`;
+      },
+    },
+    {
+      name: "push",
+      run: async () => {
+        // A change the work landed needs its registry entry, and the entry
+        // belongs to the pull request.
+        state.slug = await changedChangeSlug(options.git, state.worktreePath, {
+          base: state.base,
+          head: await headSha(options.git, state.worktreePath),
+        });
+        if (state.slug !== null) {
+          await ensureRegistryEntry(options.run, state.worktreePath);
+          await commitAll(
+            options.git,
+            state.worktreePath,
+            "chore: the change's registry entry",
+          );
+        }
+        const sha = await headSha(options.git, state.worktreePath);
+        await pushWorkBranch(options.git, state.worktreePath, {
+          remote: options.remote,
+          issueNumber: issue.number,
+          sha,
+        });
+        return sha.slice(0, 8);
+      },
+    },
+    {
+      name: "pull request",
+      run: async () => {
+        const opened = await openPullRequest({
+          repo: options.repo,
+          branch: workBranch(issue.number),
+          title: issue.title,
+          body: pullRequestBody({
+            issueNumber: issue.number,
+            title: issue.title,
+          }),
+          gh: options.gh,
+          run: options.run,
+        });
+        state.pullRequest = opened.number;
+        return `#${opened.number}`;
+      },
+    },
+    {
+      name: "review",
+      run: async () => {
+        state.reviewedSha = await headSha(options.git, state.worktreePath);
+        const outcome = await reviewPullRequest({
+          repo: options.repo,
+          pullRequest: state.pullRequest,
+          cwd: state.worktreePath,
+          factory: options.session,
+          gh: options.gh,
+          run: options.run,
+          deadlineMs: options.deadlineMs,
+        });
+        state.verdict = outcome.verdict;
+        return outcome.verdict;
+      },
+    },
+    {
+      name: "re-count",
+      run: async () => {
+        if (state.slug === null) {
+          return "no change to count";
+        }
+        const digest = await computeDocumentsDigest(
+          options.run,
+          state.worktreePath,
+          state.slug,
+        );
+        const directory = join(state.worktreePath, ".specify", "reviews");
+        await mkdir(directory, { recursive: true });
+        await writeFile(
+          join(directory, `${state.slug}.md`),
+          verdictFile({
+            slug: state.slug,
+            verdict: state.verdict,
+            date: now.toISOString().slice(0, 10),
+            pullRequest: state.pullRequest,
+            reviewed: state.reviewedSha,
+            documents: digest,
+          }),
+          "utf8",
+        );
+        await commitAll(options.git, state.worktreePath, "chore: the change's verdict");
+        const sha = await headSha(options.git, state.worktreePath);
+        await pushWorkBranch(options.git, state.worktreePath, {
+          remote: options.remote,
+          issueNumber: issue.number,
+          sha,
+        });
+        return state.slug;
+      },
+    },
+  ];
+
+  const outcome = await runSteps({
+    issue: issue.number,
+    runId,
+    root: options.checkout,
+    steps,
+    release: async () => {
+      if (!state.claimed) {
+        return;
+      }
+      await releaseRun({
+        repo: options.repo,
+        remote: options.remote,
+        cwd: options.checkout,
+        issueNumber: issue.number,
+        ...(state.worktreePath === "" ? {} : { worktreePath: state.worktreePath }),
+        git: options.git,
+        gh: options.gh,
+      });
+    },
+  });
+
+  return {
+    issue: issue.number,
+    outcome: "completed",
+    steps: outcome.steps,
+    record: outcome.record,
+  };
+}
+
