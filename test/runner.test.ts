@@ -42,7 +42,6 @@ import {
   RECOUNT_LABEL,
   REVIEW_MARKER,
   claimedArgs,
-  VERDICT_LINE,
   addPullRequestLabelArgs,
   createPullRequestArgs,
   issueArgs,
@@ -84,6 +83,23 @@ import {
   parsePiVersion,
   satisfiesRange,
 } from "../src/version.js";
+
+/**
+ * The review gate's own rule for a line that states a verdict, mirrored here.
+ *
+ * This is a copy of `scripts/ci/check-agent-review.py:146-149` in the
+ * repository the runner operates on, and it is a copy on purpose: the test
+ * counts the comment's verdicts the way the gate counts them, so a comment
+ * that states two of them fails here before it fails there.
+ *
+ * The runner itself does **not** use this rule. It quotes anything that
+ * mentions a verdict — a wider rule — so that a gate whose own rule is later
+ * widened cannot make the runner post a comment that states two verdicts. The
+ * copy lives in the test because the test is the thing that has to agree with
+ * the gate; the runner has only to be safe against it.
+ */
+const GATE_VERDICT_LINE =
+  /^\s*\**\s*verdict\s*\**\s*:\s*\**\s*(pass|fail)\s*\**\s*\.?\s*$/i;
 
 /**
  * The version gate is the one thing the extension must never get wrong in the wrong
@@ -1242,7 +1258,7 @@ describe("the review", () => {
 
   it("test_the_verdict_line_is_the_whole_value", () => {
     const comment = reviewCommentBody({ verdict: "fail" });
-    const verdictLines = comment.split("\n").filter((line) => VERDICT_LINE.test(line));
+    const verdictLines = comment.split("\n").filter((line) => GATE_VERDICT_LINE.test(line));
 
     // Exactly one verdict, and its value is the whole line.
     expect(verdictLines).toHaveLength(1);
@@ -1256,9 +1272,29 @@ describe("the review", () => {
     });
     const stated = withFinding
       .split("\n")
-      .filter((line) => VERDICT_LINE.test(line));
+      .filter((line) => GATE_VERDICT_LINE.test(line));
     expect(stated).toHaveLength(1);
     expect(stated[0]?.trim()).toBe("**Verdict:** pass");
+
+    // And the quoting is **wider** than the gate's own rule: a finding that
+    // mentions a verdict in any shape is quoted, not only the one shape the
+    // gate happens to recognise today. The gate's rule may be widened later —
+    // `**Verdict** — pass`, a second spelling of the word — and a runner that
+    // copied the rule exactly would then fail to quote a finding that looks
+    // like a verdict: the comment would state two, and the gate would say the
+    // comment decides nothing. The pull request would be red with no review
+    // on it, and nothing would say why.
+    const wider = reviewCommentBody({
+      verdict: "pass",
+      findings: ["**Verdict** — fail", "the verdict is stated twice"],
+    });
+    const statedWider = wider
+      .split("\n")
+      .filter((line) => GATE_VERDICT_LINE.test(line));
+    expect(statedWider).toHaveLength(1);
+    expect(statedWider[0]?.trim()).toBe("**Verdict:** pass");
+    expect(wider).toContain("> **Verdict** — fail");
+    expect(wider).toContain("> the verdict is stated twice");
   });
 
   it("test_ci_is_retriggered_after_the_review_comment", async () => {

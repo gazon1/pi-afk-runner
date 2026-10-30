@@ -387,14 +387,20 @@ export async function createPullRequest(
 }
 
 /**
- * A line that states a verdict — and nothing else on the line.
+ * A finding that mentions a verdict is quoted, whatever shape it has.
  *
- * The same pattern the review gate uses. The verdict is the whole value of the
- * line: `**Verdict:** pass` is a verdict, and `**Verdict:** pass or fail` is a
- * sentence about verdicts.
+ * The gate counts the verdict lines of a comment, and a comment that states two
+ * verdicts decides nothing. So the runner quotes anything that mentions a
+ * verdict — **wider** than the gate's own rule on purpose. The gate's rule may
+ * be widened later (`**Verdict** — pass`, a second spelling of the word), and
+ * a runner that copied the rule would then fail to quote a finding that looks
+ * like a verdict: the comment would state two, and the gate would say the
+ * comment decides nothing. The pull request would then be red with no review
+ * on it, and nothing would say why.
  */
-export const VERDICT_LINE =
-  /^\s*\**\s*verdict\s*\**\s*:\s*\**\s*(pass|fail)\s*\**\s*\.?\s*$/i;
+function mentionsAVerdict(line: string): boolean {
+  return line.toLowerCase().includes("verdict");
+}
 
 /**
  * The body of a review comment.
@@ -403,7 +409,7 @@ export const VERDICT_LINE =
  * the comment says, so a comment that quotes the format is not a review — and
  * it ends with exactly one verdict line.
  *
- * A finding that looks like a verdict is quoted, so that the comment states one
+ * A finding that mentions a verdict is quoted, so that the comment states one
  * verdict and not two. A comment that states two decides nothing, and the
  * check says so rather than picking one.
  */
@@ -414,7 +420,7 @@ export function reviewCommentBody(options: {
   const findings = (options.findings ?? []).map((finding) =>
     finding
       .split("\n")
-      .map((line) => (VERDICT_LINE.test(line) ? `> ${line}` : line))
+      .map((line) => (mentionsAVerdict(line) ? `> ${line}` : line))
       .join("\n"),
   );
   const lines: string[] = [REVIEW_MARKER, "## Agent review", ""];
