@@ -1,0 +1,55 @@
+name: CI
+
+# The extension's own gate. It is not the repository's gate suite — this repository is a
+# package, not an application — so it is one job that runs everything the package declares:
+# the type check, the lint, the tests, and the build.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+
+      # `npm ci` rather than `npm install`: the lockfile is the record of what was tested,
+      # and a gate that installs something else than what was reviewed is not a gate.
+      - run: npm ci
+
+      - name: typecheck
+        run: npm run typecheck
+
+      - name: lint
+        run: npm run lint
+
+      - name: test
+        run: npm test
+
+      - name: build
+        run: npm run build
+
+      # The built package is what Pi loads, so the gate checks that the build produced the
+      # entry point the manifest promises.
+      - name: the built package has the entry point its manifest names
+        run: |
+          set -euo pipefail
+          test -f dist/extension.js
+          test -f dist/index.js
+          test -f dist/index.d.ts
