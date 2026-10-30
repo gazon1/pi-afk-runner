@@ -57,6 +57,7 @@ import {
   createPullRequest,
   postCommentArgs,
   pullRequestBody,
+  readIssue,
   readPullRequest,
   readQueue,
   reviewCommentBody,
@@ -791,24 +792,31 @@ export async function runSteps(options: {
   readonly steps: readonly Step[];
   /** What a failure releases: the claim, the worktree, the ref. */
   readonly release?: () => Promise<void>;
+  /** Told about every step, as it finishes. */
+  readonly onStep?: (record: StepRecord) => void;
 }): Promise<RunOutcome> {
   const steps: StepRecord[] = [];
   let failure: { readonly step: string; readonly error: Error } | null = null;
 
   for (const step of options.steps) {
+    let record: StepRecord;
     try {
       const output = await step.run();
-      steps.push({ step: step.name, outcome: "ok", detail: redact(firstLine(output)) });
+      record = { step: step.name, outcome: "ok", detail: redact(firstLine(output)) };
     } catch (error) {
       const cause = error instanceof Error ? error : new Error(String(error));
-      steps.push({
+      record = {
         step: step.name,
         outcome: "failed",
         detail: redact(firstLine(cause.message)),
-      });
+      };
+      steps.push(record);
+      options.onStep?.(record);
       failure = { step: step.name, error: cause };
       break;
     }
+    steps.push(record);
+    options.onStep?.(record);
   }
 
   // The claim goes, even though the run failed: a claim nobody is working is
@@ -891,6 +899,8 @@ export class RunFailed extends Error {
 export interface RunOptions {
   /** The repository the issue lives in — `owner/name`. */
   readonly repo: string;
+  /** The issue to work. The queue's first eligible one when it is absent. */
+  readonly issueNumber?: number;
   /** The checkout the worktree is made from. */
   readonly checkout: string;
   /** The remote the base comes from. */
@@ -906,6 +916,16 @@ export interface RunOptions {
   readonly session: SessionFactory;
   /** The wall-clock ceiling on one turn of the agent. */
   readonly deadlineMs: number;
+  /**
+   * Whether the target repository's pre-push hook may gate the pushes.
+   *
+   * The hook is the repository's rule. Skipping it is a decision about the
+   * repository's state — its gate is red for a reason that has nothing to do
+   * with this change — and it is therefore explicit.
+   */
+  readonly verifyPushes?: boolean;
+  /** Told about every step, as it finishes. */
+  readonly onStep?: (record: StepRecord) => void;
   readonly now?: Date;
   readonly nonce?: string;
   readonly runId?: string;
@@ -1000,8 +1020,22 @@ export async function runOnce(options: RunOptions): Promise<RunResult> {
   const runId = options.runId ?? newRunId(now);
 
   let queue: readonly IssueSummary[];
+  let issue: IssueSummary | undefined;
   try {
-    queue = await readQueue(options.repo, options.gh);
+    if (options.issueNumber !== undefined) {
+      // The operator named the issue. It is taken as given: the claim is what
+      // excludes another runner, and a claim that fails fails loudly.
+      const named = await readIssue(options.repo, options.issueNumber, options.gh);
+      issue = {
+        number: options.issueNumber,
+        title: named.title,
+        updatedAt: "",
+        labels: [],
+      };
+    } else {
+      queue = await readQueue(options.repo, options.gh);
+      issue = selectIssue(queue);
+    }
   } catch (failure) {
     throw new RunFailed({
       step: "select",
@@ -1013,7 +1047,6 @@ export async function runOnce(options: RunOptions): Promise<RunResult> {
     });
   }
 
-  const issue = selectIssue(queue);
   if (issue === undefined) {
     return { issue: null, outcome: "empty", steps: [], record: "" };
   }
@@ -1107,6 +1140,7 @@ export async function runOnce(options: RunOptions): Promise<RunResult> {
           remote: options.remote,
           issueNumber: issue.number,
           sha,
+          ...(options.verifyPushes === undefined ? {} : { verify: options.verifyPushes }),
         });
         return sha.slice(0, 8);
       },
@@ -1177,6 +1211,7 @@ export async function runOnce(options: RunOptions): Promise<RunResult> {
           remote: options.remote,
           issueNumber: issue.number,
           sha,
+          ...(options.verifyPushes === undefined ? {} : { verify: options.verifyPushes }),
         });
         return state.slug;
       },
@@ -1188,6 +1223,7 @@ export async function runOnce(options: RunOptions): Promise<RunResult> {
     runId,
     root: options.checkout,
     steps,
+    ...(options.onStep === undefined ? {} : { onStep: options.onStep }),
     release: async () => {
       if (!state.claimed) {
         return;

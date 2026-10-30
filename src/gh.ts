@@ -280,12 +280,13 @@ export function issueArgs(repo: string, issueNumber: number): string[] {
     "--repo",
     repo,
     "--json",
-    "body,comments",
+    "body,comments,title",
   ];
 }
 
 /** One issue's body and its comments — where the brief lives. */
 export interface IssueDetail {
+  readonly title: string;
   readonly body: string;
   readonly comments: readonly string[];
 }
@@ -309,10 +310,11 @@ export async function readIssue(
 ): Promise<IssueDetail> {
   const parsed: unknown = JSON.parse(await gh(issueArgs(repo, issueNumber)));
   if (typeof parsed !== "object" || parsed === null) {
-    return { body: "", comments: [] };
+    return { title: "", body: "", comments: [] };
   }
   const record = parsed as Record<string, unknown>;
   return {
+    title: typeof record.title === "string" ? record.title : "",
     body: typeof record.body === "string" ? record.body : "",
     comments: commentBodies(record.comments),
   };

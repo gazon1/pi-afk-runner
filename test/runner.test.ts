@@ -37,7 +37,7 @@ import {
 import { createFixtureRepository, gitOutput } from "./git-sandbox.js";
 import { chmod, cp, mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -86,7 +86,7 @@ import {
   type RunOptions,
   type Step,
 } from "../src/runner.js";
-import { takeLock } from "../src/lock.js";
+import { HOLDER_COMMAND, takeLock } from "../src/lock.js";
 import { EXIT_LOCKED, EXIT_NO_LOCK, main } from "../src/cli.js";
 import {
   PINNED_PI_RANGE,
@@ -2084,6 +2084,65 @@ describe("the CLI's run", () => {
       } finally {
         await held.release();
       }
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("test_the_lock_does_not_outlive_the_runner", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "afk-lock-"));
+    try {
+      // A runner that is killed must not leave the lock held by an orphan:
+      // the next runner would find it taken and refuse to work, for ever, over
+      // a process that no longer exists.
+      const holder = spawn(
+        process.execPath,
+        [
+          "--input-type=module",
+          "--eval",
+          `import { spawn } from "node:child_process";` +
+            `spawn("flock", ${JSON.stringify([
+              "--nonblock",
+              "--no-fork",
+              "--conflict-exit-code=75",
+              join(directory, "runner.lock"),
+              "sh",
+              "-c",
+              HOLDER_COMMAND,
+            ])}, { stdio: "ignore" });` +
+            `setTimeout(() => {}, 60000);`,
+        ],
+        { stdio: "ignore" },
+      );
+
+      // Wait for the holder to have the lock.
+      let held = false;
+      for (let attempt = 0; attempt < 50 && !held; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        try {
+          const probe = await takeLock(directory);
+          await probe.release();
+        } catch {
+          held = true;
+        }
+      }
+      expect(held).toBe(true);
+
+      holder.kill("SIGKILL");
+
+      // And now the lock is free again.
+      let free = false;
+      for (let attempt = 0; attempt < 50 && !free; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        try {
+          const probe = await takeLock(directory);
+          await probe.release();
+          free = true;
+        } catch {
+          free = false;
+        }
+      }
+      expect(free).toBe(true);
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

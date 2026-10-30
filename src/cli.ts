@@ -25,7 +25,12 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { DefaultResourceLoader, createAgentSession } from "@earendil-works/pi-coding-agent";
+import {
+  DefaultResourceLoader,
+  createAgentSession,
+  type ModelRuntime,
+} from "@earendil-works/pi-coding-agent";
+import { EnvHttpProxyAgent, fetch as undiciFetch, setGlobalDispatcher } from "undici";
 
 import { runGh, type GhRunner } from "./gh.js";
 import { runCommand, runGit, type CommandRunner, type GitRunner } from "./git.js";
@@ -80,6 +85,8 @@ export const DEFAULT_DEADLINE_MS = 2 * 60 * 60 * 1000;
 export interface CliOptions {
   /** The repository the issue lives in — `owner/name`. */
   readonly repo: string;
+  /** The issue to work. The queue's first eligible one when it is absent. */
+  readonly issue?: number;
   /** The checkout the worktree is made from. */
   readonly checkout: string;
   /** The remote the base comes from. */
@@ -92,6 +99,10 @@ export interface CliOptions {
   readonly worktreeRoot: string;
   /** Pi's agent directory — its settings, its extensions, its credentials. */
   readonly agentDirectory: string;
+  /** The model the agent runs on — `provider/id`. */
+  readonly model?: string;
+  /** Whether the target repository's pre-push hook may gate the pushes. */
+  readonly verifyPushes?: boolean;
   /** The wall-clock ceiling on one turn of the agent. */
   readonly deadlineMs: number;
   /** How long a claim may sit before another run may take it over. */
@@ -105,12 +116,15 @@ export const USAGE = [
   "  pi-afk-runner --repo <owner/name> [options]",
   "",
   "  --repo <owner/name>    the repository the issue lives in (required)",
+  "  --issue <number>        the issue to work (default: the queue's first eligible one)",
   "  --checkout <path>       the checkout the worktree is made from (default: the cwd)",
   "  --remote <name>         the remote the base comes from (default: origin)",
   "  --base <branch>         the branch the base is read from (default: main)",
   "  --lock-dir <path>       where the lock lives (default: <checkout>/build/afk-runner)",
   "  --worktree-root <path>  where the worktrees are created (default: <checkout>/../afk-worktrees)",
   "  --agent-dir <path>      Pi's agent directory (default: ~/.pi/agent)",
+  "  --model <provider/id>   the model the agent runs on (default: the provider's first)",
+  "  --no-verify             skip the target repository's pre-push hook when pushing",
   "  --deadline-ms <n>       the ceiling on one turn of the agent (default: 7200000)",
   "  --stale-after-ms <n>    how long a claim may sit (default: 604800000 — a week)",
   "  --help                  this text",
@@ -141,6 +155,11 @@ export function parseArgs(argv: readonly string[]): CliOptions {
     if (name === "help") {
       throw new Error("help");
     }
+    if (name === "no-verify") {
+      // A flag, not an option with a value.
+      values.set(name, "true");
+      continue;
+    }
     const value = argv[index + 1];
     if (value === undefined || value.startsWith("--")) {
       throw new Error(`the option --${name} needs a value`);
@@ -154,6 +173,7 @@ export function parseArgs(argv: readonly string[]): CliOptions {
     throw new Error("--repo must name a repository, as owner/name");
   }
 
+  const issue = values.get("issue");
   const checkout = resolve(values.get("checkout") ?? process.cwd());
   const remote = values.get("remote") ?? "origin";
   const baseBranch = values.get("base") ?? "main";
@@ -162,21 +182,37 @@ export function parseArgs(argv: readonly string[]): CliOptions {
   const worktreeRoot =
     values.get("worktree-root") ?? join(dirname(checkout), "afk-worktrees");
   const agentDirectory =
-    values.get("agent-dir") ?? process.env.PI_AGENT_DIR ?? join(homedir(), ".pi", "agent");
+    values.get("agent-dir") ??
+    process.env.PI_AGENT_DIR ??
+    join(homedir(), ".pi", "agent");
+  const model = values.get("model");
+  const noVerify = values.has("no-verify");
   const deadlineMs = number(values.get("deadline-ms"), DEFAULT_DEADLINE_MS, "--deadline-ms");
   const staleAfterMs = number(values.get("stale-after-ms"), DEFAULT_STALE_AFTER_MS, "--stale-after-ms");
 
   return {
     repo,
+    ...(issue === undefined ? {} : { issue: positiveNumber(issue, "--issue") }),
     checkout,
     remote,
     baseBranch,
     lockDirectory,
     worktreeRoot,
     agentDirectory,
+    ...(model === undefined ? {} : { model }),
+    ...(noVerify ? { verifyPushes: false } : {}),
     deadlineMs,
     staleAfterMs,
   };
+}
+
+/** Read a whole number, or say that it is not one. */
+function positiveNumber(raw: string, name: string): number {
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(`${name} must be a number`);
+  }
+  return parsed;
 }
 
 /** Read a number, or say that the number is not one. */
@@ -192,18 +228,50 @@ function number(raw: string | undefined, fallback: number, name: string): number
 }
 
 /**
+ * Route the session's HTTP through the proxy, when there is one.
+ *
+ * The SDK installs its own dispatcher, and that one does not read the
+ * environment: a provider that is only reachable through a proxy — which is
+ * the usual case for a self-hosted or regional API — is simply unreachable,
+ * and the request dies at the SDK's timeout with nothing in the log to say
+ * why. So the runner installs a dispatcher that reads `HTTPS_PROXY` and
+ * friends, and the fetch that goes with it.
+ *
+ * Nothing happens when no proxy is configured: a host that reaches its
+ * provider directly keeps the SDK's own dispatcher.
+ */
+export function useProxyFromEnvironment(env: NodeJS.ProcessEnv = process.env): boolean {
+  const proxy = env.HTTPS_PROXY ?? env.https_proxy ?? env.HTTP_PROXY ?? env.http_proxy;
+  if (proxy === undefined || proxy === "") {
+    return false;
+  }
+  setGlobalDispatcher(new EnvHttpProxyAgent());
+  globalThis.fetch = undiciFetch as typeof globalThis.fetch;
+  return true;
+}
+
+/**
  * The session the agent works in.
  *
- * Pi's own session, with one thing added: the runner's guardrail reaches the
- * model through the system prompt, and the runner's own sections go with it.
- * The extension is installed **into the session**, not into the host's Pi —
- * a session the runner creates must not be steered by the extension that
- * also creates sessions.
+ * Pi's own session, with two things added: the runner's guardrail reaches the
+ * model through the system prompt, and a model is **chosen**. A session with
+ * no model answers to nobody — the SDK's own initial resolution falls back to
+ * "unknown" when the host has no default model saved — so the runner names
+ * one, and says so when it cannot find any.
+ *
+ * The extension is installed **into the session**, not into the host's Pi — a
+ * session the runner creates must not be steered by the extension that also
+ * creates sessions.
  */
 export function piSessionFactory(options: {
   readonly agentDirectory: string;
+  /** The model — `provider/id`. The provider's first model when it is absent. */
+  readonly model?: string;
+  /** Told what the agent is doing, as it does it. */
+  readonly onEvent?: (line: string) => void;
 }): SessionFactory {
   return async ({ cwd, systemPromptSections, tools }) => {
+    useProxyFromEnvironment();
     const loader = new DefaultResourceLoader({
       cwd,
       agentDir: options.agentDirectory,
@@ -216,6 +284,9 @@ export function piSessionFactory(options: {
                 event.systemPromptOptions.sections[name] = text;
               }
             });
+            pi.on("tool_call", (event) => {
+              options.onEvent?.(`  → ${describeToolCall(event)}`);
+            });
           },
         },
       ],
@@ -227,8 +298,74 @@ export function piSessionFactory(options: {
       resourceLoader: loader,
       ...(tools === undefined ? {} : { customTools: [...tools] }),
     });
+
+    const model = pickModel(created.session.modelRuntime, options.model);
+    if (model === undefined) {
+      throw new Error(
+        "no model to run on: name one with --model <provider/id>, or give the " +
+          "host a provider whose credential is configured",
+      );
+    }
+    await created.session.setModel(model);
     return created.session;
   };
+}
+
+/** One line about a tool call: the tool, and the command when there is one. */
+function describeToolCall(event: { toolName: string; input?: unknown }): string {
+  const input = event.input;
+  const command =
+    typeof input === "object" &&
+    input !== null &&
+    "command" in input &&
+    typeof (input as { command: unknown }).command === "string"
+      ? (input as { command: string }).command
+      : undefined;
+  if (command === undefined) {
+    return event.toolName;
+  }
+  const first = command.split("\n")[0] ?? "";
+  return `${event.toolName}: ${first.length > 120 ? `${first.slice(0, 120)}…` : first}`;
+}
+
+/**
+ * The model the session runs on.
+ *
+ * The named one when the command names it; otherwise the first model of the
+ * first provider whose credential is configured. "First" is the provider's own
+ * order — the order its catalogue lists its models in — and not a ranking:
+ * choosing a model well is the host's judgement, not the runner's.
+ */
+export function pickModel(
+  runtime: ModelRuntime,
+  reference: string | undefined,
+): ReturnType<ModelRuntime["getModel"]> {
+  if (reference !== undefined) {
+    // The provider and the model are separated by the **first** slash: a model
+    // id may itself contain one — `commandcode/reflection/beam:free` is a
+    // provider called `commandcode` and a model called `reflection/beam:free`.
+    const separator = reference.indexOf("/");
+    if (separator <= 0 || separator === reference.length - 1) {
+      throw new Error(`--model must name a model, as provider/id — got ${reference}`);
+    }
+    const provider = reference.slice(0, separator);
+    const id = reference.slice(separator + 1);
+    const model = runtime.getModel(provider, id);
+    if (model === undefined) {
+      throw new Error(`the provider ${provider} has no model ${id}`);
+    }
+    return model;
+  }
+  for (const provider of runtime.getRegisteredProviderIds()) {
+    if (!runtime.hasConfiguredAuth(provider)) {
+      continue;
+    }
+    const models = runtime.getModels(provider);
+    if (models.length > 0) {
+      return models[0];
+    }
+  }
+  return undefined;
 }
 
 /** What the command runs against — the parts a test replaces. */
@@ -281,6 +418,7 @@ export async function main(
 
   const run: RunOptions = {
     repo: options.repo,
+    ...(options.issue === undefined ? {} : { issueNumber: options.issue }),
     checkout: options.checkout,
     remote: options.remote,
     baseBranch: options.baseBranch,
@@ -290,8 +428,19 @@ export async function main(
     run: dependencies.run ?? runCommand,
     session:
       dependencies.session ??
-      piSessionFactory({ agentDirectory: options.agentDirectory }),
+      piSessionFactory({
+        agentDirectory: options.agentDirectory,
+        ...(options.model === undefined ? {} : { model: options.model }),
+        onEvent: (line) => {
+          process.stdout.write(`${line}\n`);
+        },
+      }),
     deadlineMs: options.deadlineMs,
+    ...(options.verifyPushes === undefined ? {} : { verifyPushes: options.verifyPushes }),
+    onStep: (record) => {
+      const detail = record.detail === "" ? "" : ` — ${record.detail}`;
+      process.stdout.write(`[${record.step}] ${record.outcome}${detail}\n`);
+    },
   };
 
   try {
