@@ -27,7 +27,7 @@ import { randomUUID } from "node:crypto";
 
 import { CLAIM_LABEL, type GhRunner, type IssueSummary } from "./gh.js";
 import {
-  GitCommandFailed,
+  CommandFailed,
   claimRef,
   createClaimObject,
   deleteClaim,
@@ -129,7 +129,7 @@ export async function claimIssue(options: ClaimOptions): Promise<ClaimOutcome> {
         releaseFailure instanceof Error ? releaseFailure.message : String(releaseFailure);
     }
 
-    if (failure instanceof GitCommandFailed) {
+    if (failure instanceof CommandFailed) {
       return {
         claimed: false,
         reason:

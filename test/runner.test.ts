@@ -18,7 +18,7 @@ import {
   type AgentSession,
 } from "../src/session.js";
 import {
-  GitCommandFailed,
+  CommandFailed,
   allowedPushRefs,
   assertPushableRef,
   pushRef,
@@ -63,6 +63,7 @@ import {
   deriveState,
   ensureRegistryEntry,
   openPullRequest,
+  parseCiVerdict,
   publishWork,
   readCiVerdict,
   reviewPullRequest,
@@ -930,7 +931,7 @@ describe("the fixes", () => {
         return "tagobject\n";
       }
       // The push is refused: another runner holds the issue.
-      throw new GitCommandFailed(1, args, "already exists");
+      throw new CommandFailed(1, "git", args, "", "already exists");
     };
     const gh = async (args: readonly string[]): Promise<string> => {
       calls.push(`gh ${args.join(" ")}`);
@@ -1355,14 +1356,20 @@ describe("the review", () => {
   it("test_the_runner_makes_no_bare_ci_claim", async () => {
     // The claim about CI names the workflow, the run and the conclusion, or
     // the runner says nothing at all.
+    const seen: string[][] = [];
     const run = async (spec: {
       command: string;
       args: readonly string[];
       cwd: string;
     }): Promise<string> => {
+      seen.push([...spec.args]);
       expect(spec.command).toBe("python3");
       expect(spec.args[0]).toBe("scripts/ci-verdict.py");
-      return "ci.yml  run 39888579980  failure  https://github.com/gazon1/sing/actions/runs/39888579980\n";
+      return JSON.stringify({
+        workflow: "ci.yml",
+        verdict: "ci.yml  run 39888579980  failure  https://github.com/gazon1/sing/actions/runs/39888579980",
+        exit: 1,
+      });
     };
 
     const verdict = await readCiVerdict(run, "/tmp/does-not-matter", {
@@ -1372,6 +1379,10 @@ describe("the review", () => {
     expect(verdict).toContain("ci.yml");
     expect(verdict).toContain("39888579980");
     expect(verdict).toContain("failure");
+
+    // The tool is asked for JSON, so that a verdict can be read whatever the
+    // exit code was.
+    expect(seen[0]).toContain("--json");
 
     // When the tool cannot read it, the runner says nothing — a missing run
     // is not a pass.
@@ -1383,6 +1394,115 @@ describe("the review", () => {
       { ref: "1040", repo: "gazon1/sing" },
     );
     expect(unreadable).toBeNull();
+  });
+
+  it("test_a_failing_ci_is_reported_as_a_failure", async () => {
+    // The tool expresses its verdict **in its exit code**: 0 is success, 1 is
+    // "not success", 2 is "no run", 3 is "could not read". It prints the line
+    // and *then* exits with that conclusion — so a red CI is a non-zero exit,
+    // and the output that carries the answer travels on the error.
+    //
+    // Reading only the success path reports a red CI as no CI at all, which is
+    // the one case a reader is looking for.
+    const run = async (): Promise<string> => {
+      throw new CommandFailed(
+        1,
+        "python3",
+        ["scripts/ci-verdict.py", "1040", "--repo", "gazon1/sing", "--json"],
+        JSON.stringify({
+          workflow: "ci.yml",
+          verdict: "ci.yml  run 39888579980  failure  https://github.com/gazon1/sing/actions/runs/39888579980",
+          exit: 1,
+        }),
+        "",
+      );
+    };
+
+    const verdict = await readCiVerdict(run, "/tmp/does-not-matter", {
+      ref: "1040",
+      repo: "gazon1/sing",
+    });
+    expect(verdict).toContain("ci.yml");
+    expect(verdict).toContain("39888579980");
+    expect(verdict).toContain("failure");
+
+    // The path where the tool could not read the runs at all prints no JSON,
+    // so there is nothing to report — and the runner says nothing rather than
+    // something it cannot stand behind.
+    const noJson = await readCiVerdict(
+      async () => {
+        throw new CommandFailed(
+          3,
+          "python3",
+          ["scripts/ci-verdict.py", "1040", "--repo", "gazon1/sing", "--json"],
+          "ci-verdict: could not read the runs of the ci.yml workflow: gh did not answer\n",
+          "",
+        );
+      },
+      "/tmp/does-not-matter",
+      { ref: "1040", repo: "gazon1/sing" },
+    );
+    expect(noJson).toBeNull();
+  });
+
+  it("test_a_shape_the_tool_did_not_print_is_no_verdict", async () => {
+    // The tool prints JSON or it prints a sentence. Anything else — an empty
+    // output, a list, JSON without the verdict — says nothing, and the runner
+    // says nothing rather than something it cannot stand behind.
+    expect(parseCiVerdict("")).toBeNull();
+    expect(parseCiVerdict("ci-verdict: could not read the runs")).toBeNull();
+    expect(parseCiVerdict("[]")).toBeNull();
+    expect(parseCiVerdict("null")).toBeNull();
+    expect(parseCiVerdict("{}")).toBeNull();
+    expect(parseCiVerdict('{"workflow":"ci.yml","exit":1}')).toBeNull();
+    expect(parseCiVerdict('{"verdict":"  "}')).toBeNull();
+    expect(parseCiVerdict('{"verdict":"ci.yml  run 1  failure"}')).toBe(
+      "ci.yml  run 1  failure",
+    );
+  });
+
+  it("test_the_ci_line_says_which_run_it_is", async () => {
+    // The label starts a new run on the same commit, so the line the runner
+    // reports is the run that judged the commit — and it says so, or a reader
+    // who compares it with the pull request's current run concludes that the
+    // runner is wrong.
+    const calls: string[] = [];
+    const gh = async (args: readonly string[]): Promise<string> => {
+      calls.push(`gh ${args.join(" ")}`);
+      return "";
+    };
+    const factory = async (options: {
+      cwd: string;
+      systemPromptSections: Record<string, string>;
+      tools?: readonly unknown[];
+    }): Promise<AgentSession> => ({
+      async prompt() {
+        const tool = options.tools?.[0] as {
+          execute: (id: string, params: unknown) => Promise<unknown>;
+        };
+        await tool.execute("call-1", { verdict: "pass", findings: [] });
+      },
+      async abort() {},
+      dispose() {},
+    });
+
+    const outcome = await reviewPullRequest({
+      repo: "gazon1/sing",
+      pullRequest: 1040,
+      cwd: "/tmp/does-not-matter",
+      factory: factory as never,
+      gh,
+      run: async () =>
+        JSON.stringify({
+          workflow: "ci.yml",
+          verdict: "ci.yml  run 39888579980  failure  https://github.com/gazon1/sing/actions/runs/39888579980",
+          exit: 1,
+        }),
+      deadlineMs: 60_000,
+    });
+
+    expect(outcome.ciVerdict).toContain("the CI before the re-count");
+    expect(outcome.ciVerdict).toContain("39888579980");
   });
 
   it("test_the_review_is_posted_once", async () => {

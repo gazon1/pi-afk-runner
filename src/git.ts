@@ -52,20 +52,35 @@ export type GitRunner = (
   options: { readonly cwd: string; readonly input?: string },
 ) => Promise<string>;
 
-/** A git command that failed, with the reason git gave in the message. */
-export class GitCommandFailed extends Error {
+/**
+ * A command that failed, with what it said.
+ *
+ * Both streams are kept. A command whose **exit code is its answer** — the
+ * repository's own CI verdict tool is one — prints what it concluded and
+ * then exits with that conclusion, so the printed output is the answer and
+ * the error has to carry it.
+ */
+export class CommandFailed extends Error {
   readonly exitCode: number;
+  readonly stdout: string;
   readonly stderr: string;
 
-  constructor(exitCode: number, args: readonly string[], stderr: string) {
+  constructor(
+    exitCode: number,
+    command: string,
+    args: readonly string[],
+    stdout: string,
+    stderr: string,
+  ) {
     const detail = stderr.trim();
     super(
       detail.length > 0
-        ? `git ${args.join(" ")} failed (${exitCode}): ${detail}`
-        : `git ${args.join(" ")} failed (${exitCode}) and said nothing`,
+        ? `${command} ${args.join(" ")} failed (${exitCode}): ${detail}`
+        : `${command} ${args.join(" ")} failed (${exitCode}) and said nothing`,
     );
-    this.name = "GitCommandFailed";
+    this.name = "CommandFailed";
     this.exitCode = exitCode;
+    this.stdout = stdout;
     this.stderr = stderr;
   }
 }
@@ -113,7 +128,7 @@ export const runCommand: CommandRunner = (spec) =>
       if (code === 0) {
         resolve(stdout);
       } else {
-        reject(new GitCommandFailed(code ?? 1, spec.args, stderr));
+        reject(new CommandFailed(code ?? 1, spec.command, spec.args, stdout, stderr));
       }
     });
     child.stdin.on("error", () => {

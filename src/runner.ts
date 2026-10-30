@@ -35,6 +35,7 @@ import {
   type SessionFactory,
 } from "./session.js";
 import {
+  CommandFailed,
   addWorktree,
   fetchRef,
   pushWorkBranch,
@@ -413,12 +414,44 @@ export async function publishWork(options: {
 export const CI_VERDICT_TOOL = "scripts/ci-verdict.py";
 
 /**
+ * The CI line out of the tool's own JSON, or null.
+ *
+ * The tool prints `{"workflow":…, "verdict":…, "exit":…}` on every path that
+ * reached a verdict, and a plain sentence on the one path that could not read
+ * the runs at all. So the JSON either parses or it does not — there is no third
+ * shape to guess at.
+ */
+export function parseCiVerdict(json: string): string | null {
+  try {
+    const parsed: unknown = JSON.parse(json);
+    if (typeof parsed !== "object" || parsed === null) {
+      return null;
+    }
+    const verdict = (parsed as Record<string, unknown>).verdict;
+    if (typeof verdict !== "string") {
+      return null;
+    }
+    const line = verdict.trim();
+    return line === "" ? null : line;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * The CI verdict of a commit, as the repository's own tool states it.
  *
  * A claim about CI that names a run id and nothing else is not evidence: a
  * repository has several workflows, and the one that says "success" may be the
  * cache cleanup. So the claim is a whole line — the workflow, the run, the
  * conclusion — and it comes from the tool that already knows how to judge it.
+ *
+ * **The tool's exit code is its verdict**: 0 when the CI succeeded, 1 when it
+ * did not, 2 when there is no run, 3 when the runs could not be read. It
+ * prints the line and *then* exits with that conclusion — so a red CI is a
+ * non-zero exit, and the output that carries the answer travels on the error.
+ * Reading only the success path would report a red CI as no CI at all, which
+ * is the one case a reader is looking for.
  *
  * `null` when the tool could not read it. A missing run is not a pass.
  */
@@ -427,20 +460,26 @@ export async function readCiVerdict(
   cwd: string,
   options: { readonly ref: string; readonly repo: string },
 ): Promise<string | null> {
+  const spec = {
+    command: "python3",
+    args: [CI_VERDICT_TOOL, options.ref, "--repo", options.repo, "--json"],
+    cwd,
+  };
   try {
-    const output = await run({
-      command: "python3",
-      args: [CI_VERDICT_TOOL, options.ref, "--repo", options.repo],
-      cwd,
-    });
-    const line = output.trim();
-    return line === "" ? null : line;
-  } catch {
-    // The tool says what it could not read; the runner says nothing rather
-    // than something it cannot stand behind.
+    return parseCiVerdict(await run(spec));
+  } catch (failure) {
+    if (failure instanceof CommandFailed) {
+      // The verdict it printed before it exited is on the error.
+      return parseCiVerdict(failure.stdout);
+    }
+    // The tool could not be run at all; the runner says nothing rather than
+    // something it cannot stand behind.
     return null;
   }
 }
+
+/** How the CI line says which run it is. */
+const CI_BEFORE_RECOUNT = "the CI before the re-count";
 
 /** What a review of a pull request did. */
 export interface ReviewOutcome {
@@ -459,6 +498,12 @@ export interface ReviewOutcome {
  * then the label. A label applied before the comment re-counts a run that
  * finds no review — the gate would look, find nothing, and fail for a reason
  * that has nothing to do with the review.
+ *
+ * The CI is read **before** the label, because the label starts a new run on
+ * the same commit, and the line the runner reports has to be the run that
+ * judged the commit — not the one the re-count has just started. The line says
+ * so, so that a reader who compares it with the pull request's current run
+ * does not conclude that the runner is wrong.
  *
  * A `fail` verdict is not a retry. The pull request stays red, no second
  * comment is posted, and no other issue is taken: the findings have to be
@@ -515,16 +560,21 @@ export async function reviewPullRequest(options: {
   // after a `fail` would turn a red pull request green on a review of a
   // different diff.
   const posted = await postReviewComment(options, comment);
+
+  // Read before the label: the label starts the re-count, and the run it
+  // starts is not the run that judged this commit.
+  const ciLine = await readCiVerdict(options.run, options.cwd, {
+    ref: String(options.pullRequest),
+    repo: options.repo,
+  });
+
   await addRecountLabel(options);
 
   return {
     verdict: verdict.verdict,
     comment,
     posted,
-    ciVerdict: await readCiVerdict(options.run, options.cwd, {
-      ref: String(options.pullRequest),
-      repo: options.repo,
-    }),
+    ciVerdict: ciLine === null ? null : `${CI_BEFORE_RECOUNT}: ${ciLine}`,
   };
 }
 
