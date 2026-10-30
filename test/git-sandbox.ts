@@ -202,7 +202,10 @@ export async function createFixtureRepository(
 
   await mkdir(repo, { recursive: true });
   await git(["init", "-q", "-b", "main"], { cwd: repo, env });
-  await git(["init", "-q", "--bare", remote], { cwd: root, env });
+  // The bare remote names its default branch explicitly: a machine whose git
+  // defaults to `master` would otherwise clone a remote whose HEAD points at
+  // a branch that does not exist, and the clone would come up empty.
+  await git(["init", "-q", "--bare", "-b", "main", remote], { cwd: root, env });
   await git(["remote", "add", "origin", remote], { cwd: repo, env });
 
   await writeFile(join(repo, "README.md"), "# the fixture\n", "utf8");
