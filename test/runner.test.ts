@@ -1911,7 +1911,14 @@ describe("the brief", () => {
  */
 describe("the CLI's run", () => {
   /** A `gh` that answers the runner's calls and remembers them. */
-  function stubGh(queue: readonly { number: number; title: string }[]): {
+  function stubGh(
+    queue: readonly {
+      number: number;
+      title: string;
+      labels?: readonly string[];
+      updatedAt?: string;
+    }[],
+  ): {
     gh: (args: readonly string[]) => Promise<string>;
     calls: string[];
   } {
@@ -1923,8 +1930,8 @@ describe("the CLI's run", () => {
           queue.map((issue) => ({
             number: issue.number,
             title: issue.title,
-            updatedAt: "",
-            labels: [],
+            updatedAt: issue.updatedAt ?? "",
+            labels: issue.labels ?? [],
           })),
         );
       }
@@ -1940,6 +1947,9 @@ describe("the CLI's run", () => {
         return JSON.stringify({
           body: "**What this is:** the work\n\n**Fix:** 1. do it",
           comments: [{ body: "a comment" }],
+          title: "an issue",
+          labels: [],
+          updatedAt: "",
         });
       }
       return "";
@@ -2015,6 +2025,7 @@ describe("the CLI's run", () => {
         };
       },
       deadlineMs: 60_000,
+      staleAfterMs: 7 * 24 * 60 * 60 * 1000,
       now: new Date("2026-10-30T09:00:00Z"),
       nonce: "nonce-42",
       runId: "2026-10-30T09-00-00-000Z-abcdef12",
@@ -2101,7 +2112,7 @@ describe("the CLI's run", () => {
           "--input-type=module",
           "--eval",
           `import { spawn } from "node:child_process";` +
-            `spawn("flock", ${JSON.stringify([
+            `const flock = spawn("flock", ${JSON.stringify([
               "--nonblock",
               "--no-fork",
               "--conflict-exit-code=75",
@@ -2109,24 +2120,27 @@ describe("the CLI's run", () => {
               "sh",
               "-c",
               HOLDER_COMMAND,
-            ])}, { stdio: "ignore" });` +
+            ])}, { stdio: ["ignore", "pipe", "ignore"] });` +
+            `flock.stdout.on("data", (chunk) => process.stdout.write(chunk));` +
             `setTimeout(() => {}, 60000);`,
         ],
-        { stdio: "ignore" },
+        { stdio: ["ignore", "pipe", "ignore"] },
       );
 
-      // Wait for the holder to have the lock.
-      let held = false;
-      for (let attempt = 0; attempt < 50 && !held; attempt += 1) {
-        await new Promise((resolve) => setTimeout(resolve, 100));
-        try {
-          const probe = await takeLock(directory);
-          await probe.release();
-        } catch {
-          held = true;
-        }
-      }
-      expect(held).toBe(true);
+      // The holder says when the lock is its own — a probe that raced it would
+      // take the lock first and the holder would give up, and the test would
+      // be testing a lock nobody held.
+      await new Promise<void>((resolve) => {
+        holder.stdout.setEncoding("utf8");
+        holder.stdout.on("data", (chunk: string) => {
+          if (chunk.includes("locked")) {
+            resolve();
+          }
+        });
+      });
+
+      // The lock is held: a second runner cannot take it.
+      await expect(takeLock(directory)).rejects.toThrow(/held by another runner/);
 
       holder.kill("SIGKILL");
 
@@ -2146,7 +2160,7 @@ describe("the CLI's run", () => {
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   it.skipIf(process.getuid?.() === 0)(
     "test_an_unwritable_lock_directory_fails_loudly",
@@ -2170,4 +2184,184 @@ describe("the CLI's run", () => {
       }
     },
   );
+
+  /**
+   * The reclaim: a claim a dead run left behind.
+   *
+   * The runner must take the issue over rather than skip it for ever — that
+   * is the difference between "the runner died" and "the issue is gone".
+   */
+  describe("the reclaim", () => {
+    /** The git calls a run makes, in order. */
+    function recordingGit(calls: string[]): (args: readonly string[], options: { cwd: string; input?: string }) => Promise<string> {
+      return async (args, options) => {
+        calls.push(`git ${args.join(" ")}`);
+        return runGit(args, options);
+      };
+    }
+
+    it("test_a_stranded_claim_is_reclaimed", async () => {
+      const fixture = await fixtureWithSetupScript();
+      try {
+        // A claim that is old, with nothing behind it.
+        const stale = {
+          number: 42,
+          title: "an issue",
+          labels: ["agent-in-progress"],
+          updatedAt: "2026-01-01T00:00:00Z",
+        };
+        const { gh, calls } = stubGh([stale]);
+        const gitCalls: string[] = [];
+
+        // The dead run's claim is still on the remote.
+        const base = (await runGit(["rev-parse", "HEAD"], { cwd: fixture.repo })).trim();
+        await runGit(["push", fixture.remote, `${base}:refs/tags/afk-claim-issue-42`], {
+          cwd: fixture.repo,
+        });
+
+        const options = runOptions(fixture, gh);
+        const result = await runOnce({
+          ...options,
+          git: recordingGit(gitCalls),
+          staleAfterMs: 60_000,
+          now: new Date("2026-10-30T09:00:00Z"),
+        });
+
+        // The issue was taken over and worked — not skipped.
+        expect(result.issue).toBe(42);
+        expect(result.steps.map((step) => step.step)).toContain("session");
+        expect(result.steps.map((step) => step.step)).toContain("pull request");
+
+        // The stale claim's ref went away, and a new claim took its place.
+        expect(
+          gitCalls.some(
+            (call) => call.includes("--delete") && call.includes("afk-claim-issue-42"),
+          ),
+        ).toBe(true);
+        expect(
+          calls.some((call) => call.includes("issue edit 42") && call.includes("--add-label agent-in-progress")),
+        ).toBe(true);
+      } finally {
+        await fixture.dispose();
+      }
+    }, 60_000);
+
+    it("test_a_claim_with_a_pull_request_is_left_alone", async () => {
+      const fixture = await fixtureWithSetupScript();
+      try {
+        const claimed = {
+          number: 42,
+          title: "an issue",
+          labels: ["agent-in-progress"],
+          updatedAt: "2026-01-01T00:00:00Z",
+        };
+        const { gh, calls } = stubGh([claimed]);
+        // A pull request already exists for the branch.
+        const withPullRequest: (args: readonly string[]) => Promise<string> = async (args) => {
+          if (args[0] === "pr" && args[1] === "list") {
+            return JSON.stringify([
+              { number: 1040, headRefName: "agent/issue-42", labels: [], comments: [] },
+            ]);
+          }
+          return gh(args);
+        };
+
+        // The branch the pull request came from.
+        const base = (await runGit(["rev-parse", "HEAD"], { cwd: fixture.repo })).trim();
+        await runGit(["push", fixture.remote, `${base}:refs/heads/agent/issue-42`], {
+          cwd: fixture.repo,
+        });
+
+        const result = await runOnce({
+          ...runOptions(fixture, withPullRequest),
+          staleAfterMs: 60_000,
+          now: new Date("2026-10-30T09:00:00Z"),
+        });
+
+        // It was not selected from the queue, and no second pull request was
+        // opened for it.
+        expect(result.issue).toBe(42);
+        expect(calls.some((call) => call.includes("pr create"))).toBe(false);
+        // And the work was not done again: the session that wrote the change
+        // never ran.
+        expect(result.steps.map((step) => step.step)).not.toContain("session");
+      } finally {
+        await fixture.dispose();
+      }
+    }, 60_000);
+
+    it("test_a_pushed_branch_is_not_pushed_again", async () => {
+      const fixture = await fixtureWithSetupScript();
+      try {
+        const claimed = {
+          number: 42,
+          title: "an issue",
+          labels: ["agent-in-progress"],
+          updatedAt: "2026-01-01T00:00:00Z",
+        };
+        const { gh, calls } = stubGh([claimed]);
+        const gitCalls: string[] = [];
+
+        // The work was pushed before the run died: the branch is on the remote
+        // and there is no pull request yet.
+        const base = (await runGit(["rev-parse", "HEAD"], { cwd: fixture.repo })).trim();
+        await runGit(["push", fixture.remote, `${base}:refs/heads/agent/issue-42`], {
+          cwd: fixture.repo,
+        });
+
+        const result = await runOnce({
+          ...runOptions(fixture, gh),
+          git: recordingGit(gitCalls),
+          staleAfterMs: 60_000,
+          now: new Date("2026-10-30T09:00:00Z"),
+        });
+
+        // The pull request was opened from the branch that was already there.
+        expect(calls.some((call) => call.includes("pr create"))).toBe(true);
+        // The branch was not pushed again: the commits are durable, and a
+        // second push of different commits is a force-push in all but name.
+        expect(
+          gitCalls.some((call) => call.includes("push") && call.includes("refs/heads/agent/issue-42")),
+        ).toBe(false);
+        // And the agent was not restarted: the work was already done.
+        expect(result.steps.map((step) => step.step)).not.toContain("session");
+      } finally {
+        await fixture.dispose();
+      }
+    }, 60_000);
+
+    it("test_a_human_comment_defers_the_reclaim", async () => {
+      const fixture = await fixtureWithSetupScript();
+      try {
+        // The claim is old, and a comment has just moved the issue's
+        // last-update time — the staleness signal any comment moves.
+        const fresh = {
+          number: 42,
+          title: "an issue",
+          labels: ["agent-in-progress"],
+          updatedAt: "2026-10-30T08:59:30Z",
+        };
+        const { gh, calls } = stubGh([fresh]);
+        const gitCalls: string[] = [];
+
+        const result = await runOnce({
+          ...runOptions(fixture, gh),
+          git: recordingGit(gitCalls),
+          staleAfterMs: 60_000,
+          now: new Date("2026-10-30T09:00:00Z"),
+        });
+
+        // The claim is somebody else's work, and it was left alone.
+        expect(result.issue).toBeNull();
+        expect(
+          gitCalls.some(
+            (call) => call.includes("--delete") && call.includes("afk-claim-issue-42"),
+          ),
+        ).toBe(false);
+        expect(calls.some((call) => call.includes("--add-label agent-in-progress"))).toBe(false);
+      } finally {
+        await fixture.dispose();
+      }
+    }, 60_000);
+  });
 });

@@ -29,7 +29,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-import { claimIssue, releaseClaim } from "./claim.js";
+import { claimIssue, reclaimClaim, releaseClaim } from "./claim.js";
 import {
   UNTRUSTED_INPUT_RULE,
   UNTRUSTED_INPUT_SECTION,
@@ -44,7 +44,9 @@ import {
   CommandFailed,
   addWorktree,
   fetchRef,
+  headRef,
   pushWorkBranch,
+  readRemoteSha,
   removeWorktree,
   runCommand,
   workBranch,
@@ -57,6 +59,7 @@ import {
   createPullRequest,
   postCommentArgs,
   pullRequestBody,
+  readClaimed,
   readIssue,
   readPullRequest,
   readQueue,
@@ -621,6 +624,111 @@ export async function addRecountLabel(options: {
   );
 }
 
+/**
+ * What the runner can see about one issue.
+ *
+ * The state is derived, not remembered: the six observables come from GitHub
+ * and from git, so a run that starts on a machine where a previous run died
+ * sees the same world that run saw.
+ */
+export interface IssueObservation {
+  readonly issue: IssueSummary;
+  /** The state the issue is in. */
+  readonly state: DerivedState;
+  /** The pull request behind it, when there is one. */
+  readonly pullRequest: PullRequestSummary | null;
+}
+
+/**
+ * Observe one issue: what state is it in, and what is behind it.
+ *
+ * The pull request is read from GitHub, the work branch from the remote, and
+ * the staleness from the issue's last update — which any comment moves.
+ */
+export async function observeIssue(options: {
+  readonly issue: IssueSummary;
+  readonly repo: string;
+  readonly remote: string;
+  readonly cwd: string;
+  readonly git: GitRunner;
+  readonly gh: GhRunner;
+  readonly now: Date;
+  readonly staleAfterMs: number;
+}): Promise<IssueObservation> {
+  const branch = workBranch(options.issue.number);
+  const pullRequest = await readPullRequest(options.repo, branch, options.gh);
+  const pushed =
+    (await readRemoteSha(options.git, options.cwd, {
+      remote: options.remote,
+      ref: headRef(branch),
+    })) !== null;
+  const observed = observePullRequest(pullRequest);
+  return {
+    issue: options.issue,
+    pullRequest,
+    state: deriveState({
+      claimLabel: options.issue.labels.includes(CLAIM_LABEL),
+      pullRequest: pullRequest !== null,
+      reviewComment: observed.reviewComment,
+      recountLabel: observed.recountLabel,
+      workBranch: pushed,
+      stale: isStale(options.issue.updatedAt, options.now, options.staleAfterMs),
+    }),
+  };
+}
+
+/** What a run has to do about an issue. */
+export type PlanKind =
+  /** Claim it, work it, open a pull request, review it. */
+  | "work"
+  /** A dead run's claim: take it over and do the work again. */
+  | "reclaim"
+  /** The work is pushed; open the pull request. */
+  | "pull request"
+  /** The pull request is open; review it. */
+  | "review"
+  /** The review is posted; count it. */
+  | "re-count"
+  /** Somebody else's work, or nothing to do. */
+  | "none";
+
+/** What a run has to do about one issue. */
+export interface Plan {
+  readonly kind: PlanKind;
+  readonly issue: IssueSummary;
+  /** The pull request behind it, when there is one. */
+  readonly pullRequest: PullRequestSummary | null;
+}
+
+/**
+ * What the run has to do, given what the runner can see.
+ *
+ * A claim that is still fresh is somebody else's work — the runner that took
+ * it may be working right now — and it is left alone. A claim that is stale
+ * and has nothing behind it is a dead run's, and it is taken over. A claim
+ * with a pull request behind it is finished where it stopped: the pull request
+ * is opened, reviewed or counted, and never worked a second time.
+ */
+export function planFor(observation: IssueObservation): Plan {
+  const kind: PlanKind =
+    observation.state === "Queue"
+      ? "work"
+      : observation.state === "Orphaned"
+        ? "reclaim"
+        : observation.state === "Pushed"
+          ? "pull request"
+          : observation.state === "Opened"
+            ? "review"
+            : observation.state === "Reviewed"
+              ? "re-count"
+              : "none";
+  return {
+    kind,
+    issue: observation.issue,
+    pullRequest: observation.pullRequest,
+  };
+}
+
 /** What one step of a run did. */
 export interface StepRecord {
   readonly step: string;
@@ -917,6 +1025,13 @@ export interface RunOptions {
   /** The wall-clock ceiling on one turn of the agent. */
   readonly deadlineMs: number;
   /**
+   * How long a claim may sit before another run may take it over.
+   *
+   * A week, in practice: long enough that a slow run keeps its issue, short
+   * enough that a killed run does not hold it for ever.
+   */
+  readonly staleAfterMs: number;
+  /**
    * Whether the target repository's pre-push hook may gate the pushes.
    *
    * The hook is the repository's rule. Skipping it is a decision about the
@@ -1019,22 +1134,44 @@ export async function runOnce(options: RunOptions): Promise<RunResult> {
   const now = options.now ?? new Date();
   const runId = options.runId ?? newRunId(now);
 
-  let queue: readonly IssueSummary[];
-  let issue: IssueSummary | undefined;
+  // The claimed issues come first. A claim is a run that is either working or
+  // dead, and a dead one holds its issue out of the queue for ever — so a
+  // queue that is never empty would starve it.
+  const plan = await chooseIssue(options, now);
+  if (plan === null) {
+    return { issue: null, outcome: "empty", steps: [], record: "" };
+  }
+  return await runPlan(options, plan, now, runId);
+}
+
+/**
+ * The issue this run works, and what it has to do about it.
+ *
+ * The claimed issues are looked at before the queue, because a claim that is
+ * stale is a dead run's and it is the only thing that will ever take that
+ * issue over. A claim that is still fresh belongs to a run that may be
+ * working right now, and it is left alone.
+ */
+async function chooseIssue(
+  options: RunOptions,
+  now: Date,
+): Promise<Plan | null> {
+  let candidates: IssueSummary[];
   try {
     if (options.issueNumber !== undefined) {
       // The operator named the issue. It is taken as given: the claim is what
       // excludes another runner, and a claim that fails fails loudly.
       const named = await readIssue(options.repo, options.issueNumber, options.gh);
-      issue = {
-        number: options.issueNumber,
-        title: named.title,
-        updatedAt: "",
-        labels: [],
-      };
+      candidates = [
+        {
+          number: options.issueNumber,
+          title: named.title,
+          updatedAt: named.updatedAt,
+          labels: named.labels,
+        },
+      ];
     } else {
-      queue = await readQueue(options.repo, options.gh);
-      issue = selectIssue(queue);
+      candidates = await readClaimed(options.repo, options.gh);
     }
   } catch (failure) {
     throw new RunFailed({
@@ -1047,25 +1184,111 @@ export async function runOnce(options: RunOptions): Promise<RunResult> {
     });
   }
 
-  if (issue === undefined) {
-    return { issue: null, outcome: "empty", steps: [], record: "" };
+  for (const candidate of candidates) {
+    const observation = await observeIssue({
+      issue: candidate,
+      repo: options.repo,
+      remote: options.remote,
+      cwd: options.checkout,
+      git: options.git,
+      gh: options.gh,
+      now,
+      staleAfterMs: options.staleAfterMs,
+    });
+    const plan = planFor(observation);
+    if (plan.kind !== "none") {
+      return plan;
+    }
   }
 
+  if (options.issueNumber !== undefined) {
+    return null;
+  }
+
+  // Nothing to resume: the queue.
+  let queue: readonly IssueSummary[];
+  try {
+    queue = await readQueue(options.repo, options.gh);
+  } catch (failure) {
+    throw new RunFailed({
+      step: "select",
+      message: `the run stopped at the select step: ${
+        failure instanceof Error ? failure.message : String(failure)
+      }`,
+      cause: failure,
+      record: "",
+    });
+  }
+  const issue = selectIssue(queue);
+  if (issue === undefined) {
+    return null;
+  }
+  return { kind: "work", issue, pullRequest: null };
+}
+
+/**
+ * The worktree of a branch that is already pushed.
+ *
+ * The branch carries the work a previous run did, and the worktree is where
+ * that work is read — the reviewer needs the code. The branch is not pushed
+ * again: the commits are durable, and a second push of different commits over
+ * a branch a human may be reading is a force-push in all but name.
+ */
+async function prepareExistingWorktree(
+  options: RunOptions,
+  worktreePath: string,
+  issueNumber: number,
+): Promise<void> {
+  const branch = workBranch(issueNumber);
+  await fetchRef(options.git, options.checkout, { remote: options.remote, ref: branch });
+  const sha = await readRemoteSha(options.git, options.checkout, {
+    remote: options.remote,
+    ref: headRef(branch),
+  });
+  if (sha === null) {
+    throw new Error(`the branch ${branch} is not on ${options.remote}`);
+  }
+  // Detached, at the pushed commit: the branch is checked out nowhere, and a
+  // worktree that checked it out would leave it checked out — and the next
+  // run could not check it out again.
+  await options.git(["worktree", "add", "--detach", worktreePath, sha], {
+    cwd: options.checkout,
+  });
+  await options.run({
+    command: "bash",
+    args: [SETUP_SCRIPT],
+    cwd: worktreePath,
+  });
+}
+
+/** The steps of one run, and the work they do. */
+async function runPlan(
+  options: RunOptions,
+  plan: Plan,
+  now: Date,
+  runId: string,
+): Promise<RunResult> {
+  const issue = plan.issue;
   const state = {
     claimed: false,
     base: "",
     worktreePath: "",
-    pullRequest: 0,
+    pullRequest: plan.pullRequest?.number ?? 0,
     reviewedSha: "",
     slug: null as string | null,
     verdict: "pass" as "pass" | "fail",
   };
 
-  const steps: Step[] = [
-    {
+  const works = plan.kind === "work" || plan.kind === "reclaim";
+  const reviews = works || plan.kind === "pull request" || plan.kind === "review";
+
+  const steps: Step[] = [];
+
+  if (works) {
+    steps.push({
       name: "claim",
       run: async () => {
-        const outcome = await claimIssue({
+        const claim = {
           issue,
           repo: options.repo,
           remote: options.remote,
@@ -1075,7 +1298,11 @@ export async function runOnce(options: RunOptions): Promise<RunResult> {
           gh: options.gh,
           nonce: options.nonce ?? randomUUID(),
           now,
-        });
+        };
+        const outcome =
+          plan.kind === "reclaim"
+            ? await reclaimClaim({ ...claim, worktreeRoot: options.worktreeRoot })
+            : await claimIssue(claim);
         if (!outcome.claimed) {
           throw new Error(outcome.reason);
         }
@@ -1083,8 +1310,8 @@ export async function runOnce(options: RunOptions): Promise<RunResult> {
         state.base = outcome.base;
         return `claimed from ${outcome.base.slice(0, 8)}`;
       },
-    },
-    {
+    });
+    steps.push({
       name: "worktree",
       run: async () => {
         state.worktreePath = join(options.worktreeRoot, `issue-${issue.number}`);
@@ -1100,8 +1327,8 @@ export async function runOnce(options: RunOptions): Promise<RunResult> {
         });
         return prepared.path;
       },
-    },
-    {
+    });
+    steps.push({
       name: "session",
       run: async () => {
         const result = await startAgent({
@@ -1117,8 +1344,8 @@ export async function runOnce(options: RunOptions): Promise<RunResult> {
         }
         return `${result.completed} turns`;
       },
-    },
-    {
+    });
+    steps.push({
       name: "push",
       run: async () => {
         // A change the work landed needs its registry entry, and the entry
@@ -1144,8 +1371,16 @@ export async function runOnce(options: RunOptions): Promise<RunResult> {
         });
         return sha.slice(0, 8);
       },
-    },
-    {
+    });
+  } else {
+    // The work is already pushed. The worktree is where that work is read —
+    // the reviewer needs the code, and the branch is not pushed again.
+    state.worktreePath = join(options.worktreeRoot, `issue-${issue.number}`);
+    await prepareExistingWorktree(options, state.worktreePath, issue.number);
+  }
+
+  if (works || plan.kind === "pull request") {
+    steps.push({
       name: "pull request",
       run: async () => {
         const opened = await openPullRequest({
@@ -1162,8 +1397,11 @@ export async function runOnce(options: RunOptions): Promise<RunResult> {
         state.pullRequest = opened.number;
         return `#${opened.number}`;
       },
-    },
-    {
+    });
+  }
+
+  if (reviews) {
+    steps.push({
       name: "review",
       run: async () => {
         state.reviewedSha = await headSha(options.git, state.worktreePath);
@@ -1179,51 +1417,60 @@ export async function runOnce(options: RunOptions): Promise<RunResult> {
         state.verdict = outcome.verdict;
         return outcome.verdict;
       },
-    },
-    {
-      name: "re-count",
-      run: async () => {
-        if (state.slug === null) {
-          return "no change to count";
-        }
-        const digest = await computeDocumentsDigest(
-          options.run,
-          state.worktreePath,
-          state.slug,
-        );
-        const directory = join(state.worktreePath, ".specify", "reviews");
-        await mkdir(directory, { recursive: true });
-        await writeFile(
-          join(directory, `${state.slug}.md`),
-          verdictFile({
-            slug: state.slug,
-            verdict: state.verdict,
-            date: now.toISOString().slice(0, 10),
-            pullRequest: state.pullRequest,
-            reviewed: state.reviewedSha,
-            documents: digest,
-          }),
-          "utf8",
-        );
-        await commitAll(options.git, state.worktreePath, "chore: the change's verdict");
-        const sha = await headSha(options.git, state.worktreePath);
-        await pushWorkBranch(options.git, state.worktreePath, {
-          remote: options.remote,
-          issueNumber: issue.number,
-          sha,
-          ...(options.verifyPushes === undefined ? {} : { verify: options.verifyPushes }),
+    });
+  }
+
+  steps.push({
+    name: "re-count",
+    run: async () => {
+      // The label is what makes the gate count the review. The review step
+      // applies it when it posts; here it is the only thing left to do.
+      if (!reviews && state.pullRequest !== 0) {
+        await addRecountLabel({
+          repo: options.repo,
+          pullRequest: state.pullRequest,
+          gh: options.gh,
         });
-        return state.slug;
-      },
+      }
+      if (state.slug === null) {
+        return "no change to count";
+      }
+      const digest = await computeDocumentsDigest(
+        options.run,
+        state.worktreePath,
+        state.slug,
+      );
+      const directory = join(state.worktreePath, ".specify", "reviews");
+      await mkdir(directory, { recursive: true });
+      await writeFile(
+        join(directory, `${state.slug}.md`),
+        verdictFile({
+          slug: state.slug,
+          verdict: state.verdict,
+          date: now.toISOString().slice(0, 10),
+          pullRequest: state.pullRequest,
+          reviewed: state.reviewedSha,
+          documents: digest,
+        }),
+        "utf8",
+      );
+      await commitAll(options.git, state.worktreePath, "chore: the change's verdict");
+      const sha = await headSha(options.git, state.worktreePath);
+      await pushWorkBranch(options.git, state.worktreePath, {
+        remote: options.remote,
+        issueNumber: issue.number,
+        sha,
+        ...(options.verifyPushes === undefined ? {} : { verify: options.verifyPushes }),
+      });
+      return state.slug;
     },
-  ];
+  });
 
   const outcome = await runSteps({
     issue: issue.number,
     runId,
     root: options.checkout,
     steps,
-    ...(options.onStep === undefined ? {} : { onStep: options.onStep }),
     release: async () => {
       if (!state.claimed) {
         return;
@@ -1242,9 +1489,8 @@ export async function runOnce(options: RunOptions): Promise<RunResult> {
 
   return {
     issue: issue.number,
-    outcome: "completed",
+    outcome: outcome.outcome === "failed" ? "empty" : outcome.outcome,
     steps: outcome.steps,
     record: outcome.record,
   };
 }
-

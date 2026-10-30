@@ -436,6 +436,7 @@ export async function main(
         },
       }),
     deadlineMs: options.deadlineMs,
+    staleAfterMs: options.staleAfterMs,
     ...(options.verifyPushes === undefined ? {} : { verifyPushes: options.verifyPushes }),
     onStep: (record) => {
       const detail = record.detail === "" ? "" : ` — ${record.detail}`;

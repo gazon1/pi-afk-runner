@@ -280,7 +280,7 @@ export function issueArgs(repo: string, issueNumber: number): string[] {
     "--repo",
     repo,
     "--json",
-    "body,comments,title",
+    "body,comments,title,labels,updatedAt",
   ];
 }
 
@@ -289,6 +289,10 @@ export interface IssueDetail {
   readonly title: string;
   readonly body: string;
   readonly comments: readonly string[];
+  /** The issue's labels — the claim marker is one of them. */
+  readonly labels: readonly string[];
+  /** When the issue was last touched — the staleness signal. */
+  readonly updatedAt: string;
 }
 
 /**
@@ -310,13 +314,15 @@ export async function readIssue(
 ): Promise<IssueDetail> {
   const parsed: unknown = JSON.parse(await gh(issueArgs(repo, issueNumber)));
   if (typeof parsed !== "object" || parsed === null) {
-    return { title: "", body: "", comments: [] };
+    return { title: "", body: "", comments: [], labels: [], updatedAt: "" };
   }
   const record = parsed as Record<string, unknown>;
   return {
     title: typeof record.title === "string" ? record.title : "",
     body: typeof record.body === "string" ? record.body : "",
     comments: commentBodies(record.comments),
+    labels: labelNames(record.labels),
+    updatedAt: typeof record.updatedAt === "string" ? record.updatedAt : "",
   };
 }
 

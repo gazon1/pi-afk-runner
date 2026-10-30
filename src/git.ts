@@ -242,12 +242,40 @@ export async function deleteClaim(
   cwd: string,
   options: { readonly remote: string; readonly issueNumber: number },
 ): Promise<void> {
+  // The ref may not be there: a run that died before its claim landed has
+  // nothing to delete, and a delete of a ref that is not there fails.
+  const existing = await readRemoteSha(git, cwd, {
+    remote: options.remote,
+    ref: claimRef(options.issueNumber),
+  });
+  if (existing === null) {
+    return;
+  }
   // No hook: the claim is a marker, not code, and a hook that gates the
   // repository's tree has nothing to say about it.
   await git(
     ["push", "--no-verify", options.remote, "--delete", claimRefName(options.issueNumber)],
     { cwd },
   );
+}
+
+/**
+ * Delete a local branch, if it is there.
+ *
+ * `-D`, not `-d`: the branch is not merged and is not anybody's — it is the
+ * runner's own `agent/issue-<N>`, and its commits are a dead run's. The caller
+ * has decided that the work is redone.
+ */
+export async function deleteLocalBranch(
+  git: GitRunner,
+  cwd: string,
+  options: { readonly branch: string },
+): Promise<void> {
+  const listed = await git(["branch", "--list", options.branch], { cwd });
+  if (listed.trim() === "") {
+    return;
+  }
+  await git(["branch", "-D", options.branch], { cwd });
 }
 
 /**

@@ -24,6 +24,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { join } from "node:path";
 
 import { CLAIM_LABEL, type GhRunner, type IssueSummary } from "./gh.js";
 import {
@@ -31,10 +32,13 @@ import {
   claimRef,
   createClaimObject,
   deleteClaim,
+  deleteLocalBranch,
   fetchRef,
   headRef,
   pushClaim,
   readRemoteSha,
+  removeWorktree,
+  workBranch,
   type GitRunner,
 } from "./git.js";
 
@@ -173,6 +177,45 @@ export async function removeClaimLabel(
     "--remove-label",
     CLAIM_LABEL,
   ]);
+}
+
+/**
+ * Take over a claim a previous run left behind.
+ *
+ * The stale claim's **ref** goes first: the ref is the lock, and a ref that is
+ * still there refuses a new claim — the push is rejected and the issue stays
+ * untouchable. Then the claim is taken again, with a new nonce, so the new
+ * claim is a different object from the old one and the push is not a
+ * no-op.
+ *
+ * The label is left alone. It is already on — it is the marker of a claim — and
+ * adding it again is idempotent, which is exactly what a re-claim needs.
+ *
+ * The stale **branch** goes too, when there is one: the work is redone rather
+ * than resumed, because the session that made it is gone with the process that
+ * died. The branch is the runner's own — `agent/issue-<N>` — and its commits
+ * are the dead run's, not anybody's.
+ */
+export async function reclaimClaim(
+  options: ClaimOptions & { readonly worktreeRoot?: string },
+): Promise<ClaimOutcome> {
+  await deleteClaim(options.git, options.cwd, {
+    remote: options.remote,
+    issueNumber: options.issue.number,
+  });
+  // The dead run's worktree first: a branch that is checked out somewhere
+  // cannot be deleted, and the worktree is where that work was.
+  if (options.worktreeRoot !== undefined) {
+    await removeWorktree(
+      options.git,
+      options.cwd,
+      join(options.worktreeRoot, `issue-${options.issue.number}`),
+    );
+  }
+  await deleteLocalBranch(options.git, options.cwd, {
+    branch: workBranch(options.issue.number),
+  });
+  return claimIssue(options);
 }
 
 /**
