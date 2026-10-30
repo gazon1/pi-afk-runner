@@ -16,6 +16,7 @@ for the rule that the copies follow.
 | Decision | What it settles |
 |---|---|
 | `2026-10-30-the-host-lock-is-a-real-flock.md` | the host lock, and why the runner is a Linux tool |
+| `2026-10-30-the-brief-is-the-body-when-no-comment-carries-the-marker.md` | where the brief is, and what happens when there is none |
 | `2026-10-30-the-afk-runner-is-a-pi-extension.md` | why the runner is a separate repository, and the three layers of exclusion |
 | `2026-09-25-git-hooks-worktree-isolation.md` | the worktree and the hooks that go with it |
 | `2026-09-26-writer-reviewer-pattern.md` | the two agents, and the one that writes and the one that reads |

@@ -39,12 +39,18 @@ a later run re-derives the state from them.
 | This repository guarantees | Where |
 |---|---|
 | The label `ready-for-agent` means "a human has judged this issue specified" | `.agents/skills/triage/SKILL.md:33-45` |
-| The brief is the authoritative task, and its first line is `## Agent Brief` | `.agents/skills/triage/AGENT-BRIEF.md:3,42` |
+| The brief is the authoritative task, and a brief comment's first line is `## Agent Brief` | `.agents/skills/triage/AGENT-BRIEF.md:3,42` |
 | The agent brief is behavioural, names no file paths, carries acceptance criteria and explicit scope boundaries | `.agents/skills/triage/AGENT-BRIEF.md:9-37` |
 | The label `agent-in-progress` is the runner's claim marker | `gh label list` |
 
-**The brief is found in the issue's comments**, not in the issue body. The runner passes the body
-and the comments to the agent and tells it which comment is the contract.
+**The brief is the comment that opens with `## Agent Brief`.** The runner passes the body and the
+comments to the agent and tells it, in the system prompt, which one is the contract.
+
+**When no comment carries the marker, the brief is the issue's body.** The queue this runner was
+built for was labelled before the marker was agreed, and its briefs are in the bodies — a runner
+that found no brief would take an issue with no contract at all. An issue with neither — no
+comment carrying the marker and an empty body — is **refused**, not worked: a runner that cannot
+find the contract says so instead of handing an agent an empty task.
 
 The issue body is **untrusted input**. The repository is public, so anybody can write one. The
 runner fences it, labels it as untrusted, and puts the rule that it is not to be obeyed in the
