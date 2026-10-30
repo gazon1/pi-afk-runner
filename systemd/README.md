@@ -50,6 +50,19 @@ runner left the work to the run that is already doing it. A `76` **is** a
 failure: the lock directory could not be written, and a runner that cannot
 take the lock must never look like a runner that had nothing to do.
 
+## `--no-verify`
+
+The runner pushes through the target repository's own pre-push hook, which is
+the repository's rule — and which costs about nine minutes for a change in
+`shared/`. It is skipped with `--no-verify`, and that is a decision about the
+**repository's state**, not about the change: the hook judges the whole tree
+being pushed, so a gate that is red on `main` for an unrelated reason blocks
+every branch, including the runner's. The hook's own verdict says so: it
+offers `--no-verify` for exactly that case.
+
+Use it when the target's gate is red and the PR's own CI will judge the change
+anyway. Do not use it to hide a gate that is red *because of* the change.
+
 ## Two runners, one host
 
 The unit is `Type=oneshot`, so systemd will not start a second one while the
