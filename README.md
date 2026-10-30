@@ -141,17 +141,20 @@ supports.
 ### From the CLI — unattended
 
 ```bash
-pi-afk-runner --run-once
-pi-afk-runner --run-once --repo gazon1/sing
+pi-afk-runner --repo gazon1/sing --checkout ~/work/singularity
 ```
 
-A timer or a systemd unit runs it every N minutes; one invocation takes one issue from the queue
-and works it to the end of its journey — claim, worktree, agent, push, pull request, review — and
-then stops.
+A systemd timer runs it every hour; one invocation takes one issue from the queue and works it to the
+end of its journey — claim, worktree, agent, push, pull request, review, re-count — and then stops.
 
-> **The CLI entry point does not exist yet.** It is task T011 of the plan, and this section
-> describes the command it will provide. Until then the extension loads in Pi and the pieces can be
-> driven by hand, but there is nothing to run unattended.
+The **exit code says which step the run reached**, because a scheduler has nothing else to read:
+`0` is a finished run, `10`..`80` are the steps, `75` says another runner holds the lock and `76`
+says the lock could not be taken. The unit and the codes are in [systemd/](systemd/README.md).
+
+The lock is a real `flock`, held for the whole run: a lock file a killed runner leaves behind would
+block the next one for ever, and a marker is not a lock — adding a label is idempotent. It needs
+`flock(1)`, so the host is a Linux workstation; elsewhere the runner says the lock is unusable
+rather than running two of itself.
 
 ### What a run leaves behind
 
@@ -171,6 +174,7 @@ then stops.
 | `docs/practices/` | the working practices: the agent's rules, the coding standards, the test rules, the order of the checks, the gate registry, the docs lifecycle |
 | `skills/` | the skills the runner's agent uses — the review, the gates, the change workflow, the decision log, the issue triage, and how to write for agents |
 | `pipelines/` | the CI workflow the runner's verdict tool reads |
+| `systemd/` | the service and the timer that run it unattended, and what the exit codes mean |
 
 `contract/`, `docs/practices/`, `skills/` and `pipelines/` are copies from the repository this
 runner operates on. The runner **runs** that repository's copies — the ones here are for the

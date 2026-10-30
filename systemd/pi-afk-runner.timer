@@ -1,0 +1,16 @@
+[Unit]
+Description=Run the AFK runner every hour
+
+[Timer]
+# Ten minutes after boot, so a machine that was off does not wake the runner
+# the moment it is switched on.
+OnBootSec=10min
+OnUnitActiveSec=1h
+# Not exactly on the hour: a runner that always starts at the same minute is a
+# runner that always meets the same load.
+RandomizedDelaySec=5min
+# A run that was missed while the machine was off happens when it comes back.
+Persistent=true
+
+[Install]
+WantedBy=timers.target
