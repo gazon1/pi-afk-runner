@@ -15,6 +15,10 @@
  * `flock(1)` is a Linux tool, and the runner's host is a Linux workstation. On
  * anything else the lock is **unusable**, and the runner says so rather than
  * quietly running two of itself.
+ *
+ * The lock cannot outlive the runner: the holder watches its parent and exits
+ * when the parent is gone. A lock that a killed runner left behind would keep
+ * the next runner out for ever, over a process that no longer exists.
  */
 
 import { spawn } from "node:child_process";
@@ -29,6 +33,16 @@ export const LOCK_NAME = "runner.lock";
 
 /** The word the holder prints once the lock is its own. */
 const HELD = "locked";
+
+/**
+ * The command the lock holder runs.
+ *
+ * The holder watches its parent and exits when the parent is gone. A runner
+ * that is killed — with a signal, or with a crash — must not leave the lock
+ * held by an orphan: the next runner would find the lock taken and refuse to
+ * work, for ever, over a process that no longer exists.
+ */
+export const HOLDER_COMMAND = `echo ${HELD}; while kill -0 $PPID 2>/dev/null; do sleep 1; done`;
 
 /** The lock is held by another runner. */
 export class LockHeld extends Error {
@@ -87,7 +101,7 @@ export async function takeLock(
       path,
       "sh",
       "-c",
-      `echo ${HELD}; exec sleep 2147483647`,
+      HOLDER_COMMAND,
     ],
     { stdio: ["ignore", "pipe", "pipe"] },
   );
