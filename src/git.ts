@@ -296,3 +296,61 @@ export async function addWorktree(
 ): Promise<void> {
   await git(["worktree", "add", "-b", options.branch, options.path, options.baseSha], { cwd });
 }
+
+/**
+ * The refs the runner is allowed to push.
+ *
+ * The work branch, and the claim. Nothing else — a runner that can push
+ * anywhere can push anywhere, and the guard is cheaper than the review.
+ */
+export function allowedPushRefs(issueNumber: number): readonly string[] {
+  return [`refs/heads/${workBranch(issueNumber)}`, claimRef(issueNumber)];
+}
+
+/**
+ * Refuse a ref the runner may not push.
+ *
+ * The refusal happens **before** any git command runs: a push that has already
+ * half happened is a push that has to be undone.
+ */
+export function assertPushableRef(ref: string, issueNumber: number): void {
+  const allowed = allowedPushRefs(issueNumber);
+  if (!allowed.includes(ref)) {
+    throw new Error(
+      `the runner may not push ${ref}: it pushes only ${allowed.join(" and ")}`,
+    );
+  }
+}
+
+/** Push one ref, if it is one the runner may push. */
+export async function pushRef(
+  git: GitRunner,
+  cwd: string,
+  options: {
+    readonly remote: string;
+    readonly ref: string;
+    readonly sha: string;
+    readonly issueNumber: number;
+  },
+): Promise<void> {
+  assertPushableRef(options.ref, options.issueNumber);
+  await git(["push", options.remote, `${options.sha}:${options.ref}`], { cwd });
+}
+
+/** Push the work branch. */
+export async function pushWorkBranch(
+  git: GitRunner,
+  cwd: string,
+  options: {
+    readonly remote: string;
+    readonly issueNumber: number;
+    readonly sha: string;
+  },
+): Promise<void> {
+  await pushRef(git, cwd, {
+    remote: options.remote,
+    ref: `refs/heads/${workBranch(options.issueNumber)}`,
+    sha: options.sha,
+    issueNumber: options.issueNumber,
+  });
+}

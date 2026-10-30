@@ -19,6 +19,9 @@ import {
 } from "../src/session.js";
 import {
   GitCommandFailed,
+  allowedPushRefs,
+  assertPushableRef,
+  pushRef,
   claimRef,
   claimRefName,
   readClaimBase,
@@ -39,8 +42,10 @@ import {
   RECOUNT_LABEL,
   REVIEW_MARKER,
   claimedArgs,
+  createPullRequestArgs,
   issueArgs,
   parseIssues,
+  pullRequestBody,
   parsePullRequest,
   queueArgs,
   readClaimed,
@@ -50,7 +55,12 @@ import {
 } from "../src/gh.js";
 import {
   UNCLAIMED,
+  computeDocumentsDigest,
   deriveState,
+  ensureRegistryEntry,
+  openPullRequest,
+  publishWork,
+  verdictFile,
   prepareWorktree,
   isStale,
   observePullRequest,
@@ -1009,5 +1019,202 @@ describe("the fixes", () => {
     // `refs/tags/main`.
     expect(headRef("main")).toBe("refs/heads/main");
     expect(headRef("refs/heads/main")).toBe("refs/heads/main");
+  });
+});
+
+describe("the pull request", () => {
+  it("test_push_refuses_a_ref_outside_the_issue_branch", async () => {
+    // The refusal happens before any git command runs: a push that has already
+    // half happened is a push that has to be undone.
+    const calls: string[] = [];
+    const git = async (args: readonly string[]): Promise<string> => {
+      calls.push(`git ${args.join(" ")}`);
+      return "";
+    };
+
+    await expect(
+      pushRef(
+        (args) => git(args),
+        "/tmp/does-not-matter",
+        {
+          remote: "origin",
+          ref: "refs/heads/main",
+          sha: "abc123",
+          issueNumber: 42,
+        },
+      ),
+    ).rejects.toThrow(/may not push/);
+
+    // Nothing was pushed, and no git command ran at all.
+    expect(calls).toEqual([]);
+
+    // The two refs the runner may push are the work branch and the claim.
+    expect(allowedPushRefs(42)).toEqual([
+      "refs/heads/agent/issue-42",
+      "refs/tags/afk-claim-issue-42",
+    ]);
+    expect(() => assertPushableRef("refs/heads/main", 42)).toThrow();
+    expect(() => assertPushableRef("refs/tags/afk-claim-issue-42", 42)).not.toThrow();
+    expect(() => assertPushableRef("refs/heads/agent/issue-42", 42)).not.toThrow();
+  });
+
+  it("test_the_pull_request_body_closes_the_issue", () => {
+    const body = pullRequestBody({ issueNumber: 42, title: "an issue" });
+    // `Fixes #N` is what makes GitHub close the issue when the pull request
+    // lands, and nothing else does.
+    expect(body).toContain("Fixes #42");
+
+    // And the summary comes before it, not after.
+    const withSummary = pullRequestBody({
+      issueNumber: 42,
+      title: "an issue",
+      summary: "what changed",
+    });
+    expect(withSummary.indexOf("what changed")).toBeLessThan(
+      withSummary.indexOf("Fixes #42"),
+    );
+
+    const args = createPullRequestArgs({
+      repo: "gazon1/sing",
+      branch: "agent/issue-42",
+      title: "an issue",
+      body,
+    });
+    expect(args).toContain("--head");
+    expect(args[args.indexOf("--head") + 1]).toBe("agent/issue-42");
+    expect(args[args.indexOf("--body") + 1]).toContain("Fixes #42");
+  });
+
+  it("test_a_pull_request_landing_a_change_carries_the_registry_entry_and_the_verdict_file", async () => {
+    const worktree = await mkdtemp(join(tmpdir(), "afk-change-"));
+    try {
+      const commands: string[] = [];
+      const run = async (spec: {
+        command: string;
+        args: readonly string[];
+        cwd: string;
+      }): Promise<string> => {
+        commands.push(`${spec.command} ${spec.args.join(" ")}`);
+        if (spec.args.includes("--digest")) {
+          return "sha256:deadbeef\n";
+        }
+        return "";
+      };
+
+      // The digest is computed by the repository's own tool, and the registry
+      // entry is created by the repository's own importer. Two implementations
+      // of a digest would drift apart in a way nobody notices until a verdict
+      // stops matching.
+      const digest = await computeDocumentsDigest(run, worktree, "some-change");
+      expect(digest).toBe("sha256:deadbeef");
+      expect(commands[0]).toBe("python3 scripts/check-review-verdicts.py --digest some-change");
+
+      await ensureRegistryEntry(run, worktree);
+      expect(commands[1]).toBe("python3 scripts/openspec-import-all.py");
+
+      // And the verdict file names the change, the pull request, the commit
+      // that was reviewed, and the digest of the contract it was made against.
+      const verdict = verdictFile({
+        slug: "some-change",
+        verdict: "pass",
+        date: "2026-10-30",
+        pullRequest: 1040,
+        reviewed: "be52998faaefc5589c344a556f532d85848cba2d",
+        documents: digest,
+      });
+      expect(verdict).toContain("change: some-change");
+      expect(verdict).toContain("verdict: pass");
+      expect(verdict).toContain("date: 2026-10-30");
+      expect(verdict).toContain("pr: 1040");
+      expect(verdict).toContain("reviewed: be52998faaefc5589c344a556f532d85848cba2d");
+      expect(verdict).toContain(`documents: ${digest}`);
+    } finally {
+      await rm(worktree, { recursive: true, force: true });
+    }
+  });
+
+  it("pushes the work and opens the pull request for it", async () => {
+    const pushed: string[][] = [];
+    const git = async (args: readonly string[]): Promise<string> => {
+      pushed.push([...args]);
+      return "";
+    };
+    const gh = async (args: readonly string[]): Promise<string> => {
+      if (args[0] === "pr" && args[1] === "list") {
+        return "[]";
+      }
+      return "https://github.com/gazon1/sing/pull/91\n";
+    };
+
+    const outcome = await publishWork({
+      repo: "gazon1/sing",
+      remote: "origin",
+      branch: "agent/issue-42",
+      sha: "abc123",
+      issueNumber: 42,
+      title: "an issue",
+      body: "Fixes #42",
+      cwd: "/tmp/does-not-matter",
+      git: (args) => git(args),
+      gh,
+      run: async () => "",
+    });
+
+    expect(outcome.number).toBe(91);
+    expect(outcome.created).toBe(true);
+    // The work went to the work branch, and nowhere else.
+    expect(pushed[0]?.[0]).toBe("push");
+    expect(pushed[0]?.join(" ")).toContain("refs/heads/agent/issue-42");
+  });
+
+  it("test_an_existing_pull_request_is_not_duplicated", async () => {
+    const created: string[][] = [];
+    const gh = async (args: readonly string[]): Promise<string> => {
+      created.push([...args]);
+      if (args[0] === "pr" && args[1] === "list") {
+        return JSON.stringify([
+          {
+            number: 77,
+            headRefName: "agent/issue-42",
+            labels: [],
+            comments: [],
+          },
+        ]);
+      }
+      return "";
+    };
+
+    const outcome = await openPullRequest({
+      repo: "gazon1/sing",
+      branch: "agent/issue-42",
+      title: "an issue",
+      body: "Fixes #42",
+      gh,
+      run: async () => "",
+    });
+
+    // The pull request that is already there is found, not duplicated: two
+    // pull requests for one issue split the review between them.
+    expect(outcome.number).toBe(77);
+    expect(outcome.created).toBe(false);
+    expect(created.some((args) => args[0] === "pr" && args[1] === "create")).toBe(false);
+
+    // And when there is none, one is opened.
+    const ghWithout = async (args: readonly string[]): Promise<string> => {
+      if (args[0] === "pr" && args[1] === "list") {
+        return "[]";
+      }
+      return "https://github.com/gazon1/sing/pull/91\n";
+    };
+    const fresh = await openPullRequest({
+      repo: "gazon1/sing",
+      branch: "agent/issue-42",
+      title: "an issue",
+      body: "Fixes #42",
+      gh: ghWithout,
+      run: async () => "",
+    });
+    expect(fresh.number).toBe(91);
+    expect(fresh.created).toBe(true);
   });
 });

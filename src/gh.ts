@@ -312,3 +312,76 @@ export async function readIssue(
     comments: commentBodies(record.comments),
   };
 }
+
+/**
+ * The body of the pull request.
+ *
+ * It closes the issue: `Fixes #N` is what makes GitHub close it when the
+ * pull request lands, and nothing else does.
+ */
+export function pullRequestBody(options: {
+  readonly issueNumber: number;
+  readonly title: string;
+  readonly summary?: string;
+}): string {
+  const lines: string[] = [];
+  if (options.summary !== undefined && options.summary.trim() !== "") {
+    lines.push(options.summary.trim(), "");
+  }
+  lines.push(`Fixes #${options.issueNumber}`);
+  return lines.join("\n");
+}
+
+/** The arguments that open a pull request. */
+export function createPullRequestArgs(options: {
+  readonly repo: string;
+  readonly branch: string;
+  readonly title: string;
+  readonly body: string;
+  readonly base?: string;
+}): string[] {
+  return [
+    "pr",
+    "create",
+    "--repo",
+    options.repo,
+    "--head",
+    options.branch,
+    "--base",
+    options.base ?? "main",
+    "--title",
+    options.title,
+    "--body",
+    options.body,
+  ];
+}
+
+/**
+ * The number of a pull request, from the URL `gh pr create` prints.
+ */
+export function pullRequestNumberFromUrl(url: string): number | null {
+  const match = /\/pull\/(\d+)/.exec(url);
+  if (match === null) {
+    return null;
+  }
+  return Number(match[1]);
+}
+
+/** Open a pull request and return its number. */
+export async function createPullRequest(
+  options: {
+    readonly repo: string;
+    readonly branch: string;
+    readonly title: string;
+    readonly body: string;
+    readonly base?: string;
+  },
+  gh: GhRunner = runGh,
+): Promise<number> {
+  const output = await gh(createPullRequestArgs(options));
+  const number = pullRequestNumberFromUrl(output.trim());
+  if (number === null) {
+    throw new Error(`gh did not say which pull request it opened: ${output.trim()}`);
+  }
+  return number;
+}

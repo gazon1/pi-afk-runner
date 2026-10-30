@@ -28,18 +28,22 @@
 import {
   addWorktree,
   fetchRef,
+  pushWorkBranch,
   runCommand,
   workBranch,
   type CommandRunner,
+  type GitRunner,
 } from "./git.js";
 import {
   CLAIM_LABEL,
+  createPullRequest,
+  readPullRequest,
   RECOUNT_LABEL,
   REVIEW_MARKER,
+  type GhRunner,
   type IssueSummary,
   type PullRequestSummary,
 } from "./gh.js";
-import type { GitRunner } from "./git.js";
 
 /** The states that can be derived from the observables. */
 export type DerivedState =
@@ -244,4 +248,151 @@ export async function prepareWorktree(
   });
 
   return { path: options.worktreePath, branch };
+}
+
+/** The tool that computes a change's contract digest — the repository's own. */
+export const DIGEST_TOOL = "scripts/check-review-verdicts.py";
+
+/** The tool that creates a change's registry entry — the repository's own. */
+export const REGISTRY_TOOL = "scripts/openspec-import-all.py";
+
+/**
+ * The digest of a change's contract documents.
+ *
+ * It is computed by the repository's own tool, not here: the gate recomputes
+ * it with the same implementation, and two implementations of a digest would
+ * drift apart in a way nobody notices until a verdict stops matching.
+ */
+export async function computeDocumentsDigest(
+  run: CommandRunner,
+  cwd: string,
+  slug: string,
+): Promise<string> {
+  const output = await run({
+    command: "python3",
+    args: [DIGEST_TOOL, "--digest", slug],
+    cwd,
+  });
+  const digest = output.trim();
+  if (!digest.startsWith("sha256:")) {
+    throw new Error(`the digest tool did not return a digest: ${digest}`);
+  }
+  return digest;
+}
+
+/**
+ * Create the registry entry of a change, with the repository's own importer.
+ *
+ * The importer creates the records that are missing and leaves the ones that
+ * exist alone, so running it is how a change gets its entry.
+ */
+export async function ensureRegistryEntry(
+  run: CommandRunner,
+  cwd: string,
+): Promise<void> {
+  await run({ command: "python3", args: [REGISTRY_TOOL], cwd });
+}
+
+/**
+ * The verdict file of a change.
+ *
+ * A verdict file that exists says a review happened. It names the change, the
+ * pull request whose review it records, the commit that was reviewed, and the
+ * digest of the contract documents the review was made against — so a verdict
+ * cannot silently go on speaking for a contract that has since changed.
+ */
+export function verdictFile(options: {
+  readonly slug: string;
+  readonly verdict: "pass" | "fail";
+  readonly date: string;
+  readonly pullRequest: number;
+  readonly reviewed: string;
+  readonly documents: string;
+  readonly body?: string;
+}): string {
+  const frontmatter = [
+    "---",
+    `change: ${options.slug}`,
+    `verdict: ${options.verdict}`,
+    `date: ${options.date}`,
+    `pr: ${options.pullRequest}`,
+    `reviewed: ${options.reviewed}`,
+    `documents: ${options.documents}`,
+    "---",
+    "",
+    "",
+  ].join("\n");
+  const body =
+    options.body ??
+    [
+      "## What was reviewed",
+      "",
+      `The change \`${options.slug}\` — its contract documents, as the digest above records them.`,
+      "",
+    ].join("\n");
+  return `${frontmatter}${body}`;
+}
+
+/**
+ * Open the pull request, or find the one that is already open.
+ *
+ * A pull request that already exists for the branch is **found**, not
+ * duplicated: two pull requests for one issue split the review between them
+ * and neither carries the other's history.
+ */
+export async function openPullRequest(options: {
+  readonly repo: string;
+  readonly branch: string;
+  readonly title: string;
+  readonly body: string;
+  readonly base?: string;
+  readonly gh: GhRunner;
+  readonly run: CommandRunner;
+}): Promise<{ readonly number: number; readonly created: boolean }> {
+  const existing = await readPullRequest(options.repo, options.branch, options.gh);
+  if (existing !== null) {
+    return { number: existing.number, created: false };
+  }
+  const number = await createPullRequest(
+    {
+      repo: options.repo,
+      branch: options.branch,
+      title: options.title,
+      body: options.body,
+      ...(options.base === undefined ? {} : { base: options.base }),
+    },
+    options.gh,
+  );
+  return { number, created: true };
+}
+
+/**
+ * Push the work, and open the pull request for it.
+ */
+export async function publishWork(options: {
+  readonly repo: string;
+  readonly remote: string;
+  readonly branch: string;
+  readonly sha: string;
+  readonly issueNumber: number;
+  readonly title: string;
+  readonly body: string;
+  readonly cwd: string;
+  readonly git: GitRunner;
+  readonly gh: GhRunner;
+  readonly run: CommandRunner;
+}): Promise<{ readonly number: number; readonly created: boolean }> {
+  await pushWorkBranch(options.git, options.cwd, {
+    remote: options.remote,
+    issueNumber: options.issueNumber,
+    sha: options.sha,
+  });
+  return openPullRequest({
+    repo: options.repo,
+    branch: options.branch,
+    title: options.title,
+    body: options.body,
+    gh: options.gh,
+    run: options.run,
+  });
 }
