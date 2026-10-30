@@ -31,6 +31,7 @@ import {
   claimRef,
   createClaimObject,
   deleteClaim,
+  fetchRef,
   headRef,
   pushClaim,
   readRemoteSha,
@@ -101,6 +102,13 @@ export async function claimIssue(options: ClaimOptions): Promise<ClaimOutcome> {
     if (base === null) {
       throw new Error(`${remote} has no ${baseBranch} to take the claim from`);
     }
+
+    // The base has to be **here** before the claim object can point at it. The
+    // claim is a tag, and a tag whose target the repository does not hold
+    // cannot be pushed — git says "could not read tagged object" and the claim
+    // is lost. The base is fetched by that exact commit, so the commit the
+    // claim names and the commit that is local cannot disagree.
+    await fetchRef(git, cwd, { remote, ref: base });
 
     const objectId = await createClaimObject(git, cwd, {
       baseSha: base,
