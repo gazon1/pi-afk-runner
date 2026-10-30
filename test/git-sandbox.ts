@@ -36,7 +36,7 @@
 import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -207,7 +207,9 @@ export async function createFixtureRepository(
 
   await writeFile(join(repo, "README.md"), "# the fixture\n", "utf8");
   for (const [name, content] of Object.entries(options.files ?? {})) {
-    await writeFile(join(repo, name), content, "utf8");
+    const path = join(repo, name);
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, content, "utf8");
   }
   await git(["add", "-A"], { cwd: repo, env });
   await git(["commit", "-q", "-m", "the fixture"], { cwd: repo, env });

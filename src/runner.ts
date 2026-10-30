@@ -26,12 +26,20 @@
  */
 
 import {
+  addWorktree,
+  fetchRef,
+  runCommand,
+  workBranch,
+  type CommandRunner,
+} from "./git.js";
+import {
   CLAIM_LABEL,
   RECOUNT_LABEL,
   REVIEW_MARKER,
   type IssueSummary,
   type PullRequestSummary,
 } from "./gh.js";
+import type { GitRunner } from "./git.js";
 
 /** The states that can be derived from the observables. */
 export type DerivedState =
@@ -167,4 +175,73 @@ export function isStale(
     return false;
   }
   return now.getTime() - updated >= staleAfterMs;
+}
+
+/** The script the repository uses to prepare a worktree. */
+export const SETUP_SCRIPT = "scripts/setup-worktree.sh";
+
+export interface WorktreeOptions {
+  /** The checkout the worktree is created from. */
+  readonly repo: string;
+  /** The remote the base comes from. */
+  readonly remote: string;
+  /** The branch the base is read from — `origin/main` in practice. */
+  readonly baseBranch: string;
+  /** The commit the claim was taken against. */
+  readonly baseSha: string;
+  /** The issue being worked. */
+  readonly issueNumber: number;
+  /** Where the worktree is created. */
+  readonly worktreePath: string;
+  /** The directory the git commands run in. */
+  readonly cwd: string;
+  readonly git: GitRunner;
+  /** How the repository's own setup script is run. */
+  readonly run?: CommandRunner;
+}
+
+/**
+ * Create the worktree and prepare it.
+ *
+ * The worktree is created from the base the claim recorded — the same commit
+ * the claim was taken against — on the branch the work goes on.
+ *
+ * Then the repository's **own** setup script runs, inside the worktree, before
+ * anything else happens there. It is the repository's script and not a
+ * substitute for it, because it does what a generic worktree tool cannot: the
+ * `core.bare` repair, the per-worktree `core.hooksPath`, the `.env` copy and
+ * the private Gradle home. The runner does not re-derive any of that; it asks
+ * the repository, through `config/git-layout.sh`, which is what the setup
+ * script does when it runs.
+ *
+ * The script is run **from the worktree's own copy**. The script works on the
+ * checkout it lives in — it changes into that checkout and repairs it — so the
+ * canonical checkout's copy would repair the canonical checkout, and the
+ * worktree would be left unprepared.
+ */
+export async function prepareWorktree(
+  options: WorktreeOptions,
+): Promise<{ readonly path: string; readonly branch: string }> {
+  const branch = workBranch(options.issueNumber);
+  const run = options.run ?? runCommand;
+
+  // The base's objects have to be here before a worktree can be made of them.
+  await fetchRef(options.git, options.cwd, {
+    remote: options.remote,
+    ref: options.baseBranch,
+  });
+
+  await addWorktree(options.git, options.cwd, {
+    path: options.worktreePath,
+    branch,
+    baseSha: options.baseSha,
+  });
+
+  await run({
+    command: "bash",
+    args: [SETUP_SCRIPT],
+    cwd: options.worktreePath,
+  });
+
+  return { path: options.worktreePath, branch };
 }

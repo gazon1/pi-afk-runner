@@ -34,6 +34,18 @@ export const CLAIM_TAGGER = {
   email: "afk-runner@localhost",
 } as const;
 
+/** A command to run, and where. */
+export interface CommandSpec {
+  readonly command: string;
+  readonly args: readonly string[];
+  readonly cwd: string;
+  /** Written to the command's standard input, and its standard input closed. */
+  readonly input?: string;
+}
+
+/** Runs a command and returns its standard output. */
+export type CommandRunner = (spec: CommandSpec) => Promise<string>;
+
 /** Runs a git command and returns its standard output. */
 export type GitRunner = (
   args: readonly string[],
@@ -66,9 +78,24 @@ export class GitCommandFailed extends Error {
  * for input that never comes.
  */
 export const runGit: GitRunner = (args, options) =>
+  runCommand({
+    command: "git",
+    args: [...args],
+    cwd: options.cwd,
+    ...(options.input === undefined ? {} : { input: options.input }),
+  });
+
+/**
+ * Runs a command.
+ *
+ * `spawn` rather than `execFile`, because `git mktag` reads its payload from
+ * stdin, and `execFile` has no way to write to it — the command would wait
+ * for input that never comes.
+ */
+export const runCommand: CommandRunner = (spec) =>
   new Promise<string>((resolve, reject) => {
-    const child = spawn("git", [...args], {
-      cwd: options.cwd,
+    const child = spawn(spec.command, [...spec.args], {
+      cwd: spec.cwd,
       stdio: ["pipe", "pipe", "pipe"],
     });
     let stdout = "";
@@ -86,14 +113,14 @@ export const runGit: GitRunner = (args, options) =>
       if (code === 0) {
         resolve(stdout);
       } else {
-        reject(new GitCommandFailed(code ?? 1, args, stderr));
+        reject(new GitCommandFailed(code ?? 1, spec.args, stderr));
       }
     });
     child.stdin.on("error", () => {
       // A command that exits before reading its input closes the pipe; that is
       // the command's business, not an error of ours.
     });
-    child.stdin.end(options.input ?? "");
+    child.stdin.end(spec.input ?? "");
   });
 
 /** The name of the claim ref for an issue. */
@@ -231,4 +258,31 @@ export async function readClaimBase(
     }
   }
   return null;
+}
+
+/** Bring one ref's objects down from the remote. */
+export async function fetchRef(
+  git: GitRunner,
+  cwd: string,
+  options: { readonly remote: string; readonly ref: string },
+): Promise<void> {
+  await git(["fetch", options.remote, options.ref], { cwd });
+}
+
+/**
+ * Create the worktree the work happens in.
+ *
+ * The branch is created here, on the base the claim recorded, so the work
+ * starts from exactly the commit the claim was taken against.
+ */
+export async function addWorktree(
+  git: GitRunner,
+  cwd: string,
+  options: {
+    readonly path: string;
+    readonly branch: string;
+    readonly baseSha: string;
+  },
+): Promise<void> {
+  await git(["worktree", "add", "-b", options.branch, options.path, options.baseSha], { cwd });
 }

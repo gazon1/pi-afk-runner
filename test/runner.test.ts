@@ -5,6 +5,11 @@ import { describe, expect, it } from "vitest";
 import { claimIssue, releaseClaim } from "../src/claim.js";
 import { claimRef, claimRefName, readClaimBase, runGit, workBranch } from "../src/git.js";
 import { createFixtureRepository, gitOutput } from "./git-sandbox.js";
+import { execFile } from "node:child_process";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { promisify } from "node:util";
 import {
   GH_DEFAULT_PAGE_SIZE,
   QUEUE_LABEL,
@@ -21,6 +26,7 @@ import {
 import {
   UNCLAIMED,
   deriveState,
+  prepareWorktree,
   isStale,
   observePullRequest,
   selectIssue,
@@ -249,6 +255,8 @@ function valueAfter(args: readonly string[], flag: string): string {
   }
   return value;
 }
+
+const execFileAsync = promisify(execFile);
 
 describe("the queue", () => {
   it("test_selection_excludes_claimed_issues", async () => {
@@ -561,6 +569,85 @@ describe("the claim", () => {
         { remote: fixture.remote, issueNumber: 42 },
       );
       expect(base).toBeNull();
+    } finally {
+      await fixture.dispose();
+    }
+  });
+});
+
+describe("the worktree", () => {
+  it("test_worktree_comes_from_origin_main_with_the_setup_script_run", async () => {
+    // The stand-in for the repository's own setup script. It records where it
+    // ran and what it saw, so the test can say that it ran *inside the
+    // worktree*, and that the worktree was on the base by then.
+    const setupScript = [
+      "#!/usr/bin/env bash",
+      "set -euo pipefail",
+      'echo "ran in $(pwd) at $(git rev-parse HEAD)" > .setup-ran',
+      "",
+    ].join("\n");
+
+    const fixture = await createFixtureRepository({
+      files: { "scripts/setup-worktree.sh": setupScript },
+    });
+    try {
+      // Move the remote's main ahead of the checkout's own main, so that
+      // "from origin/main" and "from the local main" are different answers.
+      const elsewhere = await mkdtemp(join(tmpdir(), "afk-elsewhere-"));
+      try {
+        await execFileAsync("git", ["clone", fixture.remote, elsewhere], { cwd: fixture.root });
+        await execFileAsync("git", ["config", "user.email", "t@t"], { cwd: elsewhere });
+        await execFileAsync("git", ["config", "user.name", "t"], { cwd: elsewhere });
+        await writeFile(join(elsewhere, "upstream.txt"), "from the remote\n", "utf8");
+        await execFileAsync("git", ["add", "-A"], { cwd: elsewhere });
+        await execFileAsync("git", ["commit", "-q", "-m", "upstream"], { cwd: elsewhere });
+        await execFileAsync("git", ["push", "-q", "origin", "main"], { cwd: elsewhere });
+
+        const remoteBase = await gitOutput(["rev-parse", "main"], {
+          cwd: elsewhere,
+          env: fixture.env,
+        });
+        const localBase = await gitOutput(["rev-parse", "main"], {
+          cwd: fixture.repo,
+          env: fixture.env,
+        });
+        expect(remoteBase).not.toBe(localBase);
+
+        const worktreePath = join(fixture.root, "worktree-issue-42");
+        const prepared = await prepareWorktree({
+          repo: fixture.repo,
+          remote: fixture.remote,
+          baseBranch: "main",
+          baseSha: remoteBase,
+          issueNumber: 42,
+          worktreePath,
+          cwd: fixture.repo,
+          git: (args, options) => runGit(args, options),
+        });
+
+        expect(prepared.branch).toBe("agent/issue-42");
+
+        // The worktree is on the base the remote had, not on the checkout's
+        // own (older) main.
+        const head = await gitOutput(["rev-parse", "HEAD"], {
+          cwd: worktreePath,
+          env: fixture.env,
+        });
+        expect(head).toBe(remoteBase);
+        const branch = await gitOutput(["rev-parse", "--abbrev-ref", "HEAD"], {
+          cwd: worktreePath,
+          env: fixture.env,
+        });
+        expect(branch).toBe("agent/issue-42");
+
+        // And the repository's own setup script ran, inside the worktree,
+        // against that base.
+        const marker = await readFile(join(worktreePath, ".setup-ran"), "utf8");
+        expect(marker).toContain(worktreePath);
+        expect(marker).toContain(remoteBase);
+      } finally {
+        await rm(elsewhere, { recursive: true, force: true });
+      }
     } finally {
       await fixture.dispose();
     }
