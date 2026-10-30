@@ -2,6 +2,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import { describe, expect, it } from "vitest";
 
+import { UNCLAIMED, deriveState, type Observables } from "../src/runner.js";
 import {
   PINNED_PI_RANGE,
   PiVersionMismatch,
@@ -145,5 +146,70 @@ describe("the extension entry point", () => {
 
     // And the gate's other half is reachable: the session can ask which Pi it is running against.
     expect(registered).toContain("afk-runner-version");
+  });
+});
+
+describe("the state the runner derives", () => {
+  it("test_the_state_is_derived_from_the_observables", () => {
+    // Every row of the derivation table, one case each.
+    const withObservables = (overrides: Partial<Observables>): Observables => ({
+      ...UNCLAIMED,
+      ...overrides,
+    });
+
+    // No claim → the issue is in the queue.
+    expect(deriveState(withObservables({}))).toBe("Queue");
+
+    // Claimed, nothing durable behind it, still fresh → a live run owns it.
+    expect(
+      deriveState(withObservables({ claimLabel: true, stale: false })),
+    ).toBe("Claimed");
+
+    // Claimed, nothing durable behind it, and old → the run that took it died.
+    expect(
+      deriveState(withObservables({ claimLabel: true, stale: true })),
+    ).toBe("Orphaned");
+
+    // Claimed and the branch is on the remote → the work was pushed.
+    expect(
+      deriveState(withObservables({ claimLabel: true, workBranch: true })),
+    ).toBe("Pushed");
+
+    // A pull request exists and carries no review → it needs one.
+    expect(
+      deriveState(withObservables({ claimLabel: true, pullRequest: true })),
+    ).toBe("Opened");
+
+    // It carries a review → the review is there, the re-count is not.
+    expect(
+      deriveState(
+        withObservables({ claimLabel: true, pullRequest: true, reviewComment: true }),
+      ),
+    ).toBe("Reviewed");
+
+    // It carries the re-count too → the runner is done with it.
+    expect(
+      deriveState(
+        withObservables({
+          claimLabel: true,
+          pullRequest: true,
+          reviewComment: true,
+          recountLabel: true,
+        }),
+      ),
+    ).toBe("Counted");
+  });
+
+  it("does not read a pull request's review before the pull request exists", () => {
+    // A review comment without a pull request is not a state — the gate reads
+    // the pull request's comments, so the comment cannot exist without it.
+    expect(
+      deriveState({
+        ...UNCLAIMED,
+        claimLabel: true,
+        reviewComment: true,
+        recountLabel: true,
+      }),
+    ).toBe("Claimed");
   });
 });
