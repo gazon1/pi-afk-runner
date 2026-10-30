@@ -160,6 +160,22 @@ then stops.
 - the `agent-reviewed` label on that pull request, which is what makes the review gate count it;
 - a record under `build/diagnostics/issue-<N>/` in the worktree.
 
+## What is in this repository
+
+| Directory | What it is |
+|---|---|
+| `src/` | the runner: the queue, the claim, the worktree, the session, the push, the pull request, the review, the record |
+| `test/` | the suite, in the repository it operates on's sandbox — real `git` in a temporary directory, stubbed `gh` and stubbed agent |
+| `contract/` | **a copy** of the contract this runner binds to, taken from the repository it operates on — see [contract/README.md](contract/README.md) |
+| `docs/decisions/` | the decisions behind the runner and the practices it inherits |
+| `docs/practices/` | the working practices: the agent's rules, the coding standards, the test rules, the order of the checks, the gate registry, the docs lifecycle |
+| `skills/` | the skills the runner's agent uses — the review, the gates, the change workflow, the decision log, the issue triage, and how to write for agents |
+| `pipelines/` | the CI workflow the runner's verdict tool reads |
+
+`contract/`, `docs/practices/`, `skills/` and `pipelines/` are copies from the repository this
+runner operates on. The runner **runs** that repository's copies — the ones here are for the
+tests, for the reader, and for the agent's own working rules.
+
 ## Development
 
 ```bash

