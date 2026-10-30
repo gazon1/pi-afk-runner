@@ -68,3 +68,16 @@ anyway. Do not use it to hide a gate that is red *because of* the change.
 The unit is `Type=oneshot`, so systemd will not start a second one while the
 first is running. The lock is the backstop for a runner started by hand: it
 exits `75` immediately, having read nothing and written nothing.
+
+## A claim left behind
+
+A run that is killed leaves its claim on the issue, and a claim keeps the issue
+out of the queue. The next run takes such a claim over: the stale claim's ref
+is deleted, the issue is claimed again, and the work is redone — the session
+that made it is gone with the process that died.
+
+`--stale-after-ms` is how long a claim may sit before that happens. It is a
+week here: long enough that a slow run keeps its issue, short enough that a
+killed run does not hold it for ever. A human who comments on the issue moves
+its last-update time, and the comment defers the take-over without anybody
+having to know there is one.
