@@ -31,7 +31,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node --eval \"require('fs').cpSync('src/prompts','dist/prompts',{recursive:true})\"",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
     "lint": "oxlint --deny-warnings src test",
     "test": "vitest run",
