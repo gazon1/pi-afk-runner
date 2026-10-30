@@ -21,6 +21,12 @@ This directory is a **copy** of that contract, so that:
 | `scripts/openspec-import-all.py` | `scripts/openspec-import-all.py` | the importer that creates a change's registry entry |
 | `scripts/ci-verdict.py` | `scripts/ci-verdict.py` | the tool that reads a commit's CI verdict — **its exit code is the verdict** |
 | `scripts/ci/check-agent-review.py` | `scripts/ci/check-agent-review.py` | the gate that reads the review comment, and the oracle the runner's tests assert against |
+| `scripts/src/sgate/gatekit/verdicts.py` | `scripts/src/sgate/gatekit/verdicts.py` | the vocabulary a verdict is written in — the frontmatter shape, the two verdicts, the slug of a change. Both gates read it from here, and the runner writes the file it describes |
+
+`verdicts.py` is copied **alone**, without the rest of `sgate`. The package around it is a
+gate framework — a markdown table reader, a Kotlin source reader, a findings model — and none of
+that is what the runner binds to. The one module that is, is the one that says what a verdict
+file looks like, and the runner's `verdictFile()` writes that file.
 
 ## The rule
 
