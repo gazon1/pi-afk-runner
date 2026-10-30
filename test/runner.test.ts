@@ -1334,7 +1334,6 @@ describe("the review", () => {
     });
 
     expect(outcome.verdict).toBe("pass");
-    expect(outcome.posted).toBe(true);
 
     // The comment goes first, and then the label: a label applied before the
     // comment re-counts a run that finds no review.

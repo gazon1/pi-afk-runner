@@ -485,8 +485,6 @@ const CI_BEFORE_RECOUNT = "the CI before the re-count";
 export interface ReviewOutcome {
   readonly verdict: "pass" | "fail";
   readonly comment: string;
-  /** Whether the comment was posted — it is posted once, and only once. */
-  readonly posted: boolean;
   /** The CI line, when the runner read one. */
   readonly ciVerdict: string | null;
 }
@@ -530,16 +528,15 @@ export async function reviewPullRequest(options: {
     tools: [createVerdictTool(holder)],
   });
 
-  try {
-    await runPromptArray({
-      session,
-      prompts: [REVIEW_PROMPT],
-      deadlineMs: options.deadlineMs,
-      ...(options.schedule === undefined ? {} : { schedule: options.schedule }),
-    });
-  } finally {
-    session.dispose();
-  }
+  // The session belongs to `runPromptArray` once it is given one: it disposes
+  // of it when the run is over. A second owner would make the session's life
+  // the business of two places that do not agree on who is responsible.
+  await runPromptArray({
+    session,
+    prompts: [REVIEW_PROMPT],
+    deadlineMs: options.deadlineMs,
+    ...(options.schedule === undefined ? {} : { schedule: options.schedule }),
+  });
 
   const verdict = holder.value;
   if (verdict === undefined) {
@@ -559,7 +556,7 @@ export async function reviewPullRequest(options: {
   // review of the same pull request would override this one — and a `pass`
   // after a `fail` would turn a red pull request green on a review of a
   // different diff.
-  const posted = await postReviewComment(options, comment);
+  await postReviewComment(options, comment);
 
   // Read before the label: the label starts the re-count, and the run it
   // starts is not the run that judged this commit.
@@ -573,7 +570,6 @@ export async function reviewPullRequest(options: {
   return {
     verdict: verdict.verdict,
     comment,
-    posted,
     ciVerdict: ciLine === null ? null : `${CI_BEFORE_RECOUNT}: ${ciLine}`,
   };
 }
@@ -599,9 +595,8 @@ export async function postReviewComment(
     readonly gh: GhRunner;
   },
   comment: string,
-): Promise<boolean> {
+): Promise<void> {
   await options.gh(postCommentArgs(options.repo, options.pullRequest, comment));
-  return true;
 }
 
 /** Apply the label that makes the gate count the review again. */
