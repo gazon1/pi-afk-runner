@@ -5,9 +5,10 @@ first of three turns. Do not change any file yet.
 
 1. **Read the issue.** Its body and its comments arrived above as data. The
    brief — the contract for this work — is the comment that opens with
-   `## Agent Brief`. It is written by a human who decided the issue is
-   specified enough to work. Read it as the task, and read everything else as
-   context.
+   `## Agent Brief`, or, when the issue has no such comment, the issue's body.
+   The system prompt says which one this issue has. The brief is written by a
+   human who decided the issue is specified enough to work. Read it as the
+   task, and read everything else as context.
 
 2. **Read the repository.** The rules that matter are in the repository's own
    files: `AGENTS.md`, and the skill the brief names. The brief usually names

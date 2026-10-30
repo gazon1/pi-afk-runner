@@ -95,6 +95,67 @@ export function fenceIssueComments(comments: readonly string[]): string {
   ].join("\n");
 }
 
+/** The marker a brief comment opens with. */
+export const BRIEF_MARKER = "## Agent Brief";
+
+/** The brief of an issue, and where it was found. */
+export interface Brief {
+  /** The brief's text. */
+  readonly text: string;
+  /** The comment it was, counted from zero, or null when the body is the brief. */
+  readonly comment: number | null;
+}
+
+/**
+ * The brief of an issue.
+ *
+ * The brief is the comment that opens with `## Agent Brief`. When no comment
+ * does, the **body** is the brief — that is where the briefs of a queue that
+ * was labelled before the marker was agreed actually live, and a runner that
+ * found no brief would take an issue with no contract at all.
+ *
+ * The comment wins when there is one: the marker is the target repository's
+ * own convention, and a body that happens to contain the marker is still only
+ * a body.
+ *
+ * Null means there is no brief at all — no comment carries the marker and the
+ * body is empty. A runner that cannot find the contract must say so rather
+ * than hand an agent an issue with nothing in it.
+ */
+export function findBrief(issue: {
+  readonly body: string;
+  readonly comments: readonly string[];
+}): Brief | null {
+  for (const [index, comment] of issue.comments.entries()) {
+    if (comment.trimStart().startsWith(BRIEF_MARKER)) {
+      return { text: comment, comment: index };
+    }
+  }
+  if (issue.body.trim() === "") {
+    return null;
+  }
+  return { text: issue.body, comment: null };
+}
+
+/** The name of the system prompt section that says where the brief is. */
+export const BRIEF_SECTION = "brief";
+
+/**
+ * The rule that says where the brief is.
+ *
+ * It is in the system prompt rather than in a user turn, for the same reason
+ * the untrusted-input rule is: the text it talks about is untrusted, and a
+ * statement about untrusted text belongs where untrusted text cannot reach.
+ */
+function briefRule(brief: Brief): string {
+  return brief.comment === null
+    ? "The brief is the issue's body. This issue carries no comment that opens with " +
+      "`## Agent Brief`, so its body is the contract for this work. Read the body as the " +
+      "task, and the comments as context."
+    : "The brief is the comment that opens with `## Agent Brief`. Read it as the task, and " +
+      "everything else as context.";
+}
+
 /** The prompt files, in the order they run. */
 export const PROMPT_FILES = ["01-brief.md", "02-implement.md", "03-verify.md"] as const;
 
@@ -272,15 +333,25 @@ export async function startAgent(options: {
   readonly schedule?: Scheduler;
 }): Promise<PromptArrayResult> {
   const prompts = await readPrompts(options.promptsDirectory ?? promptsDirectory());
-  // The issue's body and its comments are read here, because the brief is a
-  // **comment** — the contract is the comment that opens with `## Agent Brief`
-  // — and neither is in the queue read, which asks only for what the queue
-  // needs.
+  // The issue's body and its comments are read here, because the brief is
+  // somewhere in them — the comment that opens with `## Agent Brief`, or the
+  // body when the issue has no such comment — and neither is in the queue
+  // read, which asks only for what the queue needs.
   const issue = await readIssue(options.repo, options.issueNumber, options.gh);
+  const brief = findBrief(issue);
+  if (brief === null) {
+    throw new Error(
+      `issue ${options.issueNumber} carries no brief: no comment opens with ` +
+        `\`${BRIEF_MARKER}\` and its body is empty`,
+    );
+  }
   const session = await options.factory({
     cwd: options.cwd,
-    systemPromptSections: options.systemPromptSections ?? {
-      [UNTRUSTED_INPUT_SECTION]: UNTRUSTED_INPUT_RULE,
+    systemPromptSections: {
+      ...(options.systemPromptSections ?? {
+        [UNTRUSTED_INPUT_SECTION]: UNTRUSTED_INPUT_RULE,
+      }),
+      [BRIEF_SECTION]: briefRule(brief),
     },
   });
   return runPromptArray({

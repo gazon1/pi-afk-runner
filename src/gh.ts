@@ -296,6 +296,11 @@ export interface IssueDetail {
  * The brief is a **comment** — the contract is the comment that opens with
  * `## Agent Brief` — so the comments matter as much as the body. Neither is
  * in the queue read, which asks only for the fields the queue needs.
+ *
+ * When no comment carries the marker, the brief is the **body**: the runner
+ * reads it from there, because a queue that was labelled before the marker
+ * was agreed carries its briefs in the bodies, and a runner that found no
+ * brief would take an issue with no contract at all. See `findBrief`.
  */
 export async function readIssue(
   repo: string,

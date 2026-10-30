@@ -8,14 +8,18 @@ import {
   PROMPT_FILES,
   UNTRUSTED_INPUT_RULE,
   UNTRUSTED_INPUT_SECTION,
+  BRIEF_MARKER,
+  BRIEF_SECTION,
   fenceIssueBody,
   fenceIssueComments,
+  findBrief,
   installUntrustedInputRule,
   promptsDirectory,
   readPrompts,
   runPromptArray,
   startAgent,
   type AgentSession,
+  type SessionFactory,
 } from "../src/session.js";
 import {
   CommandFailed,
@@ -1809,6 +1813,100 @@ describe("the failure path and the record", () => {
 });
 
 /**
+ * Where the brief is.
+ *
+ * The brief is the contract for the work, and the runner has to know which
+ * text it is before it hands the issue to an agent.
+ */
+describe("the brief", () => {
+  it("test_the_brief_is_the_comment_that_opens_with_the_marker", () => {
+    const brief = findBrief({
+      body: "the body",
+      comments: ["a comment", `  ${BRIEF_MARKER}\n\nthe brief`],
+    });
+
+    expect(brief?.comment).toBe(1);
+    expect(brief?.text).toContain("the brief");
+  });
+
+  it("test_the_brief_is_the_body_when_no_comment_carries_the_marker", () => {
+    // The queue of a repository that was labelled before the marker was agreed:
+    // the briefs are in the bodies, and there is no comment that says so.
+    const brief = findBrief({
+      body: "**What this is:** the work",
+      comments: ["a comment", "another comment"],
+    });
+
+    expect(brief?.comment).toBeNull();
+    expect(brief?.text).toBe("**What this is:** the work");
+  });
+
+  it("test_an_issue_with_no_brief_at_all_is_refused", () => {
+    // Nothing to work from is not a reason to work.
+    expect(findBrief({ body: "   ", comments: ["a comment"] })).toBeNull();
+  });
+
+  it("test_the_agent_is_told_where_the_brief_is", async () => {
+    // The section is in the system prompt, because the text it talks about is
+    // untrusted and a statement about untrusted text belongs where untrusted
+    // text cannot reach.
+    const sections: Record<string, string>[] = [];
+    const factory: SessionFactory = async (options) => {
+      sections.push(options.systemPromptSections);
+      return {
+        async prompt() {},
+        async abort() {},
+        dispose() {},
+      };
+    };
+    const gh = async (args: readonly string[]): Promise<string> => {
+      if (args[0] === "issue" && args[1] === "view") {
+        return JSON.stringify({
+          body: "the body is the brief",
+          comments: [{ body: "a comment" }],
+        });
+      }
+      return "";
+    };
+
+    await startAgent({
+      factory,
+      cwd: "/tmp/does-not-matter",
+      repo: "gazon1/sing",
+      issueNumber: 42,
+      gh,
+      deadlineMs: 60_000,
+    });
+
+    expect(sections[0]?.[BRIEF_SECTION]).toContain("the issue's body");
+    expect(sections[0]?.[UNTRUSTED_INPUT_SECTION]).toContain("untrusted input");
+  });
+
+  it("test_an_issue_with_no_brief_stops_the_run", async () => {
+    const factory: SessionFactory = async () => {
+      throw new Error("the session must not be created for an issue with no brief");
+    };
+    const gh = async (args: readonly string[]): Promise<string> => {
+      if (args[0] === "issue" && args[1] === "view") {
+        return JSON.stringify({ body: "", comments: [] });
+      }
+      return "";
+    };
+
+    await expect(
+      startAgent({
+        factory,
+        cwd: "/tmp/does-not-matter",
+        repo: "gazon1/sing",
+        issueNumber: 42,
+        gh,
+        deadlineMs: 60_000,
+      }),
+    ).rejects.toThrow(/carries no brief/);
+  });
+});
+
+/**
  * The unattended front door: the lock, the exit codes, and the run itself.
  */
 describe("the CLI's run", () => {
@@ -1837,9 +1935,11 @@ describe("the CLI's run", () => {
         return "https://github.com/gazon1/sing/pull/1040\n";
       }
       if (args[0] === "issue" && args[1] === "view") {
+        // The shape the queue really has: the brief is in the body, and no
+        // comment carries the marker.
         return JSON.stringify({
-          body: "the issue",
-          comments: [{ body: "## Agent Brief\n\nthe brief" }],
+          body: "**What this is:** the work\n\n**Fix:** 1. do it",
+          comments: [{ body: "a comment" }],
         });
       }
       return "";
@@ -1860,6 +1960,7 @@ describe("the CLI's run", () => {
   function runOptions(
     fixture: Awaited<ReturnType<typeof createFixtureRepository>>,
     gh: (args: readonly string[]) => Promise<string>,
+    sections: Record<string, string>[] = [],
   ): RunOptions {
     let turn = 0;
     return {
@@ -1871,7 +1972,8 @@ describe("the CLI's run", () => {
       git: (args, options) => runGit(args, options),
       gh,
       run: async () => JSON.stringify({ verdict: "ci.yml  run 1  success" }),
-      session: async ({ cwd, tools }) => {
+      session: async ({ cwd, tools, systemPromptSections }) => {
+        sections.push(systemPromptSections);
         if (tools !== undefined) {
           // The reviewer: it answers with a verdict and nothing else.
           return {
@@ -1927,8 +2029,9 @@ describe("the CLI's run", () => {
         { number: 43, title: "the second" },
         { number: 44, title: "the third" },
       ]);
+      const sections: Record<string, string>[] = [];
 
-      const result = await runOnce(runOptions(fixture, gh));
+      const result = await runOnce(runOptions(fixture, gh, sections));
 
       // One issue, and the record names it.
       expect(result.issue).toBe(42);
@@ -1938,6 +2041,9 @@ describe("the CLI's run", () => {
       const claims = calls.filter((call) => call.includes("--add-label agent-in-progress"));
       expect(claims).toHaveLength(1);
       expect(claims[0]).toContain("42");
+
+      // And the agent was told that this issue's brief is its body.
+      expect(sections[0]?.[BRIEF_SECTION]).toContain("the issue's body");
     } finally {
       await fixture.dispose();
     }
