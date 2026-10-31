@@ -31,6 +31,7 @@ import { join } from "node:path";
 
 import { claimIssue, reclaimClaim, releaseClaim } from "./claim.js";
 import { errorMessage } from "./cli.js";
+import { GUARD_POLICY } from "./guard.js";
 import {
   UNTRUSTED_INPUT_RULE,
   UNTRUSTED_INPUT_SECTION,
@@ -1101,6 +1102,24 @@ async function headSha(git: GitRunner, cwd: string): Promise<string> {
   return (await git(["rev-parse", "HEAD"], { cwd })).trim();
 }
 
+/** Match a path against the guard's glob, where `*` matches anything. */
+function globToRegExp(pattern: string): RegExp {
+  const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*");
+  return new RegExp(`^${escaped}$`);
+}
+
+/** Whether a path is in the protected set (last matching entry wins). */
+function isProtectedPath(path: string): boolean {
+  const entries = Object.entries(GUARD_POLICY.path);
+  let verdict: string | undefined;
+  for (const [pattern, value] of entries) {
+    if (globToRegExp(pattern).test(path)) {
+      verdict = value;
+    }
+  }
+  return verdict === "deny";
+}
+
 /**
  * Commit what the runner itself wrote.
  *
@@ -1113,6 +1132,14 @@ async function commitAll(
   message: string,
 ): Promise<void> {
   await git(["add", "-A"], { cwd });
+  const staged = await git(["diff", "--cached", "--name-only"], { cwd });
+  for (const raw of staged.split("\n")) {
+    const path = raw.trim();
+    if (path === "") continue;
+    if (isProtectedPath(path)) {
+      throw new Error(`refusing to commit protected file: ${path}`);
+    }
+  }
   const status = await git(["status", "--porcelain"], { cwd });
   if (status.trim() === "") {
     return;
@@ -1203,6 +1230,11 @@ async function chooseIssue(
       // The operator named the issue. It is taken as given: the claim is what
       // excludes another runner, and a claim that fails fails loudly.
       const named = await readIssue(options.repo, options.issueNumber, options.gh);
+      if (named.state !== "OPEN") {
+        throw new Error(
+          `issue ${options.issueNumber} is ${named.state}, not OPEN`,
+        );
+      }
       namedDetail = named;
       candidates = [
         {

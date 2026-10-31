@@ -42,6 +42,8 @@ export interface CommandSpec {
   readonly cwd: string;
   /** Written to the command's standard input, and its standard input closed. */
   readonly input?: string;
+  /** Kill the child and reject after this many milliseconds. */
+  readonly timeoutMs?: number;
 }
 
 /** Runs a command and returns its standard output. */
@@ -110,10 +112,15 @@ export const runGit: GitRunner = (args, options) =>
  */
 export const runCommand: CommandRunner = (spec) =>
   new Promise<string>((resolve, reject) => {
+    const timeoutMs = spec.timeoutMs ?? 15 * 60 * 1000;
     const child = spawn(spec.command, [...spec.args], {
       cwd: spec.cwd,
       stdio: ["pipe", "pipe", "pipe"],
     });
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error(`command timed out after ${timeoutMs}ms: ${spec.command} ${spec.args.join(" ")}`));
+    }, timeoutMs);
     let stdout = "";
     let stderr = "";
     child.stdout.setEncoding("utf8");
@@ -124,8 +131,9 @@ export const runCommand: CommandRunner = (spec) =>
     child.stderr.on("data", (chunk: string) => {
       stderr += chunk;
     });
-    child.on("error", reject);
+    child.on("error", (err) => { clearTimeout(timer); reject(err); });
     child.on("close", (code) => {
+      clearTimeout(timer);
       if (code === 0) {
         resolve(stdout);
       } else {
@@ -397,6 +405,36 @@ export async function removeWorktree(
   cwd: string,
   path: string,
 ): Promise<void> {
+  // Ask git first: the path may belong to another run's worktree.
+  const list = await git(["worktree", "list", "--porcelain"], { cwd });
+  const entries = list.split(/\n\n/).map((block) => block.trim()).filter((b) => b !== "");
+  let registeredBranch: string | null = null;
+  for (const block of entries) {
+    const lines = block.split("\n");
+    const wtLine = lines.find((l) => l.startsWith("worktree "));
+    if (wtLine === undefined || wtLine.slice("worktree ".length).trim() !== path) {
+      continue;
+    }
+    const branchLine = lines.find((l) => l.startsWith("branch "));
+    registeredBranch = branchLine === undefined ? null : branchLine.slice("branch ".length).trim();
+  }
+
+  if (registeredBranch !== null) {
+    // Only our own worktrees may be removed: those on agent/issue-<N>.
+    if (!/^refs\/heads\/agent\/issue-\d+$/.test(registeredBranch)) {
+      throw new Error(
+        `refusing to remove worktree at ${path}: it is registered to branch ${registeredBranch}`,
+      );
+    }
+    // Remove via git so the registration is cleaned up, then prune.
+    await git(["worktree", "remove", "--force", path], { cwd }).catch(async () => {
+      await rm(path, { recursive: true, force: true });
+    });
+    await git(["worktree", "prune"], { cwd });
+    return;
+  }
+
+  // Not a registered worktree: a leftover directory (or nothing at all).
   await rm(path, { recursive: true, force: true });
   await git(["worktree", "prune"], { cwd });
 }

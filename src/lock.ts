@@ -42,7 +42,7 @@ const HELD = "locked";
  * held by an orphan: the next runner would find the lock taken and refuse to
  * work, for ever, over a process that no longer exists.
  */
-export const HOLDER_COMMAND = `echo ${HELD}; while kill -0 $PPID 2>/dev/null; do sleep 1; done`;
+export const HOLDER_COMMAND = `echo ${HELD}; cat`;
 
 /** The lock is held by another runner. */
 export class LockHeld extends Error {
@@ -103,7 +103,7 @@ export async function takeLock(
       "-c",
       HOLDER_COMMAND,
     ],
-    { stdio: ["ignore", "pipe", "pipe"] },
+    { stdio: ["pipe", "pipe", "pipe"] },
   );
 
   const closed = new Promise<void>((resolve) => {

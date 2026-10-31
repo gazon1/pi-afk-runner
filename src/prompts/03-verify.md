@@ -1,7 +1,9 @@
 # Check your own work before it is reviewed
 
 You have made the change and the gates have run. Now look at it again with
-fresh eyes, because you wrote it and cannot see it clearly.
+fresh eyes, because you wrote it and cannot see it clearly. Activate the
+`ponytail-review` skill (`$ponytail-review`) and run its checklist on your
+own diff.
 
 1. **Read the diff.** `git diff main...HEAD`. Every line of it is yours now.
 

@@ -1160,8 +1160,8 @@ describe("the fixes", () => {
 
     expect(turns).toEqual(["one"]);
     expect(result.aborted).toBe(true);
-    // The turn that was sent finished; the two that were not are the point.
-    expect(result.completed).toBe(1);
+    // The turn that was cut is not counted; the two that were not sent are the point.
+    expect(result.completed).toBe(0);
   });
 
   it("reads the issue body and its comments", async () => {

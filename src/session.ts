@@ -288,7 +288,7 @@ export async function runPromptArray(options: {
     // observed here, so it cannot become an unhandled rejection.
     void sent.catch(() => {});
     await Promise.race([sent, deadline]);
-    return !aborted;
+    return !stopped() && !aborted;
   };
 
   /** A stop by a human reads exactly like the deadline: the array does not go on. */

@@ -19,9 +19,10 @@ The plan is settled. Now do the work.
    this machine has no device. Fix what the gates report. A gate that fails
    is the work not being finished, not an obstacle to work around.
 
-3. **Commit.** One commit per coherent change, with a message that says what
-   changed and why. Do not push: the runner pushes, so that the branch name
-   and the push stay under its control.
+3. **Do not commit or push.** The runner commits whatever is left in the
+   worktree on your behalf and pushes under its own branch name, so the push
+   stays under its control. A commit you make yourself is not lost, but it is
+   not needed.
 
 4. **Report** what you did, what the gates said, and what you left out and
    why.
