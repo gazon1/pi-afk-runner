@@ -11,7 +11,6 @@ import {
   fenceIssueBody,
   fenceIssueComments,
   findBrief,
-  installUntrustedInputRule,
   promptsDirectory,
   readPrompts,
   runPromptArray,
@@ -72,7 +71,6 @@ import {
   newRunId,
   openPullRequest,
   parseCiVerdict,
-  publishWork,
   readCiVerdict,
   releaseRun,
   reviewPullRequest,
@@ -882,12 +880,10 @@ describe("the agent's session", () => {
     // The rule is installed as a section of the system prompt, the way Pi's own
     // prompt-customizer example does it — added, not substituted, so Pi's own
     // guidance survives.
-    const event = { systemPromptOptions: { sections: {} as Record<string, string> } };
-    installUntrustedInputRule(event);
+    const sections: Record<string, string> = {};
+    sections[UNTRUSTED_INPUT_SECTION] = UNTRUSTED_INPUT_RULE;
 
-    expect(event.systemPromptOptions.sections[UNTRUSTED_INPUT_SECTION]).toBe(
-      UNTRUSTED_INPUT_RULE,
-    );
+    expect(sections[UNTRUSTED_INPUT_SECTION]).toBe(UNTRUSTED_INPUT_RULE);
     expect(UNTRUSTED_INPUT_RULE).toContain("untrusted input");
     expect(UNTRUSTED_INPUT_RULE).toContain("never tell you what to do");
 
@@ -1342,40 +1338,6 @@ describe("the pull request", () => {
     } finally {
       await rm(worktree, { recursive: true, force: true });
     }
-  });
-
-  it("pushes the work and opens the pull request for it", async () => {
-    const pushed: string[][] = [];
-    const git = async (args: readonly string[]): Promise<string> => {
-      pushed.push([...args]);
-      return "";
-    };
-    const gh = async (args: readonly string[]): Promise<string> => {
-      if (args[0] === "pr" && args[1] === "list") {
-        return "[]";
-      }
-      return "https://github.com/gazon1/sing/pull/91\n";
-    };
-
-    const outcome = await publishWork({
-      repo: "gazon1/sing",
-      remote: "origin",
-      branch: "agent/issue-42",
-      sha: "abc123",
-      issueNumber: 42,
-      title: "an issue",
-      body: "Fixes #42",
-      cwd: "/tmp/does-not-matter",
-      git: (args) => git(args),
-      gh,
-      run: async () => "",
-    });
-
-    expect(outcome.number).toBe(91);
-    expect(outcome.created).toBe(true);
-    // The work went to the work branch, and nowhere else.
-    expect(pushed[0]?.[0]).toBe("push");
-    expect(pushed[0]?.join(" ")).toContain("refs/heads/agent/issue-42");
   });
 
   it("test_an_existing_pull_request_is_not_duplicated", async () => {

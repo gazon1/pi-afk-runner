@@ -81,7 +81,7 @@ pi install -l --approve ./
 ```
 
 That last command registers the extension with the Pi in this directory. Pi reads
-`.pi/settings.json`, which lists the nine components the runner is built from, and loads them
+`.pi/settings.json`, which lists the ten components the runner is built from, and loads them
 along with the extension itself.
 
 **`--approve` is not optional.** Project-local packages load only when the project is trusted, and
