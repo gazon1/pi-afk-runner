@@ -559,6 +559,8 @@ export async function reviewPullRequest(options: {
   readonly gh: GhRunner;
   readonly run: CommandRunner;
   readonly deadlineMs: number;
+  /** Whether somebody has stopped the run. */
+  readonly stopped?: () => boolean;
   readonly schedule?: Scheduler;
 }): Promise<ReviewOutcome> {
   const holder: { value?: ReviewVerdict } = {};
@@ -573,12 +575,18 @@ export async function reviewPullRequest(options: {
   // The session belongs to `runPromptArray` once it is given one: it disposes
   // of it when the run is over. A second owner would make the session's life
   // the business of two places that do not agree on who is responsible.
-  await runPromptArray({
+  const result = await runPromptArray({
     session,
     prompts: [REVIEW_PROMPT],
     deadlineMs: options.deadlineMs,
+    ...(options.stopped === undefined ? {} : { stopped: options.stopped }),
     ...(options.schedule === undefined ? {} : { schedule: options.schedule }),
   });
+  if (result.aborted) {
+    // The same cut the work session reports; a review that did not finish is
+    // not a review that stated no verdict.
+    throw new Error("the review's session was cut off before its last turn");
+  }
 
   const verdict = holder.value;
   if (verdict === undefined) {
@@ -1562,6 +1570,7 @@ async function runPlan(
           gh: options.gh,
           run: options.run,
           deadlineMs: reviewDeadlineMs,
+          ...(options.stopped === undefined ? {} : { stopped: options.stopped }),
         });
         state.verdict = outcome.verdict;
         return outcome.ciVerdict === null
@@ -1626,6 +1635,19 @@ async function runPlan(
     ...(options.onStepStart === undefined ? {} : { onStepStart: options.onStepStart }),
     release: async () => {
       if (!state.claimed) {
+        return;
+      }
+      // A stopped run that already pushed is not a dead run: the claim is what
+      // points the next run at its pull request. Released, the issue has no
+      // label, derives as `Queue`, and the next run works it a second time.
+      if (options.stopped?.() === true && state.pullRequest !== 0) {
+        if (state.worktreePath !== "") {
+          await removeWorktree(options.git, options.checkout, state.worktreePath).catch(
+            () => {
+              // The next run removes a worktree it could not.
+            },
+          );
+        }
         return;
       }
       await releaseRun({

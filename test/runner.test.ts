@@ -1003,6 +1003,35 @@ describe("the agent's session", () => {
     expect(result.aborted).toBe(true);
   });
 
+  it("stops on a turn whose model call failed", async () => {
+    const turns: string[] = [];
+    const session: AgentSession = {
+      async prompt(text) {
+        turns.push(text);
+      },
+      async abort() {},
+      dispose() {},
+      // The SDK settles a failed model call as a normal turn; the error is here.
+      messages: [
+        {
+          role: "assistant",
+          stopReason: "error",
+          errorMessage: "commandcode API error (429): RATE_LIMITED\nhttps://example.test",
+        },
+      ],
+    };
+
+    const run = runPromptArray({
+      session,
+      prompts: ["one", "two"],
+      deadlineMs: 60_000,
+    });
+    await expect(run).rejects.toThrow(
+      "the model's turn failed: commandcode API error (429): RATE_LIMITED",
+    );
+    expect(turns).toEqual(["one"]);
+  });
+
   it("reads the prompt array from next to the module", async () => {
     // The directory is resolved next to the module, so it is the same
     // directory whether the package runs from src/ or from the built dist/.
@@ -2375,6 +2404,176 @@ describe("the CLI's run", () => {
       // And the lock was given back at the end.
       const lock = await takeLock(lockDirectory);
       await lock.release();
+    } finally {
+      await fixture.dispose();
+    }
+  }, 60_000);
+
+  it("test_an_interrupted_run_releases_its_claim", async () => {
+    const fixture = await fixtureWithSetupScript();
+    const lockDirectory = join(fixture.root, "afk-runner");
+    try {
+      const { gh, calls } = stubGh([{ number: 42, title: "an issue" }]);
+      let aborted = false;
+      let release: (() => void) | undefined;
+      let prompted: () => void = () => {};
+      const started = new Promise<void>((resolve) => {
+        prompted = resolve;
+      });
+
+      const run = main(
+        [
+          "--repo",
+          "gazon1/sing",
+          "--checkout",
+          fixture.repo,
+          "--worktree-root",
+          join(fixture.root, "worktrees"),
+          "--lock-dir",
+          lockDirectory,
+          "--issue",
+          "42",
+        ],
+        {
+          gh,
+          session: async () => ({
+            async prompt() {
+              prompted();
+              // The turn is cut only by the abort the signal causes.
+              await new Promise<void>((resolve) => {
+                release = resolve;
+              });
+            },
+            async abort() {
+              aborted = true;
+              release?.();
+            },
+            dispose() {},
+          }),
+          run: async () => JSON.stringify({ verdict: "ci.yml  run 1  success" }),
+        },
+      );
+
+      await started;
+      process.emit("SIGINT");
+      const code = await run;
+
+      expect(aborted).toBe(true);
+      expect(code).toBe(STEP_EXIT_CODES.session);
+      // The claim a killed process would have left is released.
+      expect(calls.some((call) => call.includes("--remove-label agent-in-progress"))).toBe(true);
+    } finally {
+      await fixture.dispose();
+    }
+  }, 60_000);
+
+  it("test_an_interrupt_during_the_review_keeps_the_claim", async () => {
+    const fixture = await fixtureWithSetupScript();
+    const lockDirectory = join(fixture.root, "afk-runner");
+    try {
+      const { gh, calls } = stubGh([{ number: 42, title: "an issue" }]);
+      const work = workingSession();
+      let release: (() => void) | undefined;
+      let prompted: () => void = () => {};
+      const started = new Promise<void>((resolve) => {
+        prompted = resolve;
+      });
+
+      const run = main(
+        [
+          "--repo",
+          "gazon1/sing",
+          "--checkout",
+          fixture.repo,
+          "--worktree-root",
+          join(fixture.root, "worktrees"),
+          "--lock-dir",
+          lockDirectory,
+          "--issue",
+          "42",
+        ],
+        {
+          gh,
+          session: async (options) => {
+            if (options.tools === undefined) {
+              return work(options);
+            }
+            // The reviewer: it is cut off before it can state a verdict.
+            return {
+              async prompt() {
+                prompted();
+                await new Promise<void>((resolve) => {
+                  release = resolve;
+                });
+              },
+              async abort() {
+                release?.();
+              },
+              dispose() {},
+            };
+          },
+          run: async () => JSON.stringify({ verdict: "ci.yml  run 1  success" }),
+        },
+      );
+
+      await started;
+      process.emit("SIGINT");
+      const code = await run;
+
+      // The review was cut off, and the claim that points at the pull request stayed.
+      expect(code).toBe(STEP_EXIT_CODES.review);
+      expect(calls.some((call) => call.includes("--add-label agent-in-progress"))).toBe(true);
+      expect(calls.some((call) => call.includes("--remove-label agent-in-progress"))).toBe(false);
+      // The worktree is still scratch, and was removed.
+      expect(existsSync(join(fixture.root, "worktrees", "issue-42"))).toBe(false);
+    } finally {
+      await fixture.dispose();
+    }
+  }, 60_000);
+
+  it("test_a_stopped_sweep_is_not_a_success", async () => {
+    const fixture = await fixtureWithSetupScript();
+    const lockDirectory = join(fixture.root, "afk-runner");
+    try {
+      const { gh, calls } = stubGh([
+        { number: 42, title: "the first" },
+        { number: 43, title: "the second" },
+      ]);
+      let signalled = false;
+
+      const code = await main(
+        [
+          "--repo",
+          "gazon1/sing",
+          "--checkout",
+          fixture.repo,
+          "--worktree-root",
+          join(fixture.root, "worktrees"),
+          "--lock-dir",
+          lockDirectory,
+          "--all",
+        ],
+        {
+          gh,
+          session: workingSession(),
+          run: async (spec) => {
+            // The CI read is the last step of the first issue: the signal lands
+            // after it, between the two issues.
+            if (!signalled && spec.command === "python3") {
+              signalled = true;
+              process.emit("SIGINT");
+            }
+            return JSON.stringify({ verdict: "ci.yml  run 1  success" });
+          },
+        },
+      );
+
+      expect(signalled).toBe(true);
+      // One issue was worked, one was left in the queue; that is not a zero.
+      expect(code).toBe(STEP_EXIT_CODES.session);
+      const claims = calls.filter((call) => call.includes("--add-label agent-in-progress"));
+      expect(claims).toHaveLength(1);
+      expect(claims[0]).toContain(" 42 ");
     } finally {
       await fixture.dispose();
     }
