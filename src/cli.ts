@@ -72,15 +72,13 @@ export const STEP_EXIT_CODES: Readonly<Record<string, number>> = {
 export const DEFAULT_STALE_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
 
 /**
- * Two hours — the wall-clock ceiling on one turn of the agent.
+ * One hour — the wall-clock ceiling on the run.
  *
- * A turn is a long one: the agent reads the repository, writes the change and
- * runs the gates, and the gates of a Kotlin Multiplatform repository take
- * minutes. Two hours is long enough for the work and short enough that a
- * session that has stopped making progress is cut off rather than left to
- * burn a night.
+ * The budget is shared by the work session and the review session; neither
+ * may exceed the remainder, and a run that spends it all does not start the
+ * second session.
  */
-export const DEFAULT_DEADLINE_MS = 2 * 60 * 60 * 1000;
+export const DEFAULT_DEADLINE_MS = 60 * 60 * 1000;
 
 /** What the command line says. */
 export interface CliOptions {
@@ -131,7 +129,7 @@ export const USAGE = [
   "  --agent-dir <path>      Pi's agent directory (default: ~/.pi/agent)",
   "  --model <provider/id>   the model the agent runs on (default: the provider's first)",
   "  --no-verify             skip the target repository's pre-push hook when pushing",
-  "  --deadline-ms <n>       the ceiling on one turn of the agent (default: 7200000)",
+  "  --deadline-ms <n>       the ceiling on the run (default: 3600000)",
   "  --stale-after-ms <n>    how long a claim may sit (default: 604800000 — a week)",
   "  --help                  this text",
 ].join("\n");

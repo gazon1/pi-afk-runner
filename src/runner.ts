@@ -1383,7 +1383,8 @@ async function runPlan(
   };
 
   const works = plan.kind === "work" || plan.kind === "reclaim";
-  const reviews = works || plan.kind === "pull request" || plan.kind === "review";
+  let reviews = works || plan.kind === "pull request" || plan.kind === "review";
+  let workSessionStartedAt: number | undefined;
 
   const steps: Step[] = [];
 
@@ -1434,6 +1435,7 @@ async function runPlan(
     steps.push({
       name: "session",
       run: async () => {
+        workSessionStartedAt = Date.now();
         const result = await startAgent({
           factory: options.session,
           cwd: state.worktreePath,
@@ -1444,6 +1446,10 @@ async function runPlan(
           deadlineMs: options.deadlineMs,
           ...(options.stopped === undefined ? {} : { stopped: options.stopped }),
         });
+        const workElapsedMs = workSessionStartedAt === undefined ? 0 : Date.now() - workSessionStartedAt;
+        if (workElapsedMs >= options.deadlineMs) {
+          reviews = false;
+        }
         if (result.aborted) {
           // The deadline is one reason a turn is cut; a human stopping the run is
           // another, and the message must not claim a clock it cannot see.
@@ -1520,6 +1526,18 @@ async function runPlan(
     steps.push({
       name: "review",
       run: async () => {
+        if (!reviews) {
+          return "skipped";
+        }
+        let reviewDeadlineMs = options.deadlineMs;
+        if (workSessionStartedAt !== undefined) {
+          const elapsed = Date.now() - workSessionStartedAt;
+          reviewDeadlineMs = options.deadlineMs - elapsed;
+          if (reviewDeadlineMs <= 0) {
+            reviews = false;
+            return "skipped";
+          }
+        }
         state.reviewedSha = await headSha(options.git, state.worktreePath);
         const outcome = await reviewPullRequest({
           repo: options.repo,
@@ -1528,7 +1546,7 @@ async function runPlan(
           factory: options.session,
           gh: options.gh,
           run: options.run,
-          deadlineMs: options.deadlineMs,
+          deadlineMs: reviewDeadlineMs,
         });
         state.verdict = outcome.verdict;
         return outcome.verdict;
