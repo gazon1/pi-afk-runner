@@ -489,6 +489,7 @@ export function liveFrontDoor(
         }
         await run.controller.dispose();
         session = null;
+        working = false;
         live = null;
         try {
           ctx.ui.setWidget(LOG_KEY, undefined);
@@ -613,9 +614,17 @@ export function liveFrontDoor(
         return;
       }
     }
-    const switched = await ctx.switchSession(target.transcript as string);
-    if (switched.cancelled) {
-      talk(ctx, "afk-runner: the switch was cancelled", "info");
+    try {
+      const switched = await ctx.switchSession(target.transcript as string);
+      if (switched.cancelled) {
+        talk(ctx, "afk-runner: the switch was cancelled", "info");
+      }
+    } catch (failure) {
+      talk(
+        ctx,
+        `afk-runner: the session could not be opened: ${errorMessage(failure)}`,
+        "error",
+      );
     }
   };
 
