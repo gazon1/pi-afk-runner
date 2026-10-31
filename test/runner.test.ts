@@ -2563,6 +2563,39 @@ describe("the CLI's run", () => {
       }
     }, 60_000);
 
+    it("test_the_pull_request_is_opened_against_the_base_the_run_worked", async () => {
+      const fixture = await fixtureWithSetupScript();
+      try {
+        // A base that is not `main`. `gh pr create` falls back to `main` when
+        // no base is given, so only a non-default base shows whether the run
+        // passes its own base through.
+        const base = (await runGit(["rev-parse", "HEAD"], { cwd: fixture.repo })).trim();
+        await runGit(["push", fixture.remote, `${base}:refs/heads/staging`], {
+          cwd: fixture.repo,
+        });
+
+        const issue = {
+          number: 42,
+          title: "an issue",
+          labels: [],
+          updatedAt: "2026-10-30T08:59:30Z",
+        };
+        const { gh, calls } = stubGh([issue]);
+
+        await runOnce({
+          ...runOptions(fixture, gh),
+          baseBranch: "staging",
+          staleAfterMs: 60_000,
+          now: new Date("2026-10-30T09:00:00Z"),
+        });
+
+        const created = calls.find((call) => call.includes("pr create"));
+        expect(created).toContain("--base staging");
+      } finally {
+        await fixture.dispose();
+      }
+    }, 60_000);
+
     it("test_a_branch_with_no_commits_is_not_work", async () => {
       const fixture = await fixtureWithSetupScript();
       try {

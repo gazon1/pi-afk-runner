@@ -1523,6 +1523,11 @@ async function runPlan(
             issueNumber: issue.number,
             title: issue.title,
           }),
+          // The base the run worked from, not gh's default: the worktree, the
+          // claim and the state observation all used this one, and a pull
+          // request against another branch would be judged by a different
+          // history than the one that was worked.
+          base: options.baseBranch,
           gh: options.gh,
           run: options.run,
         });
