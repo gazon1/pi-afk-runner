@@ -812,7 +812,19 @@ describe("the worktree", () => {
       // run claimed: a retry does not work on the main of an hour ago.
       await writeFile(join(fixture.repo, "moved-on.txt"), "the base moved\n", "utf8");
       await git(["add", "-A"], { cwd: fixture.repo });
-      await git(["commit", "-q", "-m", "the base moves on"], { cwd: fixture.repo });
+      await git(
+        [
+          "-c",
+          "user.name=Fixture",
+          "-c",
+          "user.email=fixture@example.com",
+          "commit",
+          "-q",
+          "-m",
+          "the base moves on",
+        ],
+        { cwd: fixture.repo },
+      );
       await git(["push", "-q", "origin", "main"], { cwd: fixture.repo });
       const movedBase = await gitOutput(["rev-parse", "main"], {
         cwd: fixture.repo,
