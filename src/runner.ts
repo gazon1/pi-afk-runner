@@ -30,6 +30,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { claimIssue, reclaimClaim, releaseClaim } from "./claim.js";
+import { errorMessage } from "./cli.js";
 import {
   UNTRUSTED_INPUT_RULE,
   UNTRUSTED_INPUT_SECTION,
@@ -67,6 +68,7 @@ import {
   RECOUNT_LABEL,
   REVIEW_MARKER,
   type GhRunner,
+  type IssueDetail,
   type IssueSummary,
   type PullRequestSummary,
 } from "./gh.js";
@@ -716,6 +718,8 @@ export type PlanKind =
 export interface Plan {
   readonly kind: PlanKind;
   readonly issue: IssueSummary;
+  /** The full issue, when it was already read (named issue). */
+  readonly issueDetail?: IssueDetail;
   /** The pull request behind it, when there is one. */
   readonly pullRequest: PullRequestSummary | null;
 }
@@ -771,11 +775,6 @@ export interface RunOutcome {
   readonly steps: readonly StepRecord[];
   /** Where the record was written. */
   readonly record: string;
-}
-
-/** The message of a failure, whatever it was thrown as. */
-function errorMessage(failure: unknown): string {
-  return failure instanceof Error ? failure.message : String(failure);
 }
 
 /** The first line of what a step printed. */
@@ -1197,12 +1196,14 @@ async function chooseIssue(
   options: RunOptions,
   now: Date,
 ): Promise<Plan | null> {
+  let namedDetail: IssueDetail | undefined;
   let candidates: IssueSummary[];
   try {
     if (options.issueNumber !== undefined) {
       // The operator named the issue. It is taken as given: the claim is what
       // excludes another runner, and a claim that fails fails loudly.
       const named = await readIssue(options.repo, options.issueNumber, options.gh);
+      namedDetail = named;
       candidates = [
         {
           number: options.issueNumber,
@@ -1238,7 +1239,7 @@ async function chooseIssue(
     });
     const plan = planFor(observation);
     if (plan.kind !== "none") {
-      return plan;
+      return namedDetail === undefined ? plan : { ...plan, issueDetail: namedDetail };
     }
   }
 
@@ -1378,6 +1379,7 @@ async function runPlan(
           cwd: state.worktreePath,
           repo: options.repo,
           issueNumber: issue.number,
+          ...(plan.issueDetail === undefined ? {} : { issue: plan.issueDetail }),
           gh: options.gh,
           deadlineMs: options.deadlineMs,
           ...(options.stopped === undefined ? {} : { stopped: options.stopped }),

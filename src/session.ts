@@ -28,7 +28,7 @@ import { fileURLToPath } from "node:url";
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
-import { readIssue, type GhRunner } from "./gh.js";
+import { readIssue, type GhRunner, type IssueDetail } from "./gh.js";
 
 /**
  * The rule that keeps an issue body as data.
@@ -345,6 +345,8 @@ export async function startAgent(options: {
   readonly repo: string;
   /** The issue being worked. */
   readonly issueNumber: number;
+  /** The already-read issue, when available. */
+  readonly issue?: IssueDetail;
   /** How the issue is read. */
   readonly gh?: GhRunner;
   readonly systemPromptSections?: Record<string, string>;
@@ -359,7 +361,8 @@ export async function startAgent(options: {
   // somewhere in them — the comment that opens with `## Agent Brief`, or the
   // body when the issue has no such comment — and neither is in the queue
   // read, which asks only for what the queue needs.
-  const issue = await readIssue(options.repo, options.issueNumber, options.gh);
+  const issue =
+    options.issue ?? (await readIssue(options.repo, options.issueNumber, options.gh));
   const brief = findBrief(issue);
   if (brief === null) {
     throw new Error(

@@ -198,7 +198,7 @@ export async function deliverRow(
   boundary: QueueBoundary,
 ): Promise<{ readonly outcome: "completed" }> {
   const images = row.images.length === 0 ? undefined : row.images;
-  if (boundary === "idle" || boundary === "settled") {
+  if (boundary === "settled") {
     await session.prompt(row.text, images === undefined ? {} : { images });
   } else if (row.lane === "steer") {
     await session.steer(row.text, images);
