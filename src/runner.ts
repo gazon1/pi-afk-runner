@@ -1550,7 +1550,9 @@ async function runPlan(
           deadlineMs: reviewDeadlineMs,
         });
         state.verdict = outcome.verdict;
-        return outcome.verdict;
+        return outcome.ciVerdict === null
+          ? outcome.verdict
+          : `${outcome.verdict} — ${outcome.ciVerdict}`;
       },
     });
   }
