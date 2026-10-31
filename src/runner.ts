@@ -30,6 +30,8 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { claimIssue, reclaimClaim, releaseClaim } from "./claim.js";
+import { errorMessage } from "./cli.js";
+import { GUARD_POLICY } from "./guard.js";
 import {
   UNTRUSTED_INPUT_RULE,
   UNTRUSTED_INPUT_SECTION,
@@ -67,6 +69,7 @@ import {
   RECOUNT_LABEL,
   REVIEW_MARKER,
   type GhRunner,
+  type IssueDetail,
   type IssueSummary,
   type PullRequestSummary,
 } from "./gh.js";
@@ -716,6 +719,8 @@ export type PlanKind =
 export interface Plan {
   readonly kind: PlanKind;
   readonly issue: IssueSummary;
+  /** The full issue, when it was already read (named issue). */
+  readonly issueDetail?: IssueDetail;
   /** The pull request behind it, when there is one. */
   readonly pullRequest: PullRequestSummary | null;
 }
@@ -771,11 +776,6 @@ export interface RunOutcome {
   readonly steps: readonly StepRecord[];
   /** Where the record was written. */
   readonly record: string;
-}
-
-/** The message of a failure, whatever it was thrown as. */
-function errorMessage(failure: unknown): string {
-  return failure instanceof Error ? failure.message : String(failure);
 }
 
 /** The first line of what a step printed. */
@@ -1102,6 +1102,24 @@ async function headSha(git: GitRunner, cwd: string): Promise<string> {
   return (await git(["rev-parse", "HEAD"], { cwd })).trim();
 }
 
+/** Match a path against the guard's glob, where `*` matches anything. */
+function globToRegExp(pattern: string): RegExp {
+  const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*");
+  return new RegExp(`^${escaped}$`);
+}
+
+/** Whether a path is in the protected set (last matching entry wins). */
+function isProtectedPath(path: string): boolean {
+  const entries = Object.entries(GUARD_POLICY.path);
+  let verdict: string | undefined;
+  for (const [pattern, value] of entries) {
+    if (globToRegExp(pattern).test(path)) {
+      verdict = value;
+    }
+  }
+  return verdict === "deny";
+}
+
 /**
  * Commit what the runner itself wrote.
  *
@@ -1114,6 +1132,14 @@ async function commitAll(
   message: string,
 ): Promise<void> {
   await git(["add", "-A"], { cwd });
+  const staged = await git(["diff", "--cached", "--name-only"], { cwd });
+  for (const raw of staged.split("\n")) {
+    const path = raw.trim();
+    if (path === "") continue;
+    if (isProtectedPath(path)) {
+      throw new Error(`refusing to commit protected file: ${path}`);
+    }
+  }
   const status = await git(["status", "--porcelain"], { cwd });
   if (status.trim() === "") {
     return;
@@ -1197,12 +1223,19 @@ async function chooseIssue(
   options: RunOptions,
   now: Date,
 ): Promise<Plan | null> {
+  let namedDetail: IssueDetail | undefined;
   let candidates: IssueSummary[];
   try {
     if (options.issueNumber !== undefined) {
       // The operator named the issue. It is taken as given: the claim is what
       // excludes another runner, and a claim that fails fails loudly.
       const named = await readIssue(options.repo, options.issueNumber, options.gh);
+      if (named.state !== "OPEN") {
+        throw new Error(
+          `issue ${options.issueNumber} is ${named.state}, not OPEN`,
+        );
+      }
+      namedDetail = named;
       candidates = [
         {
           number: options.issueNumber,
@@ -1238,7 +1271,7 @@ async function chooseIssue(
     });
     const plan = planFor(observation);
     if (plan.kind !== "none") {
-      return plan;
+      return namedDetail === undefined ? plan : { ...plan, issueDetail: namedDetail };
     }
   }
 
@@ -1378,6 +1411,7 @@ async function runPlan(
           cwd: state.worktreePath,
           repo: options.repo,
           issueNumber: issue.number,
+          ...(plan.issueDetail === undefined ? {} : { issue: plan.issueDetail }),
           gh: options.gh,
           deadlineMs: options.deadlineMs,
           ...(options.stopped === undefined ? {} : { stopped: options.stopped }),

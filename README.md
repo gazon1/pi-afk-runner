@@ -30,16 +30,8 @@ in `package.json` and in `.pi/settings.json`:
 
 | Component | Version | What it does |
 |---|---|---|
-| `pi-subagents` | 0.84.0 | delegation in an isolated context, in its own process |
-| `pi-advisor-flow` | 0.14.3 | the executor/advisor flow |
-| `@quintinshaw/pi-dynamic-workflows` | 3.15.0 | the multi-step workflow |
-| `pi-lens` | 4.4.7 | live lint and format feedback inside the turn |
 | `pi-queue-steer-factory` | 0.17.11 | the steer queue: a human's correction, delivered at a turn boundary |
 | `@gotgenes/pi-permission-system` | 42.0.0 | the guard: what must never be touched |
-| `agents-cron` | 0.15.0 | cron, isolated runs, the run store |
-| `@signalridge/pi-worktree` | 1.4.5 | the worktree |
-| `@narumitw/pi-github-pr` | 0.49.8 | the pull request and its checks |
-| `@drix10/agent-flow` | 1.2.7 | the builder / reviewer / QA roles, as skills |
 
 Three things are irreducibly ours: the **exclusive claim** (a remote ref carrying a nonce — a
 label cannot be a lock, because adding one is idempotent), the **binding to the contract above**,

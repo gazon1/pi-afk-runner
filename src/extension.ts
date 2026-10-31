@@ -198,7 +198,7 @@ export async function deliverRow(
   boundary: QueueBoundary,
 ): Promise<{ readonly outcome: "completed" }> {
   const images = row.images.length === 0 ? undefined : row.images;
-  if (boundary === "idle" || boundary === "settled") {
+  if (boundary === "settled") {
     await session.prompt(row.text, images === undefined ? {} : { images });
   } else if (row.lane === "steer") {
     await session.steer(row.text, images);
@@ -289,7 +289,7 @@ export function liveFrontDoor(
    * the transcript Pi switches to, and the worktree it was written in.
    */
   let last: {
-    readonly transcript: string;
+    transcript: string | null;
     readonly worktreePath: string;
     readonly branch: string;
     readonly checkout: string;
@@ -360,13 +360,6 @@ export function liveFrontDoor(
     }
   };
 
-  /** Where the run's worktree is, once an issue has been taken. */
-  let worktree: {
-    readonly worktreePath: string;
-    readonly branch: string;
-    readonly checkout: string;
-  } | null = null;
-
   const start = async (args: string, ctx: ExtensionCommandContext): Promise<void> => {
     if (live !== null) {
       talk(ctx, "afk-runner: a run is already under way", "warning");
@@ -412,7 +405,7 @@ export function liveFrontDoor(
     log.length = 0;
     working = false;
     stopped = false;
-    worktree = null;
+    last = null;
     // A run that selects nothing must not leave the previous run's line standing.
     publish(ctx, run);
     // The hold starts paused, so that constructing a queue cannot send anything.
@@ -437,8 +430,8 @@ export function liveFrontDoor(
         // The work session is headless: there is no chat to join. Its transcript is
         // a file, and a human who wants the whole of it reads that file.
         const transcript = created.sessionManager?.getSessionFile();
-        if (transcript !== null && transcript !== undefined && worktree !== null) {
-          last = { ...worktree, transcript };
+        if (transcript !== null && transcript !== undefined && last !== null) {
+          last.transcript = transcript;
           talk(ctx, `afk-runner: the run's transcript is ${transcript}`, "info");
         }
       },
@@ -450,7 +443,8 @@ export function liveFrontDoor(
       onIssue: (issue) => {
         run.status = { issue: issue.number, title: issue.title, stage: "" };
         publish(ctx, run);
-        worktree = {
+        last = {
+          transcript: null,
           worktreePath: join(options.worktreeRoot, `issue-${issue.number}`),
           branch: workBranch(issue.number),
           checkout: options.checkout,
@@ -571,9 +565,9 @@ export function liveFrontDoor(
   };
 
   /**
-   * The host is shutting down. There is no UI left to talk to and no time to
-   * wait: the abort starts the run's own failure path, and whether its release
-   * finishes is up to how long the process takes to die.
+   * The session that owns the run is going away — quit, reload, new, resume or
+   * fork. Whichever it is, the session with its UI and steering is gone, so the
+   * run is aborted and its own failure path takes over.
    */
   const abandon = (): void => {
     if (session !== null && working) {
@@ -592,7 +586,7 @@ export function liveFrontDoor(
    * whose working directory is gone can read nothing.
    */
   const attach = async (ctx: ExtensionCommandContext): Promise<void> => {
-    if (last === null) {
+    if (last === null || last.transcript === null) {
       talk(ctx, "afk-runner: this session has no run to attach to yet", "info");
       return;
     }
@@ -621,7 +615,7 @@ export function liveFrontDoor(
       }
     }
     try {
-      const switched = await ctx.switchSession(target.transcript);
+      const switched = await ctx.switchSession(target.transcript as string);
       if (switched.cancelled) {
         talk(ctx, "afk-runner: the switch was cancelled", "info");
       }
