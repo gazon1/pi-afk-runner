@@ -116,6 +116,11 @@ export const runCommand: CommandRunner = (spec) =>
     });
     let stdout = "";
     let stderr = "";
+    let timedOut = false;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGKILL");
+    }, 15 * 60 * 1000);
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {
@@ -124,8 +129,16 @@ export const runCommand: CommandRunner = (spec) =>
     child.stderr.on("data", (chunk: string) => {
       stderr += chunk;
     });
-    child.on("error", reject);
+    child.on("error", (err) => {
+      clearTimeout(timeout);
+      reject(err);
+    });
     child.on("close", (code) => {
+      clearTimeout(timeout);
+      if (timedOut) {
+        reject(new Error(`${spec.command} ${spec.args.join(" ")} timed out`));
+        return;
+      }
       if (code === 0) {
         resolve(stdout);
       } else {

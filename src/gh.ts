@@ -169,7 +169,10 @@ export class GhCommandFailed extends Error {
 /** Runs the real `gh`. */
 export const runGh: GhRunner = async (args) => {
   try {
-    const { stdout } = await execFileAsync("gh", [...args], { encoding: "utf8" });
+    const { stdout } = await execFileAsync("gh", [...args], {
+      encoding: "utf8",
+      maxBuffer: 32 * 1024 * 1024,
+    });
     return stdout;
   } catch (failure) {
     const error = failure as { code?: number; stderr?: string };
