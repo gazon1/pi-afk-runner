@@ -88,7 +88,7 @@ import {
   type Step,
 } from "../src/runner.js";
 import { HOLDER_COMMAND, takeLock } from "../src/lock.js";
-import { EXIT_LOCKED, EXIT_NO_LOCK, main } from "../src/cli.js";
+import { EXIT_LOCKED, EXIT_NO_LOCK, EXIT_USAGE, STEP_EXIT_CODES, main } from "../src/cli.js";
 import {
   PINNED_PI_RANGE,
   PiVersionMismatch,
@@ -2111,6 +2111,7 @@ describe("the CLI's run", () => {
           title: "an issue",
           labels: [],
           updatedAt: "",
+          state: "OPEN",
         });
       }
       return "";
@@ -2276,6 +2277,154 @@ describe("the CLI's run", () => {
     } finally {
       await fixture.dispose();
     }
+  });
+
+  /** A session that works each worktree once and answers reviews with a pass. */
+  function workingSession(): SessionFactory {
+    const worked = new Set<string>();
+    return async ({ cwd, tools }) => {
+      if (tools !== undefined) {
+        return {
+          async prompt() {
+            const tool = tools[0] as unknown as {
+              execute: (id: string, params: unknown) => Promise<unknown>;
+            };
+            await tool.execute("call-1", { verdict: "pass", findings: [] });
+          },
+          async abort() {},
+          dispose() {},
+        };
+      }
+      return {
+        async prompt() {
+          if (worked.has(cwd)) {
+            return;
+          }
+          worked.add(cwd);
+          await writeFile(join(cwd, "work.txt"), "the work\n", "utf8");
+          await runGit(["add", "-A"], { cwd });
+          await runGit(
+            [
+              "-c",
+              "user.name=Fixture",
+              "-c",
+              "user.email=fixture@example.com",
+              "commit",
+              "-q",
+              "-m",
+              "the work",
+            ],
+            { cwd },
+          );
+        },
+        async abort() {},
+        dispose() {},
+      };
+    };
+  }
+
+  it("test_all_works_every_issue_once_and_gives_the_lock_back", async () => {
+    const fixture = await fixtureWithSetupScript();
+    const lockDirectory = join(fixture.root, "afk-runner");
+    try {
+      const { gh, calls } = stubGh([
+        { number: 42, title: "the first" },
+        { number: 43, title: "the second" },
+        { number: 44, title: "the third" },
+      ]);
+
+      const code = await main(
+        [
+          "--repo",
+          "gazon1/sing",
+          "--checkout",
+          fixture.repo,
+          "--worktree-root",
+          join(fixture.root, "worktrees"),
+          "--lock-dir",
+          lockDirectory,
+          "--all",
+        ],
+        {
+          gh,
+          session: workingSession(),
+          run: async () => JSON.stringify({ verdict: "ci.yml  run 1  success" }),
+        },
+      );
+
+      // Every issue in the list was worked, once.
+      expect(code).toBe(0);
+      const claims = calls.filter((call) => call.includes("--add-label agent-in-progress"));
+      expect(claims).toHaveLength(3);
+      for (const number of [42, 43, 44]) {
+        expect(claims.some((call) => call.includes(` ${number} `))).toBe(true);
+      }
+
+      // And the lock was given back at the end.
+      const lock = await takeLock(lockDirectory);
+      await lock.release();
+    } finally {
+      await fixture.dispose();
+    }
+  }, 60_000);
+
+  it("test_a_failing_issue_does_not_stop_the_sweep", async () => {
+    const fixture = await fixtureWithSetupScript();
+    const lockDirectory = join(fixture.root, "afk-runner");
+    try {
+      const { gh, calls } = stubGh([
+        { number: 42, title: "the first" },
+        { number: 43, title: "the second" },
+      ]);
+      const session = workingSession();
+
+      const code = await main(
+        [
+          "--repo",
+          "gazon1/sing",
+          "--checkout",
+          fixture.repo,
+          "--worktree-root",
+          join(fixture.root, "worktrees"),
+          "--lock-dir",
+          lockDirectory,
+          "--all",
+        ],
+        {
+          gh,
+          // The first issue's session dies; the second must still be worked.
+          session: async (options) => {
+            if (options.cwd.includes("issue-42")) {
+              throw new Error("the session died");
+            }
+            return await session(options);
+          },
+          run: async () => JSON.stringify({ verdict: "ci.yml  run 1  success" }),
+        },
+      );
+
+      // The first failure's step is the status, and the sweep reached issue 43.
+      expect(code).toBe(STEP_EXIT_CODES.session);
+      const claims = calls.filter((call) => call.includes("--add-label agent-in-progress"));
+      expect(claims).toHaveLength(2);
+      expect(claims.some((call) => call.includes(" 43 "))).toBe(true);
+
+      // And the lock was given back, though the sweep failed.
+      const lock = await takeLock(lockDirectory);
+      await lock.release();
+    } finally {
+      await fixture.dispose();
+    }
+  }, 60_000);
+
+  it("test_all_cannot_be_combined_with_issue", async () => {
+    const { gh, calls } = stubGh([{ number: 42, title: "an issue" }]);
+
+    // A usage error, before anything is read.
+    const code = await main(["--all", "--issue", "42"], { gh });
+
+    expect(code).toBe(EXIT_USAGE);
+    expect(calls).toHaveLength(0);
   });
 
   it("test_the_runner_never_merges", async () => {
