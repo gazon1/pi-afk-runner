@@ -20,6 +20,7 @@ import {
   type SessionFactory,
 } from "../src/session.js";
 import { repoFromRemoteUrl, resolveRepo } from "../src/cli.js";
+import { pullRequestArgs } from "../src/gh.js";
 import {
   CommandFailed,
   allowedPushRefs,
@@ -357,6 +358,15 @@ function valueAfter(args: readonly string[], flag: string): string {
 }
 
 const execFileAsync = promisify(execFile);
+
+describe("the pull request lookup", () => {
+  it("sees only the pull request that is still open", () => {
+    // `--state all` would hand back the closed one too, and a run that found it
+    // would review a closed pull request and call the issue done.
+    expect(pullRequestArgs("gazon1/sing", "agent/issue-42")).toContain("open");
+    expect(pullRequestArgs("gazon1/sing", "agent/issue-42")).not.toContain("all");
+  });
+});
 
 describe("the queue", () => {
   it("test_selection_excludes_claimed_issues", async () => {

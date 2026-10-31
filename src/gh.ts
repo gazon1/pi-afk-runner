@@ -136,8 +136,11 @@ export function pullRequestArgs(repo: string, branch: string): string[] {
     repo,
     "--head",
     branch,
+    // Open only. A pull request somebody closed or that was merged is not the
+    // work's home any more: a run that found it would review a closed pull
+    // request and report success, and the issue would never be worked again.
     "--state",
-    "all",
+    "open",
     "--limit",
     "1",
     "--json",
