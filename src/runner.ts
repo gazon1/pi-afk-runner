@@ -11,7 +11,7 @@
  * | `P` | `pullRequest` | does a pull request exist for the branch? |
  * | `V` | `reviewComment` | does that pull request carry a review comment? |
  * | `C` | `recountLabel` | does that pull request carry `agent-reviewed`? |
- * | `R` | `workBranch` | does the remote branch `agent/issue-<N>` exist? |
+ * | `R` | `workBranch` | does the remote branch `agent/issue-<N>` carry commits the base does not? |
  * | `A` | `stale` | is the claim older than the window? |
  *
  * The derivation is a pure function of those six. That is what makes recovery
@@ -49,6 +49,7 @@ import {
   headRef,
   pushWorkBranch,
   readRemoteSha,
+  remoteBranchAheadOfBase,
   removeWorktree,
   runCommand,
   workBranch,
@@ -106,7 +107,12 @@ export interface Observables {
   readonly reviewComment: boolean;
   /** `C` — that pull request carries `agent-reviewed`. */
   readonly recountLabel: boolean;
-  /** `R` — the remote branch `agent/issue-<N>` exists. */
+  /**
+   * `R` — the remote branch `agent/issue-<N>` carries work.
+   *
+   * Existence is not enough: a branch that points at the base carries nothing,
+   * and GitHub refuses a pull request for it.
+   */
   readonly workBranch: boolean;
   /** `A` — the claim is older than the staleness window. */
   readonly stale: boolean;
@@ -665,13 +671,15 @@ export interface IssueObservation {
 /**
  * Observe one issue: what state is it in, and what is behind it.
  *
- * The pull request is read from GitHub, the work branch from the remote, and
- * the staleness from the issue's last update — which any comment moves.
+ * The pull request is read from GitHub, the work the branch carries from the
+ * remote (a branch that points at the base carries none), and the staleness from
+ * the issue's last update — which any comment moves.
  */
 export async function observeIssue(options: {
   readonly issue: IssueSummary;
   readonly repo: string;
   readonly remote: string;
+  readonly baseBranch: string;
   readonly cwd: string;
   readonly git: GitRunner;
   readonly gh: GhRunner;
@@ -680,11 +688,11 @@ export async function observeIssue(options: {
 }): Promise<IssueObservation> {
   const branch = workBranch(options.issue.number);
   const pullRequest = await readPullRequest(options.repo, branch, options.gh);
-  const pushed =
-    (await readRemoteSha(options.git, options.cwd, {
-      remote: options.remote,
-      ref: headRef(branch),
-    })) !== null;
+  const ahead = await remoteBranchAheadOfBase(options.git, options.cwd, {
+    remote: options.remote,
+    branch,
+    base: options.baseBranch,
+  });
   const observed = observePullRequest(pullRequest);
   return {
     issue: options.issue,
@@ -694,7 +702,7 @@ export async function observeIssue(options: {
       pullRequest: pullRequest !== null,
       reviewComment: observed.reviewComment,
       recountLabel: observed.recountLabel,
-      workBranch: pushed,
+      workBranch: ahead !== null && ahead > 0,
       stale: isStale(options.issue.updatedAt, options.now, options.staleAfterMs),
     }),
   };
@@ -1285,6 +1293,7 @@ async function chooseIssue(
       issue: candidate,
       repo: options.repo,
       remote: options.remote,
+      baseBranch: options.baseBranch,
       cwd: options.checkout,
       git: options.git,
       gh: options.gh,
@@ -1514,6 +1523,11 @@ async function runPlan(
             issueNumber: issue.number,
             title: issue.title,
           }),
+          // The base the run worked from, not gh's default: the worktree, the
+          // claim and the state observation all used this one, and a pull
+          // request against another branch would be judged by a different
+          // history than the one that was worked.
+          base: options.baseBranch,
           gh: options.gh,
           run: options.run,
         });
