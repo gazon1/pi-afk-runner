@@ -1003,6 +1003,35 @@ describe("the agent's session", () => {
     expect(result.aborted).toBe(true);
   });
 
+  it("stops on a turn whose model call failed", async () => {
+    const turns: string[] = [];
+    const session: AgentSession = {
+      async prompt(text) {
+        turns.push(text);
+      },
+      async abort() {},
+      dispose() {},
+      // The SDK settles a failed model call as a normal turn; the error is here.
+      messages: [
+        {
+          role: "assistant",
+          stopReason: "error",
+          errorMessage: "commandcode API error (429): RATE_LIMITED\nhttps://example.test",
+        },
+      ],
+    };
+
+    const run = runPromptArray({
+      session,
+      prompts: ["one", "two"],
+      deadlineMs: 60_000,
+    });
+    await expect(run).rejects.toThrow(
+      "the model's turn failed: commandcode API error (429): RATE_LIMITED",
+    );
+    expect(turns).toEqual(["one"]);
+  });
+
   it("reads the prompt array from next to the module", async () => {
     // The directory is resolved next to the module, so it is the same
     // directory whether the package runs from src/ or from the built dist/.

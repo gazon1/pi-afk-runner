@@ -191,6 +191,48 @@ export async function readPrompts(directory: string = promptsDirectory()): Promi
   return prompts;
 }
 
+/**
+ * The part of a message this module reads.
+ *
+ * The SDK **resolves** a prompt whose model call failed: the failure is the
+ * assistant message's stop reason, not a rejected promise. A run that only
+ * awaits `prompt` counts the failed turn as a completed one.
+ */
+export interface TurnMessage {
+  readonly role?: string;
+  readonly stopReason?: string;
+  readonly errorMessage?: string;
+}
+
+/** The error a settled turn ended on, or null. */
+export function turnFailure(message: TurnMessage | undefined): Error | null {
+  if (message?.role !== "assistant" || message.stopReason !== "error") {
+    return null;
+  }
+  // The provider's text is multi-line, and a step's message is one line.
+  const detail = (message.errorMessage ?? "").split("\n")[0] ?? "";
+  return new Error(
+    detail.trim() === ""
+      ? "the model's turn failed"
+      : `the model's turn failed: ${detail}`,
+  );
+}
+
+/** The last assistant message, which is the one the turn settled on. */
+function lastAssistant(
+  messages: readonly TurnMessage[] | undefined,
+): TurnMessage | undefined {
+  if (messages === undefined) {
+    return undefined;
+  }
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.role === "assistant") {
+      return messages[index];
+    }
+  }
+  return undefined;
+}
+
 /** The session the runner drives. */
 export interface AgentSession {
   /** Send one turn and resolve when it settles. */
@@ -199,6 +241,8 @@ export interface AgentSession {
   abort(): Promise<void>;
   /** Release the session. */
   dispose(): void;
+  /** The session's messages, when it keeps them. */
+  readonly messages?: readonly TurnMessage[];
 }
 
 /** Creates a session bound to a directory. */
@@ -288,7 +332,17 @@ export async function runPromptArray(options: {
     // observed here, so it cannot become an unhandled rejection.
     void sent.catch(() => {});
     await Promise.race([sent, deadline]);
-    return !stopped() && !aborted;
+    if (stopped() || aborted) {
+      return false;
+    }
+    // A turn whose model call failed settles normally; without this, a session
+    // that answered nothing runs the array to its end and the run fails later
+    // with whatever the empty work looks like.
+    const failure = turnFailure(lastAssistant(options.session.messages));
+    if (failure !== null) {
+      throw failure;
+    }
+    return true;
   };
 
   /** A stop by a human reads exactly like the deadline: the array does not go on. */
