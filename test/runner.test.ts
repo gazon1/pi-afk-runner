@@ -2324,37 +2324,31 @@ describe("the CLI's run", () => {
       // A runner that is killed must not leave the lock held by an orphan:
       // the next runner would find it taken and refuse to work, for ever, over
       // a process that no longer exists.
+      const lockPath = join(directory, "runner.lock");
       const holder = spawn(
-        process.execPath,
+        "flock",
         [
-          "--input-type=module",
-          "--eval",
-          `import { spawn } from "node:child_process";` +
-            `const flock = spawn("flock", ${JSON.stringify([
-              "--nonblock",
-              "--no-fork",
-              "--conflict-exit-code=75",
-              join(directory, "runner.lock"),
-              "sh",
-              "-c",
-              HOLDER_COMMAND,
-            ])}, { stdio: ["ignore", "pipe", "ignore"] });` +
-            `flock.stdout.on("data", (chunk) => process.stdout.write(chunk));` +
-            `setTimeout(() => {}, 60000);`,
+          "--nonblock",
+          "--no-fork",
+          "--conflict-exit-code=75",
+          lockPath,
+          "sh",
+          "-c",
+          HOLDER_COMMAND,
         ],
-        { stdio: ["ignore", "pipe", "ignore"] },
+        { stdio: ["pipe", "pipe", "pipe"] },
       );
 
-      // The holder says when the lock is its own — a probe that raced it would
-      // take the lock first and the holder would give up, and the test would
-      // be testing a lock nobody held.
-      await new Promise<void>((resolve) => {
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("timeout")), 5000);
         holder.stdout.setEncoding("utf8");
         holder.stdout.on("data", (chunk: string) => {
           if (chunk.includes("locked")) {
+            clearTimeout(timer);
             resolve();
           }
         });
+        holder.on("error", reject);
       });
 
       // The lock is held: a second runner cannot take it.
