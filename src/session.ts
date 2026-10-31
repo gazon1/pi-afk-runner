@@ -205,7 +205,7 @@ export interface TurnMessage {
 }
 
 /** The error a settled turn ended on, or null. */
-export function turnFailure(message: TurnMessage | undefined): Error | null {
+function turnFailure(message: TurnMessage | undefined): Error | null {
   if (message?.role !== "assistant" || message.stopReason !== "error") {
     return null;
   }
