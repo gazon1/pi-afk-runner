@@ -2520,10 +2520,25 @@ describe("the CLI's run", () => {
         const { gh, calls } = stubGh([claimed]);
         const gitCalls: string[] = [];
 
-        // The work was pushed before the run died: the branch is on the remote
-        // and there is no pull request yet.
-        const base = (await runGit(["rev-parse", "HEAD"], { cwd: fixture.repo })).trim();
-        await runGit(["push", fixture.remote, `${base}:refs/heads/agent/issue-42`], {
+        // The work was pushed before the run died: the branch is on the remote,
+        // carries a commit of its own, and there is no pull request yet.
+        await writeFile(join(fixture.repo, "pushed.txt"), "the pushed work\n", "utf8");
+        await runGit(["add", "-A"], { cwd: fixture.repo });
+        await runGit(
+          [
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.com",
+            "commit",
+            "-q",
+            "-m",
+            "the pushed work",
+          ],
+          { cwd: fixture.repo },
+        );
+        const pushed = (await runGit(["rev-parse", "HEAD"], { cwd: fixture.repo })).trim();
+        await runGit(["push", fixture.remote, `${pushed}:refs/heads/agent/issue-42`], {
           cwd: fixture.repo,
         });
 
@@ -2542,6 +2557,43 @@ describe("the CLI's run", () => {
           gitCalls.some((call) => call.includes("push") && call.includes("refs/heads/agent/issue-42")),
         ).toBe(false);
         // And the agent was not restarted: the work was already done.
+        expect(result.steps.map((step) => step.step)).not.toContain("session");
+      } finally {
+        await fixture.dispose();
+      }
+    }, 60_000);
+
+    it("test_a_branch_with_no_commits_is_not_work", async () => {
+      const fixture = await fixtureWithSetupScript();
+      try {
+        const claimed = {
+          number: 42,
+          title: "an issue",
+          labels: ["agent-in-progress"],
+          updatedAt: "2026-10-30T08:59:30Z",
+        };
+        const { gh, calls } = stubGh([claimed]);
+
+        // The branch points at the base: it carries nothing. GitHub refuses a
+        // pull request for it — "No commits between main and agent/issue-42" —
+        // so a run that reads the branch's existence as work retries the same
+        // refusal for ever.
+        const base = (await runGit(["rev-parse", "HEAD"], { cwd: fixture.repo })).trim();
+        await runGit(["push", fixture.remote, `${base}:refs/heads/agent/issue-42`], {
+          cwd: fixture.repo,
+        });
+
+        const result = await runOnce({
+          ...runOptions(fixture, gh),
+          staleAfterMs: 60_000,
+          now: new Date("2026-10-30T09:00:00Z"),
+        });
+
+        // The claim is fresh — a live run may still push its work — so the
+        // issue is left alone, and no pull request is attempted for the empty
+        // branch.
+        expect(result.issue).toBeNull();
+        expect(calls.some((call) => call.includes("pr create"))).toBe(false);
         expect(result.steps.map((step) => step.step)).not.toContain("session");
       } finally {
         await fixture.dispose();

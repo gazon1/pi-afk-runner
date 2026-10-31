@@ -335,6 +335,42 @@ export async function readClaimBase(
   return null;
 }
 
+/**
+ * How many commits a remote branch carries that the base does not.
+ *
+ * A branch that points at the base carries nothing: it is what a run pushed
+ * before the session step refused an empty tree, or the leftover of work the
+ * base already has. GitHub refuses a pull request for it — *No commits between
+ * <base> and <branch>* — so a run that reads the branch's **existence** as work
+ * retries the same refusal for ever.
+ *
+ * `git rev-list` answers the same question GitHub asks, so a branch whose work
+ * is already on the base answers zero too. Both ends have to be fetched: an
+ * explicit refspec updates `FETCH_HEAD` and not the remote-tracking ref, so the
+ * commit is read straight after its own fetch rather than from `origin/<name>`.
+ *
+ * Null when there is no such branch on the remote.
+ */
+export async function remoteBranchAheadOfBase(
+  git: GitRunner,
+  cwd: string,
+  options: { readonly remote: string; readonly branch: string; readonly base: string },
+): Promise<number | null> {
+  const exists = await readRemoteSha(git, cwd, {
+    remote: options.remote,
+    ref: headRef(options.branch),
+  });
+  if (exists === null) {
+    return null;
+  }
+  await fetchRef(git, cwd, { remote: options.remote, ref: headRef(options.base) });
+  const baseSha = (await git(["rev-parse", "FETCH_HEAD"], { cwd })).trim();
+  await fetchRef(git, cwd, { remote: options.remote, ref: headRef(options.branch) });
+  const branchSha = (await git(["rev-parse", "FETCH_HEAD"], { cwd })).trim();
+  const count = await git(["rev-list", "--count", `${baseSha}..${branchSha}`], { cwd });
+  return Number(count.trim());
+}
+
 /** Bring one ref's objects down from the remote. */
 export async function fetchRef(
   git: GitRunner,
