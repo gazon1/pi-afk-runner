@@ -39,6 +39,11 @@ live checkout model="":
       exit 1
     fi
     cd "{{checkout}}"
+    export CMD_ZDR=0
+    export NODE_USE_ENV_PROXY=1
+    export HTTPS_PROXY=http://127.0.0.1:9191
+    export HTTP_PROXY=http://127.0.0.1:9191
+    export NO_PROXY="localhost,127.0.0.1,::1"
     PI_CMD="${PI_CMD:-$(command -v pi 2>/dev/null || echo /home/max/.nvm/versions/node/v24.14.0/bin/pi)}"
     if [ ! -x "$PI_CMD" ]; then
       echo "pi не найден. Установи pi или задай PI_CMD" >&2
@@ -66,6 +71,11 @@ comb checkout repo="" model="" base="main" remote="origin":
       echo "checkout не найден или не директория: {{checkout}}" >&2
       exit 1
     fi
+    export CMD_ZDR=0
+    export NODE_USE_ENV_PROXY=1
+    export HTTPS_PROXY=http://127.0.0.1:9191
+    export HTTP_PROXY=http://127.0.0.1:9191
+    export NO_PROXY="localhost,127.0.0.1,::1"
     args=(--checkout "{{checkout}}" --base "{{base}}" --remote "{{remote}}")
     if [ -n "{{repo}}" ]; then
       args+=(--repo "{{repo}}")
