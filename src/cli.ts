@@ -30,6 +30,7 @@ import {
   createAgentSession,
   type ModelRuntime,
 } from "@earendil-works/pi-coding-agent";
+import chalk from "chalk";
 import { EnvHttpProxyAgent, fetch as undiciFetch, setGlobalDispatcher } from "undici";
 
 import { runGh, type GhRunner } from "./gh.js";
@@ -341,7 +342,57 @@ export function piSessionFactory(options: {
               }
             });
             pi.on("tool_call", (event) => {
-              options.onEvent?.(`  → ${describeToolCall(event)}`);
+              options.onEvent?.(chalk.dim(`  → ${describeToolCall(event)}`));
+            });
+            pi.on("message_end", (event: any) => {
+              const message = event?.message;
+              if (!message || message.role !== "assistant") {
+                return;
+              }
+              const content = Array.isArray(message.content)
+                ? message.content
+                : [];
+              for (const block of content) {
+                if (!block || typeof block !== "object") {
+                  continue;
+                }
+                if (block.type === "thought" || block.type === "thinking") {
+                  const thinking =
+                    typeof (block as any).thinking === "string"
+                      ? (block as any).thinking
+                      : typeof (block as any).text === "string"
+                        ? (block as any).text
+                        : "";
+                  if (thinking === "") {
+                    continue;
+                  }
+                  const lines = thinking.split("\n");
+                  const shown = lines.slice(0, 3);
+                  for (const line of shown) {
+                    options.onEvent?.(chalk.dim(line));
+                  }
+                  if (lines.length > 3) {
+                    options.onEvent?.(chalk.dim(`… (+${lines.length - 3} lines)`));
+                  }
+                  continue;
+                }
+                if (block.type === "text") {
+                  const text =
+                    typeof (block as any).text === "string"
+                      ? (block as any).text
+                      : "";
+                  if (text === "") {
+                    continue;
+                  }
+                  options.onEvent?.(text);
+                  continue;
+                }
+                if (block.type === "toolCall" || block.type === "tool_call") {
+                  options.onEvent?.(
+                    chalk.dim(`  → ${describeToolCall(block as any)}`),
+                  );
+                }
+              }
             });
           },
         },
