@@ -283,7 +283,7 @@ export function issueArgs(repo: string, issueNumber: number): string[] {
     "--repo",
     repo,
     "--json",
-    "body,comments,title,labels,updatedAt",
+    "body,comments,title,labels,updatedAt,state",
   ];
 }
 
@@ -296,6 +296,8 @@ export interface IssueDetail {
   readonly labels: readonly string[];
   /** When the issue was last touched — the staleness signal. */
   readonly updatedAt: string;
+  /** The issue's state — `OPEN` or `CLOSED`. */
+  readonly state: string;
 }
 
 /**
@@ -317,7 +319,7 @@ export async function readIssue(
 ): Promise<IssueDetail> {
   const parsed: unknown = JSON.parse(await gh(issueArgs(repo, issueNumber)));
   if (typeof parsed !== "object" || parsed === null) {
-    return { title: "", body: "", comments: [], labels: [], updatedAt: "" };
+    return { title: "", body: "", comments: [], labels: [], updatedAt: "", state: "" };
   }
   const record = parsed as Record<string, unknown>;
   return {
@@ -326,6 +328,7 @@ export async function readIssue(
     comments: commentBodies(record.comments),
     labels: labelNames(record.labels),
     updatedAt: typeof record.updatedAt === "string" ? record.updatedAt : "",
+    state: typeof record.state === "string" ? record.state : "",
   };
 }
 

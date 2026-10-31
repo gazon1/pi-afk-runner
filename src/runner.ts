@@ -1203,6 +1203,11 @@ async function chooseIssue(
       // The operator named the issue. It is taken as given: the claim is what
       // excludes another runner, and a claim that fails fails loudly.
       const named = await readIssue(options.repo, options.issueNumber, options.gh);
+      if (named.state !== "OPEN") {
+        throw new Error(
+          `issue ${options.issueNumber} is ${named.state}, not OPEN`,
+        );
+      }
       candidates = [
         {
           number: options.issueNumber,
