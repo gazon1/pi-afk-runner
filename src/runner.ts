@@ -1095,6 +1095,8 @@ export interface RunResult {
   readonly steps: readonly StepRecord[];
   /** Where the record was written. */
   readonly record: string;
+  /** The derived state that made a named issue unworkable. */
+  readonly derivedState?: DerivedState;
 }
 
 /** The commit the worktree is at. */
@@ -1204,8 +1206,8 @@ export async function runOnce(options: RunOptions): Promise<RunResult> {
   // The claimed issues come first. A claim is a run that is either working or
   // dead, and a dead one holds its issue out of the queue for ever — so a
   // queue that is never empty would starve it.
-  const plan = await chooseIssue(options, now);
-  if (plan === null) {
+  const planOrUnworkable = await chooseIssue(options, now);
+  if (planOrUnworkable === null) {
     if (options.issueNumber !== undefined) {
       return {
         issue: options.issueNumber,
@@ -1216,6 +1218,17 @@ export async function runOnce(options: RunOptions): Promise<RunResult> {
     }
     return { issue: null, outcome: "empty", steps: [], record: "" };
   }
+  if ((planOrUnworkable as any).unworkable === true) {
+    const unworkable = planOrUnworkable as { readonly unworkable: true; readonly derivedState: DerivedState };
+    return {
+      issue: options.issueNumber ?? null,
+      outcome: "unworkable",
+      steps: [],
+      record: "",
+      derivedState: unworkable.derivedState,
+    };
+  }
+  const plan = planOrUnworkable as Plan;
   return await runPlan(options, plan, now, runId);
 }
 
@@ -1230,7 +1243,7 @@ export async function runOnce(options: RunOptions): Promise<RunResult> {
 async function chooseIssue(
   options: RunOptions,
   now: Date,
-): Promise<Plan | null> {
+): Promise<Plan | { readonly unworkable: true; readonly derivedState: DerivedState } | null> {
   let namedDetail: IssueDetail | undefined;
   let candidates: IssueSummary[];
   try {
@@ -1266,6 +1279,7 @@ async function chooseIssue(
     });
   }
 
+  let namedUnworkableState: DerivedState | undefined;
   for (const candidate of candidates) {
     const observation = await observeIssue({
       issue: candidate,
@@ -1281,9 +1295,15 @@ async function chooseIssue(
     if (plan.kind !== "none") {
       return namedDetail === undefined ? plan : { ...plan, issueDetail: namedDetail };
     }
+    if (options.issueNumber !== undefined) {
+      namedUnworkableState = observation.state;
+    }
   }
 
   if (options.issueNumber !== undefined) {
+    if (namedUnworkableState !== undefined) {
+      return { unworkable: true, derivedState: namedUnworkableState };
+    }
     return null;
   }
 

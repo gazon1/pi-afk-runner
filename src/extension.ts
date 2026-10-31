@@ -488,9 +488,20 @@ export function liveFrontDoor(
         const result = await (dependencies.work ?? runOnce)(runOptions);
         if ((result.outcome as string) === "unworkable") {
           const issueNum = result.issue ?? options.issue;
+          const derivedState = (result as { derivedState?: string }).derivedState;
+          let reason: string;
+          if (derivedState === "Claimed") {
+            reason = "it is held by another runner";
+          } else if (derivedState === "Reviewed") {
+            reason = "already reviewed";
+          } else if (derivedState === "Counted") {
+            reason = "already counted";
+          } else {
+            reason = "check whether it is claimed by another runner, already reviewed, or already counted";
+          }
           talk(
             ctx,
-            `afk-runner: issue ${issueNum ?? ""} could not be worked — check whether it is claimed by another runner, already reviewed, or already counted`,
+            `afk-runner: issue ${issueNum ?? ""} could not be worked — ${reason}`,
             "warning",
           );
           finish(ctx, run, "done");

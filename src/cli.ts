@@ -564,8 +564,19 @@ export async function main(
       process.stdout.write("the queue is empty — there was nothing to work\n");
     } else if ((result.outcome as string) === "unworkable") {
       const issueNum = result.issue ?? options.issue;
+      const derivedState = (result as { derivedState?: string }).derivedState;
+      let reason: string;
+      if (derivedState === "Claimed") {
+        reason = "it is held by another runner";
+      } else if (derivedState === "Reviewed") {
+        reason = "already reviewed";
+      } else if (derivedState === "Counted") {
+        reason = "already counted";
+      } else {
+        reason = "check whether it is claimed by another runner, already reviewed, or already counted";
+      }
       process.stderr.write(
-        `issue ${issueNum} could not be worked — check whether it is claimed by another runner, already reviewed, or already counted\n`,
+        `issue ${issueNum} could not be worked — ${reason}\n`,
       );
       return 1;
     } else {
