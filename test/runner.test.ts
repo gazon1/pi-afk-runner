@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { claimIssue, releaseClaim } from "../src/claim.js";
 import { headRef } from "../src/git.js";
@@ -2103,6 +2103,7 @@ describe("the CLI's run", () => {
       title: string;
       labels?: readonly string[];
       updatedAt?: string;
+      state?: string;
     }[],
   ): {
     gh: (args: readonly string[]) => Promise<string>;
@@ -2130,18 +2131,32 @@ describe("the CLI's run", () => {
       if (args[0] === "issue" && args[1] === "view") {
         // The shape the queue really has: the brief is in the body, and no
         // comment carries the marker.
+        const number = Number(args[2] ?? "");
+        const issue = queue.find((candidate) => candidate.number === number);
         return JSON.stringify({
           body: "**What this is:** the work\n\n**Fix:** 1. do it",
           comments: [{ body: "a comment" }],
           title: "an issue",
           labels: [],
           updatedAt: "",
-          state: "OPEN",
+          state: issue?.state ?? "OPEN",
         });
       }
       return "";
     };
     return { gh, calls };
+  }
+
+  /** What the run wrote to the error stream, and a way to stop watching. */
+  function captureStderr(): { readonly lines: string[]; readonly restore: () => void } {
+    const lines: string[] = [];
+    const spy = vi
+      .spyOn(process.stderr, "write")
+      .mockImplementation(((chunk: string | Uint8Array) => {
+        lines.push(String(chunk));
+        return true;
+      }) as typeof process.stderr.write);
+    return { lines, restore: () => spy.mockRestore() };
   }
 
   /** A fixture repository with the setup script the runner runs in a worktree. */
@@ -2608,6 +2623,84 @@ describe("the CLI's run", () => {
       const lock = await takeLock(lockDirectory);
       await lock.release();
     } finally {
+      await fixture.dispose();
+    }
+  }, 60_000);
+
+  it("test_a_sweep_that_skips_a_closed_issue_names_it_and_works_the_rest", async () => {
+    const fixture = await fixtureWithSetupScript();
+    const lockDirectory = join(fixture.root, "afk-runner");
+    const stderr = captureStderr();
+    try {
+      const { gh, calls } = stubGh([
+        { number: 42, title: "the closed one", state: "CLOSED" },
+        { number: 43, title: "the second" },
+      ]);
+
+      const code = await main(
+        [
+          "--repo",
+          "gazon1/sing",
+          "--checkout",
+          fixture.repo,
+          "--worktree-root",
+          join(fixture.root, "worktrees"),
+          "--lock-dir",
+          lockDirectory,
+          "--all",
+        ],
+        {
+          gh,
+          session: workingSession(),
+          run: async () => JSON.stringify({ verdict: "ci.yml  run 1  success" }),
+        },
+      );
+
+      // The skipped issue is named, and not as a run that stopped: a sweep
+      // that skipped an issue is not an aborted run.
+      const said = stderr.lines.join("");
+      expect(said).toContain("issue 42 could not be selected: it is CLOSED, not OPEN");
+      expect(said).not.toContain("the run stopped at the select step");
+
+      // And the rest of the sweep was worked.
+      expect(code).toBe(STEP_EXIT_CODES.select);
+      const claims = calls.filter((call) => call.includes("--add-label agent-in-progress"));
+      expect(claims).toHaveLength(1);
+      expect(claims[0]).toContain(" 43 ");
+    } finally {
+      stderr.restore();
+      await fixture.dispose();
+    }
+  }, 60_000);
+
+  it("test_a_run_that_stops_at_the_select_step_says_which_step", async () => {
+    const fixture = await fixtureWithSetupScript();
+    const lockDirectory = join(fixture.root, "afk-runner");
+    const stderr = captureStderr();
+    try {
+      const code = await main(
+        [
+          "--repo",
+          "gazon1/sing",
+          "--checkout",
+          fixture.repo,
+          "--worktree-root",
+          join(fixture.root, "worktrees"),
+          "--lock-dir",
+          lockDirectory,
+        ],
+        {
+          // The queue cannot be read, so the run stops at the select step.
+          gh: async () => {
+            throw new Error("the queue could not be read");
+          },
+        },
+      );
+
+      expect(code).toBe(STEP_EXIT_CODES.select);
+      expect(stderr.lines.join("")).toContain("the run stopped at the select step");
+    } finally {
+      stderr.restore();
       await fixture.dispose();
     }
   }, 60_000);
