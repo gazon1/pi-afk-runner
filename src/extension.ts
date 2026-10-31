@@ -577,7 +577,8 @@ export function liveFrontDoor(
       talk(ctx, "afk-runner: no run is under way", "info");
       return;
     }
-    if (session === null || !working) {
+    const targetSession = workSession ?? session;
+    if (targetSession === null || !working) {
       // The agent is between turns, or done and the run is pushing. There is
       // nothing to cut, and saying "stopping" would be a lie.
       const stage = run.status === null ? "selecting" : run.status.stage;
@@ -590,7 +591,7 @@ export function liveFrontDoor(
     }
     stopped = true;
     talk(ctx, "afk-runner: stopping — the run releases its claim when the turn ends", "warning");
-    void session.abort().catch((failure: unknown) => {
+    void targetSession.abort().catch((failure: unknown) => {
       talk(ctx, `afk-runner: the session would not abort: ${errorMessage(failure)}`, "error");
     });
   };
@@ -601,9 +602,10 @@ export function liveFrontDoor(
    * run is aborted and its own failure path takes over.
    */
   const abandon = (): void => {
-    if (session !== null && working) {
+    const targetSession = workSession ?? session;
+    if (targetSession !== null && working) {
       stopped = true;
-      void session.abort().catch(() => {});
+      void targetSession.abort().catch(() => {});
     }
   };
 
