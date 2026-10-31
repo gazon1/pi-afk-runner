@@ -1387,6 +1387,11 @@ async function runPlan(
           // another, and the message must not claim a clock it cannot see.
           throw new Error("the agent's session was cut off before its last turn");
         }
+        // The prompt asks the agent to commit, and an agent does not always do it.
+        // What it left in the worktree is still the work — and the worktree is
+        // about to be removed — so the runner commits it on the agent's behalf.
+        // A clean worktree makes this a no-op.
+        await commitAll(options.git, state.worktreePath, "the agent's work");
         return `${result.completed} turns`;
       },
     });

@@ -908,6 +908,7 @@ describe("the agent's session", () => {
     }
   });
 
+
   it("test_one_invocation_acts_on_one_issue", async () => {
     const turns: string[] = [];
     let disposed = 0;
@@ -2181,6 +2182,63 @@ describe("the CLI's run", () => {
       runId: "2026-10-30T09-00-00-000Z-abcdef12",
     };
   }
+
+  it("test_the_runner_commits_what_the_agent_left", async () => {
+    // The prompt asks the agent to commit, and an agent does not always do it.
+    // What it left in the worktree is still the work, and the worktree is about
+    // to be removed — so the runner commits it on the agent's behalf.
+    const fixture = await fixtureWithSetupScript();
+    try {
+      const { gh } = stubGh([{ number: 42, title: "an issue" }]);
+      const base = await gitOutput(["rev-parse", "main"], {
+        cwd: fixture.repo,
+        env: fixture.env,
+      });
+
+      await runOnce({
+        ...runOptions(fixture, gh),
+        session: async ({ cwd, tools }) => {
+          if (tools !== undefined) {
+            // The reviewer still answers with its verdict.
+            return {
+              async prompt() {
+                const tool = tools[0] as unknown as {
+                  execute: (id: string, params: unknown) => Promise<unknown>;
+                };
+                await tool.execute("call-1", { verdict: "pass", findings: [] });
+              },
+              async abort() {},
+              dispose() {},
+            };
+          }
+          // The implementer writes the work and forgets to commit it.
+          return {
+            async prompt() {
+              await writeFile(join(cwd, "work.txt"), "the work\n", "utf8");
+            },
+            async abort() {},
+            dispose() {},
+          };
+        },
+      });
+
+      const pushed = (
+        await gitOutput(["ls-remote", fixture.remote, workBranch(42)], {
+          cwd: fixture.repo,
+          env: fixture.env,
+        })
+      ).trim();
+      expect(pushed).not.toBe("");
+
+      const sha = pushed.split(/\s+/)[0] ?? "";
+      expect(sha).not.toBe(base);
+      expect(
+        await gitOutput(["show", `${sha}:work.txt`], { cwd: fixture.repo, env: fixture.env }),
+      ).toContain("the work");
+    } finally {
+      await fixture.dispose();
+    }
+  });
 
   it("test_one_invocation_acts_on_one_issue", async () => {
     const fixture = await fixtureWithSetupScript();
