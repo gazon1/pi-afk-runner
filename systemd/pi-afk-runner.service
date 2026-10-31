@@ -17,6 +17,6 @@ Wants=network-online.target
 Type=oneshot
 WorkingDirectory=%h/work/singularity
 ExecStart=%h/.local/bin/pi-afk-runner --repo gazon1/sing --checkout %h/work/singularity --worktree-root %h/work/afk-worktrees --lock-dir %h/work/singularity/build/afk-runner --stale-after-ms 604800000
-# The runner's own deadline is two hours — that is the ceiling on one turn of
-# the agent. This is the backstop for a runner that hangs rather than works.
+# The runner's own deadline is one hour — split between the work and review
+# sessions. This is the backstop for a runner that hangs rather than works.
 TimeoutStartSec=3h
