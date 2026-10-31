@@ -392,13 +392,8 @@ export function piSessionFactory(options: {
                   if (text === "") {
                     continue;
                   }
-                  options.onEvent?.(text);
+                  options.onEvent?.(`· ${text}`);
                   continue;
-                }
-                if (block.type === "toolCall" || block.type === "tool_call") {
-                  options.onEvent?.(
-                    chalk.dim(`  → ${describeToolCall(block as any)}`),
-                  );
                 }
               }
             });
