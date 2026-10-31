@@ -244,7 +244,7 @@ export async function resolveRepo(
   if (options.repo !== undefined) {
     return { ...options, repo: options.repo };
   }
-  const remote = (await git(["remote", "get-url", "origin"], { cwd: options.checkout })).trim();
+  const remote = (await git(["remote", "get-url", options.remote], { cwd: options.checkout })).trim();
   const repo = repoFromRemoteUrl(remote);
   if (repo === null) {
     throw new Error(
