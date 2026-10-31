@@ -53,6 +53,7 @@ import {
   type CommandRunner,
   type GitRunner,
 } from "./git.js";
+import { GUARD_POLICY } from "./guard.js";
 import {
   CLAIM_LABEL,
   addPullRequestLabelArgs,
@@ -1103,17 +1104,48 @@ async function headSha(git: GitRunner, cwd: string): Promise<string> {
 }
 
 /**
+ * Whether a path is in the guard's protected set.
+ *
+ * Reuses `GUARD_POLICY.path`: the same patterns that deny the agent reading
+ * these files deny the runner committing them. `*` matches anything, including
+ * `/`, and the last matching entry wins — mirroring the guard's own semantics.
+ */
+function isProtectedPath(path: string): boolean {
+  const policy = GUARD_POLICY.path as Record<string, string>;
+  let result: string | undefined;
+  for (const [pattern, verdict] of Object.entries(policy)) {
+    const regex = new RegExp(
+      "^" + pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*") + "$",
+    );
+    if (regex.test(path)) {
+      result = verdict;
+    }
+  }
+  return result === "deny";
+}
+
+/**
  * Commit what the runner itself wrote.
  *
  * The identity is passed on the command line: the repository the runner works
  * in is not the runner's own, and a commit with no author is not a commit.
  */
-async function commitAll(
+export async function commitAll(
   git: GitRunner,
   cwd: string,
   message: string,
 ): Promise<void> {
   await git(["add", "-A"], { cwd });
+  const cached = await git(["diff", "--cached", "--name-only"], { cwd });
+  for (const raw of cached.split("\n")) {
+    const path = raw.trim();
+    if (path === "") {
+      continue;
+    }
+    if (isProtectedPath(path)) {
+      throw new Error(`refusing to commit protected file: ${path}`);
+    }
+  }
   const status = await git(["status", "--porcelain"], { cwd });
   if (status.trim() === "") {
     return;
