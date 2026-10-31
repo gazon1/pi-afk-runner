@@ -227,8 +227,22 @@ export interface PromptArrayResult {
   readonly aborted: boolean;
   /** What the abort said, when the abort itself failed. */
   readonly abortError: string | null;
+  /** The turn that was cut off, when the run was aborted. */
+  readonly abortedTurn?: string | null;
 }
 
+/**
+ * Run the prompt array in one session.
+ *
+ * The body goes first, on its own, in a turn that carries nothing but data —
+ * so that the instruction that follows it is the most recent thing the model
+ * has read. Then the three prompts, one turn each, each seeing the previous
+ * turn's context.
+ *
+ * The deadline is wall-clock, and it **aborts** the session rather than
+ * letting it run on: an agent that has been working for hours has usually
+ * stopped being useful, and an unbounded run is an unbounded cost.
+ */
 /**
  * Run the prompt array in one session.
  *
@@ -260,39 +274,35 @@ export async function runPromptArray(options: {
   const schedule = options.schedule ?? defaultScheduler;
   let aborted = false;
   let abortError: string | null = null;
+  let abortedTurn: string | null = null;
 
-  // The deadline is a promise the run **races**, not a signal the run hopes
-  // for. An abort that fails would otherwise leave the run waiting on a turn
-  // that never settles — and a deadline that does not bound the run is not a
-  // deadline.
-  let reachDeadline: () => void = () => {};
-  const deadline = new Promise<"deadline">((resolve) => {
-    reachDeadline = () => resolve("deadline");
-  });
+  const turns: Array<
+    | { kind: "issueBody"; name: string }
+    | { kind: "issueComments"; name: string }
+    | { kind: "prompt"; name: string; text: string; index: number }
+  > = [];
+  if (options.issueBody !== undefined) {
+    turns.push({ kind: "issueBody", name: "the issue body turn" });
+  }
+  if (options.issueComments !== undefined && options.issueComments.length > 0) {
+    turns.push({ kind: "issueComments", name: "the issue comments turn" });
+  }
+  for (let i = 0; i < options.prompts.length; i += 1) {
+    const promptName = (PROMPT_FILES[i] as string | undefined) ?? `prompt ${i + 1}`;
+    turns.push({ kind: "prompt", name: promptName, text: options.prompts[i] as string, index: i });
+  }
 
-  const cancel = schedule(() => {
-    aborted = true;
-    reachDeadline();
-    // The promise is caught: an unhandled rejection inside a timer ends the
-    // process, and this is the moment the runner is trying to record a run
-    // that has already gone wrong.
-    void options.session.abort().catch((error: unknown) => {
-      abortError = error instanceof Error ? error.message : String(error);
-    });
-  }, options.deadlineMs);
+  if (turns.length === 0) {
+    options.session.dispose();
+    return { completed: 0, aborted: false, abortError: null, abortedTurn: null };
+  }
 
-  /** Send one turn, and give up on it when the deadline arrives. */
-  const send = async (turn: string): Promise<boolean> => {
-    const sent = options.session.prompt(turn);
-    // The turn may reject after the deadline has already won the race. It is
-    // observed here, so it cannot become an unhandled rejection.
-    void sent.catch(() => {});
-    await Promise.race([sent, deadline]);
-    return !stopped() && !aborted;
-  };
+  const basePerTurn = Math.floor(options.deadlineMs / turns.length);
+  let carry = options.deadlineMs % turns.length;
+  let turnIndex = 0;
 
   /** A stop by a human reads exactly like the deadline: the array does not go on. */
-  const stopped = (): boolean => {
+  const isStopped = (): boolean => {
     if (options.stopped?.() !== true) {
       return false;
     }
@@ -302,31 +312,77 @@ export async function runPromptArray(options: {
 
   let completed = 0;
   try {
-    // The data goes first, in turns of its own, and is not counted: only the
-    // prompts are the prompt array.
-    if (stopped()) {
-      return { completed, aborted, abortError };
-    }
-    if (options.issueBody !== undefined) {
-      if (!(await send(fenceIssueBody(options.issueBody)))) {
-        return { completed, aborted, abortError };
-      }
-    }
-    if (options.issueComments !== undefined && options.issueComments.length > 0) {
-      if (!(await send(fenceIssueComments(options.issueComments)))) {
-        return { completed, aborted, abortError };
-      }
-    }
-
-    for (const prompt of options.prompts) {
-      if (stopped() || !(await send(prompt))) {
+    for (const turn of turns) {
+      if (isStopped()) {
+        if (abortedTurn === null) {
+          abortedTurn = turn.name;
+        }
         break;
       }
-      completed += 1;
+      const turnBudget = basePerTurn + carry;
+      carry = 0;
+      if (turnBudget <= 0) {
+        aborted = true;
+        abortedTurn = turn.name;
+        void options.session.abort().catch((error: unknown) => {
+          abortError = error instanceof Error ? error.message : String(error);
+        });
+        break;
+      }
+
+      let reachDeadline: () => void = () => {};
+      const deadline = new Promise<"deadline">((resolve) => {
+        reachDeadline = () => resolve("deadline");
+      });
+      const cancel = schedule(() => {
+        aborted = true;
+        if (abortedTurn === null) {
+          abortedTurn = turn.name;
+        }
+        reachDeadline();
+        void options.session.abort().catch((error: unknown) => {
+          abortError = error instanceof Error ? error.message : String(error);
+        });
+      }, turnBudget);
+
+      const turnStart = Date.now();
+      let turnText: string;
+      if (turn.kind === "issueBody") {
+        turnText = fenceIssueBody(options.issueBody as string);
+      } else if (turn.kind === "issueComments") {
+        turnText = fenceIssueComments(options.issueComments as readonly string[]);
+      } else {
+        turnText = turn.text;
+      }
+
+      const sent = options.session.prompt(turnText);
+      void sent.catch(() => {});
+      const raced = await Promise.race([sent, deadline]);
+      cancel();
+      if (raced === "deadline") {
+        if (abortedTurn === null) {
+          abortedTurn = turn.name;
+        }
+        break;
+      }
+      if (isStopped()) {
+        if (abortedTurn === null) {
+          abortedTurn = turn.name;
+        }
+        break;
+      }
+      const elapsed = Date.now() - turnStart;
+      const leftover = turnBudget - elapsed;
+      if (leftover > 0) {
+        carry = leftover;
+      }
+      if (turn.kind === "prompt") {
+        completed += 1;
+      }
+      turnIndex += 1;
     }
-    return { completed, aborted, abortError };
+    return { completed, aborted, abortError, abortedTurn };
   } finally {
-    cancel();
     options.session.dispose();
   }
 }

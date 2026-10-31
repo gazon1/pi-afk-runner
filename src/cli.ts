@@ -110,7 +110,7 @@ export interface CliOptions {
   readonly model?: string;
   /** Whether the target repository's pre-push hook may gate the pushes. */
   readonly verifyPushes?: boolean;
-  /** The wall-clock ceiling on one turn of the agent. */
+  /** The wall-clock ceiling on the prompt array. */
   readonly deadlineMs: number;
   /** How long a claim may sit before another run may take it over. */
   readonly staleAfterMs: number;

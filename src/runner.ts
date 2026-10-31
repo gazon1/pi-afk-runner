@@ -1053,7 +1053,7 @@ export interface RunOptions {
   readonly run: CommandRunner;
   /** The session the agent works in. */
   readonly session: SessionFactory;
-  /** The wall-clock ceiling on one turn of the agent. */
+  /** The wall-clock ceiling on the prompt array. */
   readonly deadlineMs: number;
   /**
    * How long a claim may sit before another run may take it over.
@@ -1463,7 +1463,8 @@ async function runPlan(
         if (result.aborted) {
           // The deadline is one reason a turn is cut; a human stopping the run is
           // another, and the message must not claim a clock it cannot see.
-          throw new Error("the agent's session was cut off before its last turn");
+          const turn = result.abortedTurn ?? "a turn";
+          throw new Error(`the agent's session was cut off on ${turn}`);
         }
         // The prompt asks the agent to commit, and an agent does not always do it.
         // What it left in the worktree is still the work — and the worktree is
