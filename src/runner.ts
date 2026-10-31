@@ -1268,9 +1268,7 @@ async function chooseIssue(
       // excludes another runner, and a claim that fails fails loudly.
       const named = await readIssue(options.repo, options.issueNumber, options.gh);
       if (named.state !== "OPEN") {
-        throw new Error(
-          `issue ${options.issueNumber} is ${named.state}, not OPEN`,
-        );
+        throw new Error(`it is ${named.state}, not OPEN`);
       }
       namedDetail = named;
       candidates = [
@@ -1285,11 +1283,16 @@ async function chooseIssue(
       candidates = await readClaimed(options.repo, options.gh);
     }
   } catch (failure) {
+    const reason = failure instanceof Error ? failure.message : String(failure);
     throw new RunFailed({
       step: "select",
-      message: `the run stopped at the select step: ${
-        failure instanceof Error ? failure.message : String(failure)
-      }`,
+      // A named issue is one of many a sweep works, so its failure names the
+      // issue and not the step: a sweep that skipped three issues is not
+      // three runs that stopped. The queue path has no issue to name.
+      message:
+        options.issueNumber !== undefined
+          ? `issue ${options.issueNumber} could not be selected: ${reason}`
+          : `the run stopped at the select step: ${reason}`,
       cause: failure,
       record: "",
     });
