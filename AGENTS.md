@@ -14,6 +14,14 @@ Multiplatform application with its own gates, and a JavaScript toolchain inside 
 extension's code under the app's gates. The reasoning is in
 [docs/decisions/2026-10-30-the-afk-runner-is-a-pi-extension.md](docs/decisions/2026-10-30-the-afk-runner-is-a-pi-extension.md).
 
+## Working here through the runner
+
+This repository is also a target for its own runner: `ready-for-agent`, an issue
+whose body is the brief, and `scripts/setup-worktree.sh` prepare a worktree,
+`./check.sh` is the gate the runner's prompt names, and `justfile` answers the
+other two commands that prompt runs. Work comes back as a pull request with a
+review that opens with `<!-- agent-review -->`; nothing merges itself.
+
 ## The check
 
 ```bash
