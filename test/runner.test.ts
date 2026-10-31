@@ -19,7 +19,7 @@ import {
   type AgentSession,
   type SessionFactory,
 } from "../src/session.js";
-import { repoFromRemoteUrl, resolveRepo } from "../src/cli.js";
+import { assistantTextLines, repoFromRemoteUrl, resolveRepo } from "../src/cli.js";
 import { pullRequestArgs } from "../src/gh.js";
 import {
   CommandFailed,
@@ -2105,6 +2105,28 @@ describe("the brief", () => {
         deadlineMs: 60_000,
       }),
     ).rejects.toThrow(/carries no brief/);
+  });
+});
+
+/**
+ * The run stream: what the agent says, and how it is marked.
+ */
+describe("the assistant's lines in the stream", () => {
+  it("marks every line of a multi-line text block", () => {
+    const lines = assistantTextLines("The gates are green.\nThe pull request is open.");
+
+    // Every line carries the marker: an untagged line would read as runner
+    // output, which the runner prints as `[step] outcome`.
+    expect(lines).toEqual([
+      "· The gates are green.",
+      "· The pull request is open.",
+    ]);
+  });
+
+  it("drops the blank lines of a text block", () => {
+    const lines = assistantTextLines("\nFirst.\n\n   \nSecond.\n");
+
+    expect(lines).toEqual(["· First.", "· Second."]);
   });
 });
 

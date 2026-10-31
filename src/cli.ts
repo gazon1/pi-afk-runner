@@ -307,6 +307,23 @@ export function useProxyFromEnvironment(env: NodeJS.ProcessEnv = process.env): b
 }
 
 /**
+ * The lines an assistant text block contributes to the run stream.
+ *
+ * A text block can hold several lines — the final summary usually does — and
+ * every one of them is tagged, so no line of the stream reads as runner
+ * output. A blank line carries nothing and is dropped.
+ */
+export function assistantTextLines(text: string): string[] {
+  const lines: string[] = [];
+  for (const line of text.split("\n")) {
+    if (line.trim() !== "") {
+      lines.push(`· ${line}`);
+    }
+  }
+  return lines;
+}
+
+/**
  * The session the agent works in.
  *
  * Pi's own session, with two things added: the runner's guardrail reaches the
@@ -389,10 +406,9 @@ export function piSessionFactory(options: {
                     typeof (block as any).text === "string"
                       ? (block as any).text
                       : "";
-                  if (text === "") {
-                    continue;
+                  for (const line of assistantTextLines(text)) {
+                    options.onEvent?.(line);
                   }
-                  options.onEvent?.(`· ${text}`);
                   continue;
                 }
               }
