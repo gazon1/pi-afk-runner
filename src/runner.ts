@@ -1426,6 +1426,10 @@ async function runPlan(
         // about to be removed — so the runner commits it on the agent's behalf.
         // A clean worktree makes this a no-op.
         await commitAll(options.git, state.worktreePath, "the agent's work");
+        const count = (await options.git(["rev-list", "--count", `${state.base}..HEAD`], { cwd: state.worktreePath })).trim();
+        if (count === "0") {
+          throw new Error("the agent made no commits — no changes to push or open a pull request");
+        }
         return `${result.completed} turns`;
       },
     });

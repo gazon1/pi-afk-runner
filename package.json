@@ -42,8 +42,8 @@
     "node": ">=22"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json && node --eval \"require('fs').cpSync('src/prompts','dist/prompts',{recursive:true})\"",
-    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
+    "build": "npx --package=typescript@5.6.3 -y tsc -p tsconfig.json && node --eval \"require('fs').cpSync('src/prompts','dist/prompts',{recursive:true})\"",
+    "typecheck": "npx --package=typescript@5.6.3 -y tsc -p tsconfig.json --noEmit && npx --package=typescript@5.6.3 -y tsc -p tsconfig.test.json",
     "lint": "oxlint --deny-warnings src test",
     "test": "vitest run",
     "check": "npm run typecheck && npm run lint && npm run test && npm run build",
@@ -55,13 +55,14 @@
   "dependencies": {
     "@gotgenes/pi-permission-system": "42.0.0",
     "pi-queue-steer-factory": "0.17.11",
+    "typebox": "^1.0.0",
     "undici": "8.10.2"
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "1.4.0",
     "@types/node": "26.6.6",
     "oxlint": "1.90.0",
-    "typescript": "7.0.2",
+    "typescript": "^5.6.3",
     "vitest": "5.0.5"
   }
 }

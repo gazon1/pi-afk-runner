@@ -43,8 +43,8 @@ import {
   runOptionsFrom,
   type CliOptions,
 } from "./cli.js";
-import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, realpathSync, rmSync } from "node:fs";
+import { join, resolve } from "node:path";
 
 import { runGit, workBranch } from "./git.js";
 import { RUN_STATUS_ENTRY, statusFromEntries, statusLine, type RunStatus } from "./live.js";
@@ -360,7 +360,10 @@ export function liveFrontDoor(
     }
   };
 
+  let hostContext: ExtensionCommandContext | null = null;
+
   const start = async (args: string, ctx: ExtensionCommandContext): Promise<void> => {
+    hostContext = ctx;
     if (live !== null) {
       talk(ctx, "afk-runner: a run is already under way", "warning");
       return;
@@ -433,6 +436,9 @@ export function liveFrontDoor(
         if (transcript !== null && transcript !== undefined && last !== null) {
           last.transcript = transcript;
           talk(ctx, `afk-runner: the run's transcript is ${transcript}`, "info");
+          if (hostContext !== null) {
+            void attach(hostContext, true).catch(() => {});
+          }
         }
       },
     );
@@ -585,12 +591,12 @@ export function liveFrontDoor(
    * restored first when the run's own cleanup has removed it, because a session
    * whose working directory is gone can read nothing.
    */
-  const attach = async (ctx: ExtensionCommandContext): Promise<void> => {
+  const attach = async (ctx: ExtensionCommandContext, force = false): Promise<void> => {
     if (last === null || last.transcript === null) {
       talk(ctx, "afk-runner: this session has no run to attach to yet", "info");
       return;
     }
-    if (working) {
+    if (working && !force) {
       talk(
         ctx,
         "afk-runner: the agent is working — /afk-runner-stop first, or /afk-runner-attach when it settles",
@@ -599,9 +605,79 @@ export function liveFrontDoor(
       return;
     }
     const target = last;
-    if (!existsSync(target.worktreePath)) {
+    const targetPath = resolve(target.worktreePath);
+    const worktreeExistsOnDisk = existsSync(targetPath);
+    const isRegistered = async (): Promise<boolean> => {
       try {
-        await runGit(["worktree", "add", target.worktreePath, target.branch], {
+        const list = await runGit(["worktree", "list", "--porcelain"], { cwd: target.checkout });
+        return list.split("\n").some((line) => {
+          if (!line.startsWith("worktree ")) return false;
+          const p = line.slice("worktree ".length).trim();
+          return resolve(p) === targetPath || p === target.worktreePath || p === targetPath;
+        });
+      } catch {
+        return false;
+      }
+    };
+    try {
+      await runGit(["worktree", "prune"], { cwd: target.checkout });
+    } catch {}
+    if (worktreeExistsOnDisk && !(await isRegistered())) {
+      try {
+        rmSync(targetPath, { recursive: true, force: true });
+      } catch {}
+      try {
+        await runGit(["worktree", "prune"], { cwd: target.checkout });
+      } catch {}
+    }
+    if (existsSync(targetPath) && (await isRegistered())) {
+      // already registered, just switch
+    } else if (!existsSync(targetPath)) {
+      try {
+        await runGit(["worktree", "add", targetPath, target.branch], {
+          cwd: target.checkout,
+        });
+      } catch (failure) {
+        const msg = errorMessage(failure);
+        if (msg.includes("already exists")) {
+          try {
+            rmSync(targetPath, { recursive: true, force: true });
+          } catch {}
+          try {
+            await runGit(["worktree", "prune"], { cwd: target.checkout });
+          } catch {}
+          try {
+            await runGit(["worktree", "add", targetPath, target.branch], {
+              cwd: target.checkout,
+            });
+          } catch (failure2) {
+            talk(
+              ctx,
+              `afk-runner: the worktree would not come back, so the session would have nowhere to work: ` +
+                errorMessage(failure2),
+              "error",
+            );
+            return;
+          }
+        } else {
+          talk(
+            ctx,
+            `afk-runner: the worktree would not come back, so the session would have nowhere to work: ` +
+              msg,
+            "error",
+          );
+          return;
+        }
+      }
+    } else {
+      try {
+        rmSync(targetPath, { recursive: true, force: true });
+      } catch {}
+      try {
+        await runGit(["worktree", "prune"], { cwd: target.checkout });
+      } catch {}
+      try {
+        await runGit(["worktree", "add", targetPath, target.branch], {
           cwd: target.checkout,
         });
       } catch (failure) {
