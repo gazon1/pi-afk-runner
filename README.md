@@ -200,12 +200,14 @@ Killing the process instead leaves the claim to go stale.
 pi-afk-runner --checkout ~/work/singularity          # --repo defaults to that checkout's origin
 ```
 
-A systemd timer runs it every hour; one invocation takes one issue from the queue and works it to the
-end of its journey — claim, worktree, agent, push, pull request, review, re-count — and then stops.
+A systemd timer runs it every hour; the unit passes `--all`, so one invocation drains the queue — it
+works every eligible issue in turn, each one to the end of its journey (claim, worktree, agent,
+push, pull request, review, re-count) — and then stops.
 
 The **exit code says which step the run reached**, because a scheduler has nothing else to read:
-`0` is a finished run, `10`..`80` are the steps, `75` says another runner holds the lock and `76`
-says the lock could not be taken. The unit and the codes are in [systemd/](systemd/README.md).
+`0` is a finished run, `1` says an issue could not be worked, `10`..`80` are the steps, `75` says
+another runner holds the lock and `76` says the lock could not be taken. The unit and the codes are
+in [systemd/](systemd/README.md).
 
 The lock is a real `flock`, held for the whole run: a lock file a killed runner leaves behind would
 block the next one for ever, and a marker is not a lock — adding a label is idempotent. It needs
