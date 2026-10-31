@@ -1353,6 +1353,7 @@ async function prepareExistingWorktree(
   // Detached, at the pushed commit: the branch is checked out nowhere, and a
   // worktree that checked it out would leave it checked out — and the next
   // run could not check it out again.
+  await removeWorktree(options.git, options.checkout, worktreePath);
   await options.git(["worktree", "add", "--detach", worktreePath, sha], {
     cwd: options.checkout,
   });
