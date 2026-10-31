@@ -389,10 +389,11 @@ export function piSessionFactory(options: {
                     typeof (block as any).text === "string"
                       ? (block as any).text
                       : "";
-                  if (text === "") {
+                  const line = textBlockLine(text);
+                  if (line === null) {
                     continue;
                   }
-                  options.onEvent?.(`· ${text}`);
+                  options.onEvent?.(line);
                   continue;
                 }
               }
@@ -476,6 +477,16 @@ export function runOptionsFrom(
     staleAfterMs: options.staleAfterMs,
     ...(options.verifyPushes === undefined ? {} : { verifyPushes: options.verifyPushes }),
   };
+}
+
+/**
+ * The line a text block prints, or null when it prints nothing.
+ *
+ * A block that holds only whitespace is silence: the marker alone would say
+ * that something was said, and nothing was.
+ */
+export function textBlockLine(text: string): string | null {
+  return text.trim() === "" ? null : `· ${text}`;
 }
 
 /** One line about a tool call: the tool, and the command when there is one. */
