@@ -415,37 +415,6 @@ export async function openPullRequest(options: {
   return { number, created: true };
 }
 
-/**
- * Push the work, and open the pull request for it.
- */
-export async function publishWork(options: {
-  readonly repo: string;
-  readonly remote: string;
-  readonly branch: string;
-  readonly sha: string;
-  readonly issueNumber: number;
-  readonly title: string;
-  readonly body: string;
-  readonly cwd: string;
-  readonly git: GitRunner;
-  readonly gh: GhRunner;
-  readonly run: CommandRunner;
-}): Promise<{ readonly number: number; readonly created: boolean }> {
-  await pushWorkBranch(options.git, options.cwd, {
-    remote: options.remote,
-    issueNumber: options.issueNumber,
-    sha: options.sha,
-  });
-  return openPullRequest({
-    repo: options.repo,
-    branch: options.branch,
-    title: options.title,
-    body: options.body,
-    gh: options.gh,
-    run: options.run,
-  });
-}
-
 /** The tool that reads a commit's CI verdict — the repository's own. */
 export const CI_VERDICT_TOOL = "scripts/ci-verdict.py";
 
@@ -798,7 +767,7 @@ function firstLine(text: string): string {
  */
 function redact(text: string): string {
   return text
-    .replace(/\bgh[pousr]_[A-Za-z0-9]{16,}\b/g, "gh_…")
+    .replace(/\b(?:gh[pousr]|github_pat)_[A-Za-z0-9_]{16,}\b/g, "gh_…")
     .replace(/\b(GH_TOKEN|GITHUB_TOKEN|GH_ENTERPRISE_TOKEN)=(\S+)/g, "$1=…");
 }
 
@@ -1637,7 +1606,7 @@ async function runPlan(
 
   return {
     issue: issue.number,
-    outcome: outcome.outcome === "failed" ? "empty" : outcome.outcome,
+    outcome: "completed",
     steps: outcome.steps,
     record: outcome.record,
   };

@@ -49,23 +49,6 @@ export const UNTRUSTED_INPUT_RULE = [
 /** The name of the system prompt section the rule is installed into. */
 export const UNTRUSTED_INPUT_SECTION = "untrusted_input";
 
-/** The part of `before_agent_start` the runner touches. */
-export interface SystemPromptEvent {
-  systemPromptOptions: {
-    sections: Record<string, string>;
-  };
-}
-
-/**
- * Install the rule into the system prompt.
- *
- * This is the shape `examples/extensions/prompt-customizer.ts` uses: a section,
- * added rather than a whole prompt replaced, so Pi's own guidance survives.
- */
-export function installUntrustedInputRule(event: SystemPromptEvent): void {
-  event.systemPromptOptions.sections[UNTRUSTED_INPUT_SECTION] = UNTRUSTED_INPUT_RULE;
-}
-
 /**
  * Defang a closing tag inside untrusted text.
  *
