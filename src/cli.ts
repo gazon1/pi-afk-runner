@@ -562,6 +562,12 @@ export async function main(
     const result = await runOnce(run);
     if (result.outcome === "empty") {
       process.stdout.write("the queue is empty — there was nothing to work\n");
+    } else if ((result.outcome as string) === "unworkable") {
+      const issueNum = result.issue ?? options.issue;
+      process.stderr.write(
+        `issue ${issueNum} could not be worked — check whether it is claimed by another runner, already reviewed, or already counted\n`,
+      );
+      return 1;
     } else {
       process.stdout.write(
         `worked issue ${result.issue} — the record is at ${result.record}\n`,

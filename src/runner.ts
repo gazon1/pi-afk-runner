@@ -1091,7 +1091,7 @@ export interface RunOptions {
 export interface RunResult {
   /** The issue the run worked, or null when it worked none. */
   readonly issue: number | null;
-  readonly outcome: "completed" | "empty";
+  readonly outcome: "completed" | "empty" | "unworkable";
   readonly steps: readonly StepRecord[];
   /** Where the record was written. */
   readonly record: string;
@@ -1206,6 +1206,14 @@ export async function runOnce(options: RunOptions): Promise<RunResult> {
   // queue that is never empty would starve it.
   const plan = await chooseIssue(options, now);
   if (plan === null) {
+    if (options.issueNumber !== undefined) {
+      return {
+        issue: options.issueNumber,
+        outcome: "unworkable",
+        steps: [],
+        record: "",
+      } as RunResult;
+    }
     return { issue: null, outcome: "empty", steps: [], record: "" };
   }
   return await runPlan(options, plan, now, runId);
