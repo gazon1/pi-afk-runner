@@ -280,6 +280,7 @@ export function liveFrontDoor(
 ): LiveFrontDoor {
   let live: LiveRun | null = null;
   let session: SteerableSession | null = null;
+  let workSession: SteerableSession | null = null;
   /** Whether the agent has a turn running: an abort only means something then. */
   let working = false;
   /** Whether the human stopped this run: the prompt array asks before every turn. */
@@ -409,6 +410,7 @@ export function liveFrontDoor(
     working = false;
     stopped = false;
     last = null;
+    workSession = null;
     // A run that selects nothing must not leave the previous run's line standing.
     publish(ctx, run);
     // The hold starts paused, so that constructing a queue cannot send anything.
@@ -426,14 +428,25 @@ export function liveFrontDoor(
           ...(model === undefined ? {} : { model }),
         }),
       (created) => {
+        if (workSession === null) {
+          workSession = created;
+        }
         session = created;
         follow(created, run.controller, (event) => {
-          mirror(ctx, event);
+          if (workSession !== null && created === workSession) {
+            mirror(ctx, event);
+          }
         });
         // The work session is headless: there is no chat to join. Its transcript is
         // a file, and a human who wants the whole of it reads that file.
         const transcript = created.sessionManager?.getSessionFile();
-        if (transcript !== null && transcript !== undefined && last !== null) {
+        if (
+          workSession === created &&
+          transcript !== null &&
+          transcript !== undefined &&
+          last !== null &&
+          last.transcript === null
+        ) {
           last.transcript = transcript;
           talk(ctx, `afk-runner: the run's transcript is ${transcript}`, "info");
           if (hostContext !== null) {
@@ -468,14 +481,25 @@ export function liveFrontDoor(
     void (async () => {
       try {
         const result = await (dependencies.work ?? runOnce)(runOptions);
-        talk(
-          ctx,
-          result.outcome === "empty"
-            ? "afk-runner: the queue is empty — there was nothing to work"
-            : `afk-runner: worked issue ${result.issue} — the record is at ${result.record}`,
-          "info",
-        );
-        finish(ctx, run, "done");
+        if ((result.outcome as string) === "unworkable") {
+          const issueNum = result.issue ?? options.issue;
+          talk(
+            ctx,
+            `afk-runner: issue ${issueNum ?? ""} could not be worked — check whether it is claimed by another runner, already reviewed, or already counted`,
+            "warning",
+          );
+          finish(ctx, run, "done");
+        } else if (result.outcome === "empty") {
+          talk(ctx, "afk-runner: the queue is empty — there was nothing to work", "info");
+          finish(ctx, run, "done");
+        } else {
+          talk(
+            ctx,
+            `afk-runner: worked issue ${result.issue} — the record is at ${result.record}`,
+            "info",
+          );
+          finish(ctx, run, "done");
+        }
       } catch (failure) {
         finish(
           ctx,
@@ -495,6 +519,7 @@ export function liveFrontDoor(
         }
         await run.controller.dispose();
         session = null;
+        workSession = null;
         working = false;
         live = null;
         try {
