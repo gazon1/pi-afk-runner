@@ -2,7 +2,18 @@
   "name": "pi-afk-runner",
   "version": "0.1.0",
   "description": "An AFK queue runner for Pi: takes a ready-for-agent issue, works it in an isolated worktree, and opens a reviewed pull request.",
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/gazon1/pi-afk-runner.git"
+  },
+  "homepage": "https://github.com/gazon1/pi-afk-runner#readme",
+  "bugs": {
+    "url": "https://github.com/gazon1/pi-afk-runner/issues"
+  },
   "license": "Apache-2.0",
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "keywords": [
     "pi-package"
@@ -35,7 +46,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
     "lint": "oxlint --deny-warnings src test",
     "test": "vitest run",
-    "check": "npm run typecheck && npm run lint && npm run test && npm run build"
+    "check": "npm run typecheck && npm run lint && npm run test && npm run build",
+    "prepublishOnly": "npm run check"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"
@@ -49,6 +61,7 @@
     "agents-cron": "0.15.0",
     "pi-advisor-flow": "0.14.3",
     "pi-lens": "4.4.7",
+    "pi-queue-steer-factory": "0.17.11",
     "pi-subagents": "0.84.0",
     "undici": "8.10.2"
   },

@@ -351,7 +351,33 @@ export async function addWorktree(
     readonly baseSha: string;
   },
 ): Promise<void> {
-  await git(["worktree", "add", "-b", options.branch, options.path, options.baseSha], { cwd });
+  // A run that failed before its push leaves its branch behind on purpose — the
+  // work a run did is durable — so the next attempt on this checkout finds the
+  // branch and continues it. `-b` would fail on the second attempt, and the issue
+  // would be unworkable on this machine for ever.
+  const exists =
+    (
+      await git(
+        ["rev-parse", "--verify", "--quiet", `refs/heads/${options.branch}`],
+        { cwd },
+      ).catch(() => "")
+    ).trim() !== "";
+  if (!exists) {
+    await git(["worktree", "add", "-b", options.branch, options.path, options.baseSha], {
+      cwd,
+    });
+    return;
+  }
+  // A branch that carries nothing of its own is a failed run's leftover, not work:
+  // it is moved to the base this run claimed, so a retry does not work on the main
+  // of an hour ago. Commits of its own are left where they are.
+  const ahead = (
+    await git(["rev-list", "--count", `${options.baseSha}..${options.branch}`], { cwd })
+  ).trim();
+  if (ahead === "0") {
+    await git(["branch", "-f", options.branch, options.baseSha], { cwd });
+  }
+  await git(["worktree", "add", options.path, options.branch], { cwd });
 }
 
 /**

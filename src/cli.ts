@@ -22,8 +22,8 @@
  */
 
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { basename, dirname, join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   DefaultResourceLoader,
@@ -33,6 +33,7 @@ import {
 import { EnvHttpProxyAgent, fetch as undiciFetch, setGlobalDispatcher } from "undici";
 
 import { runGh, type GhRunner } from "./gh.js";
+import { guardExtensionPath, installGuardPolicy } from "./guard.js";
 import { runCommand, runGit, type CommandRunner, type GitRunner } from "./git.js";
 import { LockHeld, LockUnusable, takeLock } from "./lock.js";
 import { RunFailed, runOnce, type RunOptions } from "./runner.js";
@@ -83,8 +84,13 @@ export const DEFAULT_DEADLINE_MS = 2 * 60 * 60 * 1000;
 
 /** What the command line says. */
 export interface CliOptions {
-  /** The repository the issue lives in — `owner/name`. */
-  readonly repo: string;
+  /**
+   * The repository the issue lives in — `owner/name`.
+   *
+   * Optional: a run started in the repository it works asks the checkout's
+   * `origin` instead. See {@link resolveRepo}.
+   */
+  readonly repo?: string;
   /** The issue to work. The queue's first eligible one when it is absent. */
   readonly issue?: number;
   /** The checkout the worktree is made from. */
@@ -113,9 +119,9 @@ export interface CliOptions {
 export const USAGE = [
   "pi-afk-runner — work one issue from the queue and open a reviewed pull request",
   "",
-  "  pi-afk-runner --repo <owner/name> [options]",
+  "  pi-afk-runner [options]",
   "",
-  "  --repo <owner/name>    the repository the issue lives in (required)",
+  "  --repo <owner/name>    the repository the issue lives in (default: the checkout's origin)",
   "  --issue <number>        the issue to work (default: the queue's first eligible one)",
   "  --checkout <path>       the checkout the worktree is made from (default: the cwd)",
   "  --remote <name>         the remote the base comes from (default: origin)",
@@ -131,7 +137,7 @@ export const USAGE = [
 ].join("\n");
 
 /** The message of a failure, whatever it was thrown as. */
-function errorMessage(failure: unknown): string {
+export function errorMessage(failure: unknown): string {
   return failure instanceof Error ? failure.message : String(failure);
 }
 
@@ -169,7 +175,7 @@ export function parseArgs(argv: readonly string[]): CliOptions {
   }
 
   repo = values.get("repo");
-  if (repo === undefined || !repo.includes("/")) {
+  if (repo !== undefined && !repo.includes("/")) {
     throw new Error("--repo must name a repository, as owner/name");
   }
 
@@ -181,8 +187,11 @@ export function parseArgs(argv: readonly string[]): CliOptions {
     values.get("lock-dir") ?? join(checkout, "build", "afk-runner");
   const worktreeRoot =
     values.get("worktree-root") ?? join(dirname(checkout), "afk-worktrees");
+  // The same precedence Pi itself uses for its agent directory, so that the
+  // directory this runner names is the one the session and the guard read.
   const agentDirectory =
     values.get("agent-dir") ??
+    process.env.PI_CODING_AGENT_DIR ??
     process.env.PI_AGENT_DIR ??
     join(homedir(), ".pi", "agent");
   const model = values.get("model");
@@ -191,7 +200,7 @@ export function parseArgs(argv: readonly string[]): CliOptions {
   const staleAfterMs = number(values.get("stale-after-ms"), DEFAULT_STALE_AFTER_MS, "--stale-after-ms");
 
   return {
-    repo,
+    ...(repo === undefined ? {} : { repo }),
     ...(issue === undefined ? {} : { issue: positiveNumber(issue, "--issue") }),
     checkout,
     remote,
@@ -204,6 +213,46 @@ export function parseArgs(argv: readonly string[]): CliOptions {
     deadlineMs,
     staleAfterMs,
   };
+}
+
+/**
+ * `owner/name` from a remote URL, or null.
+ *
+ * The forms git writes into `.git/config`: `git@github.com:owner/name.git`,
+ * `ssh://git@github.com/owner/name`, and `https://github.com/owner/name.git`.
+ */
+export function repoFromRemoteUrl(url: string): string | null {
+  const match =
+    /^(?:[a-z][a-z0-9+.-]*:\/\/)?(?:[^@/]+@)?[^/:]+[:/]([^/]+)\/([^/]+?)(?:\.git)?\/?$/i.exec(
+      url.trim(),
+    );
+  return match?.[1] !== undefined && match[2] !== undefined
+    ? `${match[1]}/${match[2]}`
+    : null;
+}
+
+/**
+ * The repository the issue lives in.
+ *
+ * `--repo` wins. Without it the checkout's `origin` is asked, because a run
+ * started in the repository it works should not have to name it twice.
+ */
+export async function resolveRepo(
+  options: CliOptions,
+  git: GitRunner = runGit,
+): Promise<CliOptions & { readonly repo: string }> {
+  if (options.repo !== undefined) {
+    return { ...options, repo: options.repo };
+  }
+  const remote = (await git(["remote", "get-url", "origin"], { cwd: options.checkout })).trim();
+  const repo = repoFromRemoteUrl(remote);
+  if (repo === null) {
+    throw new Error(
+      `--repo was not given, and the checkout's origin (${remote === "" ? "no remote" : remote}) ` +
+        `does not name a repository as owner/name`,
+    );
+  }
+  return { ...options, repo };
 }
 
 /** Read a whole number, or say that it is not one. */
@@ -261,7 +310,10 @@ export function useProxyFromEnvironment(env: NodeJS.ProcessEnv = process.env): b
  *
  * The extension is installed **into the session**, not into the host's Pi — a
  * session the runner creates must not be steered by the extension that also
- * creates sessions.
+ * creates sessions. That is what `extensionsOverride` enforces: discovery stays
+ * on, because the host's model providers are extensions and a session that
+ * discovered nothing would have no model to run on, and **this** extension is
+ * dropped by path before the session's runner is built.
  */
 export function piSessionFactory(options: {
   readonly agentDirectory: string;
@@ -272,9 +324,15 @@ export function piSessionFactory(options: {
 }): SessionFactory {
   return async ({ cwd, systemPromptSections, tools }) => {
     useProxyFromEnvironment();
+    await installGuardPolicy({ cwd });
     const loader = new DefaultResourceLoader({
       cwd,
       agentDir: options.agentDirectory,
+      additionalExtensionPaths: [guardExtensionPath()],
+      extensionsOverride: (loaded) => ({
+        ...loaded,
+        extensions: loaded.extensions.filter((extension) => !isOwnExtension(extension.path)),
+      }),
       extensionFactories: [
         {
           name: "afk-runner-guardrail",
@@ -295,9 +353,19 @@ export function piSessionFactory(options: {
 
     const created = await createAgentSession({
       cwd,
+      // The same directory the loader was given: the flag means "this agent
+      // directory", not "the extensions of this one and the credentials of another".
+      agentDir: options.agentDirectory,
       resourceLoader: loader,
       ...(tools === undefined ? {} : { customTools: [...tools] }),
     });
+
+    // `session_start` is the host's event, and this session has no host: the SDK
+    // builds the extension runner and binds the tool-call gate, but never emits it.
+    // The guard loads its policy there, so without this line it has none — and a
+    // call with no rule is an ask, which in a session with no dialog is a deny.
+    // Measured: every tool call blocked before this line, only the denied paths after.
+    await created.session.bindExtensions({});
 
     const model = pickModel(created.session.modelRuntime, options.model);
     if (model === undefined) {
@@ -311,8 +379,55 @@ export function piSessionFactory(options: {
   };
 }
 
+/** The name of the directory this package is installed in, whatever the install. */
+const OWN_PACKAGE = basename(dirname(dirname(fileURLToPath(import.meta.url))));
+
+/**
+ * Whether a discovered extension is this package's own.
+ *
+ * It is decided by the **package**, not by the file: a host can have two copies
+ * of this package installed (a project install and a global one), and the copy
+ * the host activated is not necessarily the copy a work session discovers. A path
+ * comparison would let the other copy in — and that copy's hooks would fire in
+ * the session this package created.
+ */
+function isOwnExtension(path: string): boolean {
+  // `<package>/dist/extension.js` from an install, `<package>/src/extension.ts` from source.
+  return basename(dirname(dirname(resolve(path)))) === OWN_PACKAGE;
+}
+
+/**
+ * The run both front doors give the runner.
+ *
+ * Everything here comes from the command line or from the injected dependencies;
+ * the doors differ only in how they report a run — a scheduler reads stdout, a
+ * human reads the footer — so those callbacks are added by each door. One map,
+ * because two maps of thirteen fields drift the first time a flag is added.
+ */
+export function runOptionsFrom(
+  options: CliOptions & { readonly repo: string },
+  session: SessionFactory,
+  dependencies: CliDependencies = {},
+): RunOptions {
+  return {
+    repo: options.repo,
+    ...(options.issue === undefined ? {} : { issueNumber: options.issue }),
+    checkout: options.checkout,
+    remote: options.remote,
+    baseBranch: options.baseBranch,
+    worktreeRoot: options.worktreeRoot,
+    git: dependencies.git ?? runGit,
+    gh: dependencies.gh ?? runGh,
+    run: dependencies.run ?? runCommand,
+    session,
+    deadlineMs: options.deadlineMs,
+    staleAfterMs: options.staleAfterMs,
+    ...(options.verifyPushes === undefined ? {} : { verifyPushes: options.verifyPushes }),
+  };
+}
+
 /** One line about a tool call: the tool, and the command when there is one. */
-function describeToolCall(event: { toolName: string; input?: unknown }): string {
+export function describeToolCall(event: { toolName: string; input?: unknown }): string {
   const input = event.input;
   const command =
     typeof input === "object" &&
@@ -400,9 +515,17 @@ export async function main(
     return EXIT_OK;
   }
 
+  let resolved: CliOptions & { readonly repo: string };
+  try {
+    resolved = await resolveRepo(options, dependencies.git ?? runGit);
+  } catch (failure) {
+    process.stderr.write(`${errorMessage(failure)}\n`);
+    return EXIT_USAGE;
+  }
+
   let lock;
   try {
-    lock = await takeLock(options.lockDirectory);
+    lock = await takeLock(resolved.lockDirectory);
   } catch (failure) {
     if (failure instanceof LockHeld) {
       process.stderr.write(`${failure.message}\n`);
@@ -417,27 +540,18 @@ export async function main(
   }
 
   const run: RunOptions = {
-    repo: options.repo,
-    ...(options.issue === undefined ? {} : { issueNumber: options.issue }),
-    checkout: options.checkout,
-    remote: options.remote,
-    baseBranch: options.baseBranch,
-    worktreeRoot: options.worktreeRoot,
-    git: dependencies.git ?? runGit,
-    gh: dependencies.gh ?? runGh,
-    run: dependencies.run ?? runCommand,
-    session:
+    ...runOptionsFrom(
+      resolved,
       dependencies.session ??
-      piSessionFactory({
-        agentDirectory: options.agentDirectory,
-        ...(options.model === undefined ? {} : { model: options.model }),
-        onEvent: (line) => {
-          process.stdout.write(`${line}\n`);
-        },
-      }),
-    deadlineMs: options.deadlineMs,
-    staleAfterMs: options.staleAfterMs,
-    ...(options.verifyPushes === undefined ? {} : { verifyPushes: options.verifyPushes }),
+        piSessionFactory({
+          agentDirectory: resolved.agentDirectory,
+          ...(resolved.model === undefined ? {} : { model: resolved.model }),
+          onEvent: (line) => {
+            process.stdout.write(`${line}\n`);
+          },
+        }),
+      dependencies,
+    ),
     onStep: (record) => {
       const detail = record.detail === "" ? "" : ` — ${record.detail}`;
       process.stdout.write(`[${record.step}] ${record.outcome}${detail}\n`);

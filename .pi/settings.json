@@ -4,6 +4,7 @@
     "npm:pi-advisor-flow@0.14.3",
     "npm:@quintinshaw/pi-dynamic-workflows@3.15.0",
     "npm:pi-lens@4.4.7",
+    "npm:pi-queue-steer-factory@0.17.11",
     "npm:@gotgenes/pi-permission-system@42.0.0",
     "npm:agents-cron@0.15.0",
     "npm:@signalridge/pi-worktree@1.4.5",

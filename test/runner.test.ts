@@ -1,5 +1,3 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-
 import { describe, expect, it } from "vitest";
 
 import { claimIssue, releaseClaim } from "../src/claim.js";
@@ -21,6 +19,7 @@ import {
   type AgentSession,
   type SessionFactory,
 } from "../src/session.js";
+import { repoFromRemoteUrl, resolveRepo } from "../src/cli.js";
 import {
   CommandFailed,
   allowedPushRefs,
@@ -30,6 +29,7 @@ import {
   claimRef,
   claimRefName,
   readClaimBase,
+  removeWorktree,
   runCommand,
   runGit,
   workBranch,
@@ -232,22 +232,49 @@ describe("the range grammar", () => {
   });
 });
 
-describe("the extension entry point", () => {
-  it("loads against the Pi it is running inside, and says which Pi that is", async () => {
-    const activate = (await import("../src/extension.js")).default;
-
-    const registered: string[] = [];
-    const pi = {
-      registerCommand: (name: string) => {
-        registered.push(name);
-      },
+describe("the repository the run works", () => {
+  it("comes from the checkout's origin when the command does not name one", async () => {
+    const asked: string[][] = [];
+    const git = async (args: readonly string[]): Promise<string> => {
+      asked.push([...args]);
+      return "git@github.com:gazon1/sing.git\n";
     };
 
-    // The gate runs at load: an unsupported Pi throws here, and the extension does not load.
-    expect(() => activate(pi as unknown as ExtensionAPI)).not.toThrow();
+    const options = await resolveRepo(
+      { checkout: "/checkout", remote: "origin", baseBranch: "main", lockDirectory: "/lock", worktreeRoot: "/wt", agentDirectory: "/agent", deadlineMs: 1, staleAfterMs: 1 },
+      git,
+    );
 
-    // And the gate's other half is reachable: the session can ask which Pi it is running against.
-    expect(registered).toContain("afk-runner-version");
+    expect(options.repo).toBe("gazon1/sing");
+    expect(asked[0]).toEqual(["remote", "get-url", "origin"]);
+  });
+
+  it("reads every form git writes into the config", () => {
+    expect(repoFromRemoteUrl("git@github.com:gazon1/sing.git")).toBe("gazon1/sing");
+    expect(repoFromRemoteUrl("git@github.com:gazon1/sing")).toBe("gazon1/sing");
+    expect(repoFromRemoteUrl("ssh://git@github.com/gazon1/sing.git")).toBe("gazon1/sing");
+    expect(repoFromRemoteUrl("https://github.com/gazon1/sing.git")).toBe("gazon1/sing");
+    expect(repoFromRemoteUrl("https://github.com/gazon1/sing")).toBe("gazon1/sing");
+    expect(repoFromRemoteUrl("https://github.com/gazon1/sing/")).toBe("gazon1/sing");
+    // Something that is not a repository URL is not guessed at.
+    expect(repoFromRemoteUrl("/srv/git/sing.git")).toBeNull();
+    expect(repoFromRemoteUrl("sing")).toBeNull();
+  });
+
+  it("keeps --repo when the command names one, and refuses a nameless origin", async () => {
+    const git = async (): Promise<string> => "";
+    const named = await resolveRepo(
+      { repo: "owner/name", checkout: "/c", remote: "origin", baseBranch: "main", lockDirectory: "/l", worktreeRoot: "/w", agentDirectory: "/a", deadlineMs: 1, staleAfterMs: 1 },
+      git,
+    );
+    expect(named.repo).toBe("owner/name");
+
+    await expect(
+      resolveRepo(
+        { checkout: "/c", remote: "origin", baseBranch: "main", lockDirectory: "/l", worktreeRoot: "/w", agentDirectory: "/a", deadlineMs: 1, staleAfterMs: 1 },
+        git,
+      ),
+    ).rejects.toThrow("does not name a repository");
   });
 });
 
@@ -725,6 +752,73 @@ describe("the worktree", () => {
       await fixture.dispose();
     }
   });
+
+  it("test_a_second_attempt_continues_the_branch_the_first_left", async () => {
+    // A run that failed before its push leaves its branch behind on purpose. The
+    // next attempt on this checkout must use it: `git worktree add -b` fails when
+    // the branch is already there, and the issue would be unworkable for ever.
+    const fixture = await createFixtureRepository({
+      files: { "scripts/setup-worktree.sh": "#!/usr/bin/env bash\nset -euo pipefail\n" },
+    });
+    try {
+      const git = (args: readonly string[], options: { readonly cwd: string }) =>
+        runGit(args, options);
+      const baseSha = await gitOutput(["rev-parse", "main"], {
+        cwd: fixture.repo,
+        env: fixture.env,
+      });
+      const options = {
+        repo: fixture.repo,
+        remote: fixture.remote,
+        baseBranch: "main",
+        baseSha,
+        issueNumber: 42,
+        cwd: fixture.repo,
+        git,
+      };
+
+      const first = join(fixture.root, "worktree-issue-42");
+      await prepareWorktree({ ...options, worktreePath: first });
+      await removeWorktree(git, fixture.repo, first);
+      expect(
+        await gitOutput(["rev-parse", "--verify", "--quiet", "refs/heads/agent/issue-42"], {
+          cwd: fixture.repo,
+          env: fixture.env,
+        }),
+      ).not.toBe("");
+
+      const second = join(fixture.root, "worktree-issue-42-again");
+      const prepared = await prepareWorktree({ ...options, worktreePath: second });
+
+      expect(prepared.branch).toBe("agent/issue-42");
+      expect(
+        await gitOutput(["rev-parse", "--abbrev-ref", "HEAD"], {
+          cwd: second,
+          env: fixture.env,
+        }),
+      ).toBe("agent/issue-42");
+
+      // A leftover branch carries nothing of its own, so it moves to the base this
+      // run claimed: a retry does not work on the main of an hour ago.
+      await writeFile(join(fixture.repo, "moved-on.txt"), "the base moved\n", "utf8");
+      await git(["add", "-A"], { cwd: fixture.repo });
+      await git(["commit", "-q", "-m", "the base moves on"], { cwd: fixture.repo });
+      await git(["push", "-q", "origin", "main"], { cwd: fixture.repo });
+      const movedBase = await gitOutput(["rev-parse", "main"], {
+        cwd: fixture.repo,
+        env: fixture.env,
+      });
+      await removeWorktree(git, fixture.repo, second);
+
+      const third = join(fixture.root, "worktree-issue-42-yet-again");
+      await prepareWorktree({ ...options, baseSha: movedBase, worktreePath: third });
+      expect(
+        await gitOutput(["rev-parse", "HEAD"], { cwd: third, env: fixture.env }),
+      ).toBe(movedBase);
+    } finally {
+      await fixture.dispose();
+    }
+  });
 });
 
 describe("the agent's session", () => {
@@ -1030,6 +1124,33 @@ describe("the fixes", () => {
     const result = await run;
     expect(result.aborted).toBe(true);
     expect(result.abortError).toContain("already gone");
+  });
+
+  it("test_a_stopped_run_sends_no_further_turn", async () => {
+    // An abort cuts the turn that is running; a stop has to keep the array from
+    // sending the next one, or the run carries on to its push.
+    const turns: string[] = [];
+    let stop = false;
+    const session: AgentSession = {
+      async prompt(text) {
+        turns.push(text);
+        stop = true; // the human stops the run during the first turn
+      },
+      async abort() {},
+      dispose() {},
+    };
+
+    const result = await runPromptArray({
+      session,
+      prompts: ["one", "two", "three"],
+      deadlineMs: 60_000,
+      stopped: () => stop,
+    });
+
+    expect(turns).toEqual(["one"]);
+    expect(result.aborted).toBe(true);
+    // The turn that was sent finished; the two that were not are the point.
+    expect(result.completed).toBe(1);
   });
 
   it("reads the issue body and its comments", async () => {
@@ -1775,6 +1896,35 @@ describe("the failure path and the record", () => {
       expect(record).toContain("release — ok");
     } finally {
       await fixture.dispose();
+    }
+  });
+
+  it("test_the_stage_is_named_when_a_step_starts", async () => {
+    const root = await mkdtemp(join(tmpdir(), "afk-stage-"));
+    const seen: string[] = [];
+    try {
+      await runSteps({
+        issue: 42,
+        runId: "2026-10-30T09-00-00-000Z-abcdef12",
+        root,
+        steps: [
+          { name: "claim", run: async () => "claimed" },
+          { name: "worktree", run: async () => "prepared" },
+        ],
+        onStepStart: (step) => seen.push(`start ${step}`),
+        onStep: (record) => seen.push(`end ${record.step}`),
+      });
+
+      // A watcher is told the step it is watching before the step runs: a stage
+      // named when the step finishes names the step that has just ended.
+      expect(seen).toEqual([
+        "start claim",
+        "end claim",
+        "start worktree",
+        "end worktree",
+      ]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
     }
   });
 

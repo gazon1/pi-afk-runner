@@ -248,6 +248,14 @@ export async function runPromptArray(options: {
   readonly issueComments?: readonly string[];
   readonly deadlineMs: number;
   readonly schedule?: Scheduler;
+  /**
+   * Whether somebody has stopped the run.
+   *
+   * Asked before every turn. An abort cuts the turn that is running; this is
+   * what stops the array from sending the next one — a stop that only cut one
+   * turn would let the run carry on to its push.
+   */
+  readonly stopped?: () => boolean;
 }): Promise<PromptArrayResult> {
   const schedule = options.schedule ?? defaultScheduler;
   let aborted = false;
@@ -283,10 +291,22 @@ export async function runPromptArray(options: {
     return !aborted;
   };
 
+  /** A stop by a human reads exactly like the deadline: the array does not go on. */
+  const stopped = (): boolean => {
+    if (options.stopped?.() !== true) {
+      return false;
+    }
+    aborted = true;
+    return true;
+  };
+
   let completed = 0;
   try {
     // The data goes first, in turns of its own, and is not counted: only the
     // prompts are the prompt array.
+    if (stopped()) {
+      return { completed, aborted, abortError };
+    }
     if (options.issueBody !== undefined) {
       if (!(await send(fenceIssueBody(options.issueBody)))) {
         return { completed, aborted, abortError };
@@ -299,7 +319,7 @@ export async function runPromptArray(options: {
     }
 
     for (const prompt of options.prompts) {
-      if (!(await send(prompt))) {
+      if (stopped() || !(await send(prompt))) {
         break;
       }
       completed += 1;
@@ -330,6 +350,8 @@ export async function startAgent(options: {
   readonly systemPromptSections?: Record<string, string>;
   readonly promptsDirectory?: string;
   readonly deadlineMs: number;
+  /** Whether somebody has stopped the run. */
+  readonly stopped?: () => boolean;
   readonly schedule?: Scheduler;
 }): Promise<PromptArrayResult> {
   const prompts = await readPrompts(options.promptsDirectory ?? promptsDirectory());
@@ -360,6 +382,7 @@ export async function startAgent(options: {
     issueBody: issue.body,
     issueComments: issue.comments,
     deadlineMs: options.deadlineMs,
+    ...(options.stopped === undefined ? {} : { stopped: options.stopped }),
     ...(options.schedule === undefined ? {} : { schedule: options.schedule }),
   });
 }

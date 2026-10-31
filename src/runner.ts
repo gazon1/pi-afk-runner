@@ -261,6 +261,26 @@ export async function prepareWorktree(
     ref: options.baseBranch,
   });
 
+  // The repository's own recipe, checked **before** anything is created. A
+  // repository without it cannot be worked, and discovering that afterwards
+  // leaves a half-made worktree and a claim to release for nothing.
+  const prepared = await options
+    .git(["cat-file", "-e", `${options.baseSha}:${SETUP_SCRIPT}`], { cwd: options.cwd })
+    .then(
+      () => true,
+      () => false,
+    );
+  if (!prepared) {
+    throw new Error(
+      `the target repository has no ${SETUP_SCRIPT} at ${options.baseSha.slice(0, 8)} — ` +
+        `a worktree cannot be prepared without it`,
+    );
+  }
+
+  // A worktree left behind by a run that was killed would make the next `worktree
+  // add` fail on its own leftover. It is scratch: the branch holds the work.
+  await removeWorktree(options.git, options.cwd, options.worktreePath);
+
   await addWorktree(options.git, options.cwd, {
     path: options.worktreePath,
     branch,
@@ -902,6 +922,8 @@ export async function runSteps(options: {
   readonly release?: () => Promise<void>;
   /** Told about every step, as it finishes. */
   readonly onStep?: (record: StepRecord) => void;
+  /** Told about a step as it starts. */
+  readonly onStepStart?: (step: string) => void;
 }): Promise<RunOutcome> {
   const steps: StepRecord[] = [];
   let failure: { readonly step: string; readonly error: Error } | null = null;
@@ -909,6 +931,7 @@ export async function runSteps(options: {
   for (const step of options.steps) {
     let record: StepRecord;
     try {
+      options.onStepStart?.(step.name);
       const output = await step.run();
       record = { step: step.name, outcome: "ok", detail: redact(firstLine(output)) };
     } catch (error) {
@@ -1041,6 +1064,24 @@ export interface RunOptions {
   readonly verifyPushes?: boolean;
   /** Told about every step, as it finishes. */
   readonly onStep?: (record: StepRecord) => void;
+  /** Told about a step as it starts, so a watcher can name the stage it is watching. */
+  readonly onStepStart?: (step: string) => void;
+  /**
+   * Whether a human has stopped the run.
+   *
+   * Asked before every turn of the agent. An abort cuts the turn that is running;
+   * this is what keeps the array from sending the next one — a stop that only cut
+   * a turn would let the run carry on to its push.
+   */
+  readonly stopped?: () => boolean;
+  /**
+   * Told which issue the run took, before its first step.
+   *
+   * The issue is chosen inside the run — from the queue, or by number — and a
+   * watcher that has to look it up is a watcher that can be watching the wrong
+   * issue.
+   */
+  readonly onIssue?: (issue: { readonly number: number; readonly title: string }) => void;
   readonly now?: Date;
   readonly nonce?: string;
   readonly runId?: string;
@@ -1269,6 +1310,7 @@ async function runPlan(
   runId: string,
 ): Promise<RunResult> {
   const issue = plan.issue;
+  options.onIssue?.(issue);
   const state = {
     claimed: false,
     base: "",
@@ -1338,9 +1380,12 @@ async function runPlan(
           issueNumber: issue.number,
           gh: options.gh,
           deadlineMs: options.deadlineMs,
+          ...(options.stopped === undefined ? {} : { stopped: options.stopped }),
         });
         if (result.aborted) {
-          throw new Error("the agent's session was cut off by the deadline");
+          // The deadline is one reason a turn is cut; a human stopping the run is
+          // another, and the message must not claim a clock it cannot see.
+          throw new Error("the agent's session was cut off before its last turn");
         }
         return `${result.completed} turns`;
       },
@@ -1471,6 +1516,8 @@ async function runPlan(
     runId,
     root: options.checkout,
     steps,
+    ...(options.onStep === undefined ? {} : { onStep: options.onStep }),
+    ...(options.onStepStart === undefined ? {} : { onStepStart: options.onStepStart }),
     release: async () => {
       if (!state.claimed) {
         return;
@@ -1486,6 +1533,15 @@ async function runPlan(
       });
     },
   });
+
+  // The worktree is scratch, and the branch holds the work: the next run that
+  // needs one makes one. Left behind, a worktree per issue fills the worktree
+  // root — and the setup script it runs is not cheap.
+  if (state.worktreePath !== "") {
+    await removeWorktree(options.git, options.checkout, state.worktreePath).catch(() => {
+      // A worktree that could not be removed is cleaned up by the next attempt.
+    });
+  }
 
   return {
     issue: issue.number,
