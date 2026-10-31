@@ -57,7 +57,7 @@ live checkout model="":
     echo "Команды: /afk-runner-run | /afk-runner-attach | /afk-runner-stop"
     exec "$PI_CMD" "${args[@]}"
 
-[doc('Autocombo: process all ready-for-agent issues in queue until empty')]
+[doc('Autocombo: drain all ready-for-agent issues in queue until empty')]
 [group('run')]
 comb checkout repo="" model="" base="main" remote="origin":
     #!/usr/bin/env bash
@@ -83,24 +83,7 @@ comb checkout repo="" model="" base="main" remote="origin":
     if [ -n "{{model}}" ]; then
       args+=(--model "{{model}}")
     fi
-    while true; do
-      node "$cli" "${args[@]}"
-      rc=$?
-      if [ $rc -eq 0 ]; then
-        echo "Очередь пуста или все задачи обработаны"
-        break
-      elif [ $rc -eq 75 ]; then
-        echo "Блокировка занята другим раннером, повтор через 60с"
-        sleep 60
-        continue
-      elif [ $rc -eq 76 ]; then
-        echo "Не удалось взять блокировку (flock недоступен/ошибка)" >&2
-        exit 76
-      else
-        echo "Ошибка при обработке (код $rc)" >&2
-        exit $rc
-      fi
-    done
+    exec node "$cli" "${args[@]}" --all
 
 # ==============================================================================
 # Legacy gates (kept for compatibility)

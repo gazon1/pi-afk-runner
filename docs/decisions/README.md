@@ -20,6 +20,7 @@ for the rule that the copies follow.
 | `2026-10-31-the-auto-attached-chat-keeps-its-worktree.md` | why the worktree is put back when the chat was switched into it |
 | `2026-10-30-a-failed-runs-branch-is-continued.md` | what the next attempt does with the branch a failed run left |
 | `2026-10-31-a-branch-with-no-commits-is-not-work.md` | when a branch on the remote counts as work |
+| `2026-10-31-the-sweep-belongs-to-the-cli.md` | who drains the queue, and what the unit's timeout is sized for |
 | `2026-10-30-the-brief-is-the-body-when-no-comment-carries-the-marker.md` | where the brief is, and what happens when there is none |
 | `2026-10-30-the-afk-runner-is-a-pi-extension.md` | why the runner is a separate repository, and the three layers of exclusion |
 | `2026-09-25-git-hooks-worktree-isolation.md` | the worktree and the hooks that go with it |

@@ -3,11 +3,11 @@
 /**
  * The unattended front door.
  *
- * One invocation: take the lock, work one issue, write the record, give the
- * lock back. The exit code says which step the run reached, because a
- * scheduler has nothing else to read — a systemd unit sees a number, and a
- * number that says "the session" is worth a great deal more than a number
- * that says "1".
+ * One invocation: take the lock, work one issue — or, with `--all`, every
+ * eligible issue one after another — write the record, give the lock back.
+ * The exit code says which step the run reached, because a scheduler has
+ * nothing else to read — a systemd unit sees a number, and a number that says
+ * "the session" is worth a great deal more than a number that says "1".
  *
  * | Code | What it says |
  * |---|---|
@@ -33,7 +33,7 @@ import {
 import chalk from "chalk";
 import { EnvHttpProxyAgent, fetch as undiciFetch, setGlobalDispatcher } from "undici";
 
-import { runGh, type GhRunner } from "./gh.js";
+import { readClaimed, readQueue, runGh, type GhRunner } from "./gh.js";
 import { guardExtensionPath, installGuardPolicy } from "./guard.js";
 import { runCommand, runGit, type CommandRunner, type GitRunner } from "./git.js";
 import { LockHeld, LockUnusable, takeLock } from "./lock.js";
@@ -92,6 +92,8 @@ export interface CliOptions {
   readonly repo?: string;
   /** The issue to work. The queue's first eligible one when it is absent. */
   readonly issue?: number;
+  /** Work every eligible issue, one after another. Not with `--issue`. */
+  readonly all?: boolean;
   /** The checkout the worktree is made from. */
   readonly checkout: string;
   /** The remote the base comes from. */
@@ -122,6 +124,7 @@ export const USAGE = [
   "",
   "  --repo <owner/name>    the repository the issue lives in (default: the checkout's origin)",
   "  --issue <number>        the issue to work (default: the queue's first eligible one)",
+  "  --all                   work every eligible issue, one after another",
   "  --checkout <path>       the checkout the worktree is made from (default: the cwd)",
   "  --remote <name>         the remote the base comes from (default: origin)",
   "  --base <branch>         the branch the base is read from (default: main)",
@@ -160,7 +163,7 @@ export function parseArgs(argv: readonly string[]): CliOptions {
     if (name === "help") {
       throw new Error("help");
     }
-    if (name === "no-verify") {
+    if (name === "no-verify" || name === "all") {
       // A flag, not an option with a value.
       values.set(name, "true");
       continue;
@@ -179,6 +182,10 @@ export function parseArgs(argv: readonly string[]): CliOptions {
   }
 
   const issue = values.get("issue");
+  const all = values.has("all");
+  if (all && issue !== undefined) {
+    throw new Error("--all works every issue, so it cannot be combined with --issue");
+  }
   const checkout = resolve(values.get("checkout") ?? process.cwd());
   const remote = values.get("remote") ?? "origin";
   const baseBranch = values.get("base") ?? "main";
@@ -201,6 +208,7 @@ export function parseArgs(argv: readonly string[]): CliOptions {
   return {
     ...(repo === undefined ? {} : { repo }),
     ...(issue === undefined ? {} : { issue: positiveNumber(issue, "--issue") }),
+    ...(all ? { all: true } : {}),
     checkout,
     remote,
     baseBranch,
@@ -543,9 +551,10 @@ export interface CliDependencies {
 /**
  * Run once, and say what happened through the exit code.
  *
- * The lock is taken for the whole run and given back whatever happens — a
- * runner that died holding it would keep the next one out for ever, and a
- * runner that gave it back too early would let two of them work at once.
+ * One issue, or the whole queue with `--all`. The lock is taken for the whole
+ * invocation and given back whatever happens — a runner that died holding it
+ * would keep the next one out for ever, and a runner that gave it back too
+ * early would let two of them work at once.
  */
 export async function main(
   argv: readonly string[],
@@ -608,11 +617,69 @@ export async function main(
   };
 
   try {
-    const result = await runOnce(run);
+    if (resolved.all === true) {
+      return await sweep(run, resolved.repo);
+    }
+    const result = await work(run, resolved.issue);
+    return result;
+  } finally {
+    await lock.release();
+  }
+}
+
+/**
+ * Work every eligible issue, one after another.
+ *
+ * The list is read once and worked **by number**, so an issue that fails
+ * cannot put itself back at the front of the queue and end the sweep in a
+ * spin. The claimed issues are read as well: a claim a killed sweep left
+ * behind is not in the queue, and taking it over is the only thing that will
+ * ever free it. Duplicates are dropped, so no issue is worked twice.
+ *
+ * The lock belongs to the caller and is held for the whole sweep. An issue
+ * that is not worked counts against the sweep, so the code never says the
+ * queue was drained while an issue was left in it.
+ */
+async function sweep(runOptions: RunOptions, repo: string): Promise<number> {
+  let issues: readonly { readonly number: number }[];
+  try {
+    issues = [
+      ...(await readClaimed(repo, runOptions.gh)),
+      ...(await readQueue(repo, runOptions.gh)),
+    ];
+  } catch (failure) {
+    process.stderr.write(`${errorMessage(failure)}\n`);
+    return STEP_EXIT_CODES.select ?? 1;
+  }
+
+  const numbers = [...new Set(issues.map((issue) => issue.number))];
+  if (numbers.length === 0) {
+    process.stdout.write("the queue is empty — there was nothing to work\n");
+    return EXIT_OK;
+  }
+
+  let firstFailure = 0;
+  let worked = 0;
+  for (const issueNumber of numbers) {
+    const code = await work({ ...runOptions, issueNumber }, issueNumber);
+    if (code === EXIT_OK) {
+      worked += 1;
+    } else if (firstFailure === 0) {
+      firstFailure = code;
+    }
+  }
+  process.stdout.write(`the sweep worked ${worked} of ${numbers.length} issues\n`);
+  return firstFailure;
+}
+
+/** Work one issue, and say what happened through the exit code. */
+async function work(runOptions: RunOptions, namedIssue: number | undefined): Promise<number> {
+  try {
+    const result = await runOnce(runOptions);
     if (result.outcome === "empty") {
       process.stdout.write("the queue is empty — there was nothing to work\n");
     } else if ((result.outcome as string) === "unworkable") {
-      const issueNum = result.issue ?? options.issue;
+      const issueNum = result.issue ?? namedIssue;
       const derivedState = (result as { derivedState?: string }).derivedState;
       let reason: string;
       if (derivedState === "Claimed") {
@@ -641,8 +708,6 @@ export async function main(
     }
     process.stderr.write(`${errorMessage(failure)}\n`);
     return 1;
-  } finally {
-    await lock.release();
   }
 }
 

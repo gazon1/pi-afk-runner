@@ -1,8 +1,8 @@
 # Running the runner on a timer
 
-The runner is unattended: it takes an issue from the queue, works it, opens a
-pull request and has a second agent review it. Somebody has to start it, and
-the scheduler is systemd.
+The runner is unattended: it drains the queue, working each eligible issue in
+turn — a worktree, a pull request, and a second agent's review for every one of
+them. Somebody has to start it, and the scheduler is systemd.
 
 ## Installing
 
@@ -34,6 +34,7 @@ The unit's status is the exit code, and the code names the step:
 | Code | What it says |
 |---|---|
 | 0 | the run finished, or the queue was empty |
+| 1 | an issue could not be worked — claimed elsewhere, already reviewed, or already counted |
 | 10 | the selection failed |
 | 20 | the claim failed |
 | 30 | the worktree failed |
@@ -49,6 +50,21 @@ A `75` is not a failure: the timer fired while a run was still going, and the
 runner left the work to the run that is already doing it. A `76` **is** a
 failure: the lock directory could not be written, and a runner that cannot
 take the lock must never look like a runner that had nothing to do.
+
+The unit runs with `--all`, so one status covers a whole sweep. The sweep reads
+the queue once and works it by number, so an issue that fails does not put
+itself back in front of the queue and no issue is worked twice. A failure does
+not stop the sweep; the status is the **first** failure's code, and `0` means
+every issue in the list was worked. An issue that cannot be worked — a fresh
+claim that belongs to a run elsewhere — is reported and counts as a failure, so
+a sweep never says "drained" while an issue was left. The lock is taken once,
+for the whole sweep, and given back at the end.
+
+`TimeoutStartSec` is `infinity`. A sweep has no fixed length, so any finite
+value is a kill in the middle of one. Each issue's turn is still bounded by the
+runner's own one-hour deadline. The cost of the backstop being gone: a genuinely
+hung `gh` or `git` call is not stopped by systemd, and the timer will not start
+a second instance while this one runs.
 
 ## `--no-verify`
 
@@ -72,12 +88,13 @@ exits `75` immediately, having read nothing and written nothing.
 ## A claim left behind
 
 A run that is killed leaves its claim on the issue, and a claim keeps the issue
-out of the queue. The next run takes such a claim over: the stale claim's ref
-is deleted, the issue is claimed again, and the work is redone — the session
-that made it is gone with the process that died.
+out of the queue. The next run that finds the claim stale takes it over: the
+stale claim's ref is deleted, the issue is claimed again, and the work is redone
+— the session that made it is gone with the process that died.
 
-`--stale-after-ms` is how long a claim may sit before that happens. It is a
-week here: long enough that a slow run keeps its issue, short enough that a
-killed run does not hold it for ever. A human who comments on the issue moves
-its last-update time, and the comment defers the take-over without anybody
-having to know there is one.
+`--stale-after-ms` is how long a claim may sit before that happens. It is two
+hours here: a run is capped at one hour, and the host lock means no second
+runner on this machine can be holding it. So a claim a killed sweep left behind
+is taken over a tick or two later, not after a week. A human who comments on the
+issue moves its last-update time, and the comment defers the take-over without
+anybody having to know there is one.

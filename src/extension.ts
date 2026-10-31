@@ -383,6 +383,10 @@ export function liveFrontDoor(
       talk(ctx, `afk-runner: ${errorMessage(failure)}`, "error");
       return;
     }
+    if (options.all === true) {
+      talk(ctx, "afk-runner: --all is the CLI's sweep; this command works one issue", "warning");
+      return;
+    }
     // The model is the one this session runs on unless the command names one.
     const model = options.model ?? hostModel(ctx.model) ?? undefined;
 

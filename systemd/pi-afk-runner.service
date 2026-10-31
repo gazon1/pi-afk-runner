@@ -9,14 +9,16 @@
 # holds Pi's settings and its credentials.
 
 [Unit]
-Description=AFK runner: work one issue and open a reviewed pull request
+Description=AFK runner: drain the ready-for-agent queue and open reviewed pull requests
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=oneshot
 WorkingDirectory=%h/work/singularity
-ExecStart=%h/.local/bin/pi-afk-runner --repo gazon1/sing --checkout %h/work/singularity --worktree-root %h/work/afk-worktrees --lock-dir %h/work/singularity/build/afk-runner --stale-after-ms 604800000
-# The runner's own deadline is one hour — split between the work and review
-# sessions. This is the backstop for a runner that hangs rather than works.
-TimeoutStartSec=3h
+# A run is capped at one hour. Two hours means a claim a killed sweep left
+# behind is taken over within a tick or two, not after a week.
+ExecStart=%h/.local/bin/pi-afk-runner --all --repo gazon1/sing --checkout %h/work/singularity --worktree-root %h/work/afk-worktrees --lock-dir %h/work/singularity/build/afk-runner --stale-after-ms 7200000
+# A sweep has no fixed length, so any finite timeout is a kill in the middle
+# of one. The runner's own deadline bounds each issue's turn instead.
+TimeoutStartSec=infinity
