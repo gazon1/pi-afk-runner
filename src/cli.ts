@@ -38,7 +38,7 @@ import { guardExtensionPath, installGuardPolicy } from "./guard.js";
 import { runCommand, runGit, type CommandRunner, type GitRunner } from "./git.js";
 import { LockHeld, LockUnusable, takeLock } from "./lock.js";
 import { RunFailed, runOnce, type RunOptions } from "./runner.js";
-import type { SessionFactory } from "./session.js";
+import type { AgentSession, SessionFactory } from "./session.js";
 
 /** The run finished, or the queue was empty. */
 export const EXIT_OK = 0;
@@ -592,23 +592,44 @@ export async function main(
     return EXIT_NO_LOCK;
   }
 
+  // A killed process cannot run the release step, and a claim nobody is working
+  // is an issue nobody can take. The signal becomes the stop the deadline already
+  // uses: the session is aborted, its step fails, and the failure path releases.
+  let stopped = false;
+  let active: AgentSession | null = null;
+  const interrupt = (): void => {
+    if (stopped) {
+      // A second signal is somebody insisting; the release is best effort.
+      process.exit(130);
+    }
+    stopped = true;
+    void active?.abort().catch(() => {});
+  };
+  process.on("SIGINT", interrupt);
+  process.on("SIGTERM", interrupt);
+
+  const base =
+    dependencies.session ??
+    piSessionFactory({
+      agentDirectory: resolved.agentDirectory,
+      ...(resolved.model === undefined ? {} : { model: resolved.model }),
+      onEvent: (line) => {
+        process.stdout.write(`${line}\n`);
+      },
+    });
+  const session: SessionFactory = async (options) => {
+    const created = await base(options);
+    active = created;
+    return created;
+  };
+
   const run: RunOptions = {
-    ...runOptionsFrom(
-      resolved,
-      dependencies.session ??
-        piSessionFactory({
-          agentDirectory: resolved.agentDirectory,
-          ...(resolved.model === undefined ? {} : { model: resolved.model }),
-          onEvent: (line) => {
-            process.stdout.write(`${line}\n`);
-          },
-        }),
-      dependencies,
-    ),
+    ...runOptionsFrom(resolved, session, dependencies),
     onStep: (record) => {
       const detail = record.detail === "" ? "" : ` — ${record.detail}`;
       process.stdout.write(`[${record.step}] ${record.outcome}${detail}\n`);
     },
+    stopped: () => stopped,
   };
 
   try {
@@ -618,6 +639,8 @@ export async function main(
     const result = await work(run, resolved.issue);
     return result;
   } finally {
+    process.off("SIGINT", interrupt);
+    process.off("SIGTERM", interrupt);
     await lock.release();
   }
 }
@@ -655,7 +678,13 @@ async function sweep(runOptions: RunOptions, repo: string): Promise<number> {
 
   let firstFailure = 0;
   let worked = 0;
+  let stoppedEarly = false;
   for (const issueNumber of numbers) {
+    // A human who stopped the run stopped the sweep, not one issue of it.
+    if (runOptions.stopped?.() === true) {
+      stoppedEarly = true;
+      break;
+    }
     const code = await work({ ...runOptions, issueNumber }, issueNumber);
     if (code === EXIT_OK) {
       worked += 1;
@@ -664,6 +693,11 @@ async function sweep(runOptions: RunOptions, repo: string): Promise<number> {
     }
   }
   process.stdout.write(`the sweep worked ${worked} of ${numbers.length} issues\n`);
+  // Issues were left in the queue, so this is not the success the zero would
+  // claim; a stop that did not fail a step reports the code a cut session has.
+  if (stoppedEarly && firstFailure === 0) {
+    return STEP_EXIT_CODES.session ?? 1;
+  }
   return firstFailure;
 }
 
