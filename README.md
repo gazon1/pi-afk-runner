@@ -186,6 +186,9 @@ left to the host session. One run at a time; a second `/afk-runner-run` says so.
 its transcript is a Pi session file, and the command switches this chat to it — the whole
 conversation, and you can carry on from it. It refuses while the agent is working (stop first, or
 wait for it to settle) and restores the worktree if the run's own cleanup already removed it.
+`/afk-runner-run` makes that same switch as soon as the work session exists, so the run can be
+watched from this chat; when the run's cleanup then removes the worktree the chat is sitting in, the
+run puts it back before it ends.
 
 `/afk-runner-stop` cuts the agent's turn the way the deadline does: the run fails where it stands
 and its failure path releases the claim and the worktree, while the branch keeps the commits it has.
@@ -217,8 +220,10 @@ rather than running two of itself.
 - a record under `build/diagnostics/issue-<N>/` in the checkout.
 
 The worktree itself is scratch and is removed when the run finishes, successful or not: the branch
-holds the work. The claim label stays on the issue until it closes — an issue without it is back in
-the queue — so the target repository's own workflow removes it on close
+holds the work — unless this chat was switched into the run's session, in which case the worktree is
+put back first, because a chat whose working directory is gone can read nothing. The claim label stays
+on the issue until it closes — an issue without it is back in the
+queue — so the target repository's own workflow removes it on close
 (`.github/workflows/afk-label-cleanup.yml` in the repository this runner was written for).
 
 ## What is in this repository

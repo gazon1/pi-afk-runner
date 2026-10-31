@@ -375,13 +375,18 @@ describe("the run the front door owns", () => {
   });
 
   it("opens the run's session as this chat, once the agent has settled", async () => {
-    const checkout = await mkdtemp(join(tmpdir(), "afk-live-"));
-    // The run's worktree has to exist for the attached session to have a directory
-    // to work in, so the test gives it one where the runner would put it.
-    const worktreeRoot = join(checkout, "afk-worktrees");
+    // The run's worktree has to be a real one: attaching restores it, and a
+    // directory git does not know is not a worktree.
+    const fixture = await createFixtureRepository();
+    const worktreeRoot = join(fixture.root, "worktrees");
     const worktreePath = join(worktreeRoot, "issue-42");
-    await mkdir(worktreePath, { recursive: true });
     try {
+      const git = (args: readonly string[]) =>
+        gitOutput(args, { cwd: fixture.repo, env: fixture.env });
+      await git(["branch", "agent/issue-42"]);
+      await mkdir(worktreeRoot, { recursive: true });
+      await git(["worktree", "add", worktreePath, "agent/issue-42"]);
+
       const host = fakePi();
       const fake = fakeSession();
       const created = deferred();
@@ -401,27 +406,134 @@ describe("the run the front door owns", () => {
       expect(notes.at(-1)?.message).toContain("no run to attach to");
 
       await door.start(
-        `--repo gazon1/cardinalfish --checkout ${checkout} --worktree-root ${worktreeRoot}`,
+        `--repo gazon1/cardinalfish --checkout ${fixture.repo} --worktree-root ${worktreeRoot}`,
         ctx,
       );
       await created.promise;
+
+      // The run opens its session as this chat on its own. Wait for that switch,
+      // so the assertion below is about the command and not about the auto-attach.
+      await vi.waitFor(() => expect(switches).toEqual([TRANSCRIPT]));
 
       // The agent is working: attaching would pull the chat out from under the run.
       fake.emit({ type: "agent_start" });
       await door.attach(ctx);
       expect(notes.at(-1)?.message).toContain("the agent is working");
 
-      // Settled: the chat is the run's session, history and all.
+      // Settled: the command switches this chat to the run's session, history and all.
       fake.emit({ type: "agent_settled" });
       await door.attach(ctx);
-      expect(switches).toEqual([TRANSCRIPT]);
+      expect(switches).toEqual([TRANSCRIPT, TRANSCRIPT]);
 
       release.resolve();
       await vi.waitFor(() => {
         expect(host.entries.length).toBeGreaterThan(0);
       });
     } finally {
-      await rm(checkout, { recursive: true, force: true });
+      await fixture.dispose();
+    }
+  });
+
+  it("puts back the worktree the auto-attach left this chat in, after the run's cleanup", async () => {
+    const fixture = await createFixtureRepository();
+    const worktreeRoot = join(fixture.root, "worktrees");
+    const worktreePath = join(worktreeRoot, "issue-42");
+    try {
+      const git = (args: readonly string[]) =>
+        gitOutput(args, { cwd: fixture.repo, env: fixture.env });
+      await git(["branch", "agent/issue-42"]);
+      await mkdir(worktreeRoot, { recursive: true });
+      await git(["worktree", "add", worktreePath, "agent/issue-42"]);
+
+      const host = fakePi();
+      const fake = fakeSession();
+      const created = deferred();
+      const release = deferred();
+      let removed = false;
+      const work = async (options: RunOptions): Promise<RunResult> => {
+        options.onIssue?.({ number: 42, title: "Fix the thing" });
+        await options.session({ cwd: worktreePath, systemPromptSections: {} });
+        created.resolve();
+        await release.promise;
+        // What the runner's own cleanup does once the run has ended: the
+        // worktree is scratch, and the branch holds the work.
+        await git(["worktree", "remove", "--force", worktreePath]);
+        removed = true;
+        return { issue: 42, outcome: "completed", steps: [], record: "" };
+      };
+
+      const door = liveFrontDoor(host.pi, { session: async () => fake.session, work });
+      const { ctx, switches } = fakeContext();
+      await door.start(
+        `--repo gazon1/cardinalfish --checkout ${fixture.repo} --worktree-root ${worktreeRoot}`,
+        ctx,
+      );
+      await created.promise;
+
+      // The auto-attach switches this chat into the run's session, whose
+      // working directory is the worktree.
+      await vi.waitFor(() => expect(switches).toEqual([TRANSCRIPT]));
+      expect(existsSync(worktreePath)).toBe(true);
+
+      release.resolve();
+      await vi.waitFor(() => expect(removed).toBe(true));
+
+      // The chat is standing in that directory, so the run puts it back.
+      await vi.waitFor(() => expect(existsSync(worktreePath)).toBe(true));
+      expect(await git(["worktree", "list", "--porcelain"])).toContain(
+        `branch refs/heads/agent/issue-42`,
+      );
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("restores a review-only worktree that has no local branch, detached", async () => {
+    const fixture = await createFixtureRepository();
+    const worktreeRoot = join(fixture.root, "worktrees");
+    const worktreePath = join(worktreeRoot, "issue-42");
+    try {
+      const git = (args: readonly string[]) =>
+        gitOutput(args, { cwd: fixture.repo, env: fixture.env });
+      // What a review-only run finds on a single-branch checkout: the branch on
+      // the remote and a detached worktree, but nothing local to check out.
+      await git(["branch", "agent/issue-42"]);
+      const sha = await git(["rev-parse", "agent/issue-42"]);
+      await git(["push", "-q", "origin", "agent/issue-42"]);
+      await git(["branch", "-D", "agent/issue-42"]);
+      await git(["update-ref", "-d", "refs/remotes/origin/agent/issue-42"]).catch(() => "");
+      await mkdir(worktreeRoot, { recursive: true });
+      await git(["worktree", "add", "--detach", worktreePath, sha]);
+
+      const host = fakePi();
+      const fake = fakeSession();
+      const created = deferred();
+      const release = deferred();
+      let removed = false;
+      const work = async (options: RunOptions): Promise<RunResult> => {
+        options.onIssue?.({ number: 42, title: "Fix the thing" });
+        await options.session({ cwd: worktreePath, systemPromptSections: {} });
+        created.resolve();
+        await release.promise;
+        await git(["worktree", "remove", "--force", worktreePath]);
+        removed = true;
+        return { issue: 42, outcome: "completed", steps: [], record: "" };
+      };
+
+      const door = liveFrontDoor(host.pi, { session: async () => fake.session, work });
+      const { ctx } = fakeContext();
+      await door.start(
+        `--repo gazon1/cardinalfish --checkout ${fixture.repo} --worktree-root ${worktreeRoot}`,
+        ctx,
+      );
+      await created.promise;
+      release.resolve();
+      await vi.waitFor(() => expect(removed).toBe(true));
+
+      await vi.waitFor(() => expect(existsSync(worktreePath)).toBe(true));
+      expect(await git(["worktree", "list", "--porcelain"])).toContain("detached");
+    } finally {
+      await fixture.dispose();
     }
   });
 
