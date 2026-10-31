@@ -42,6 +42,8 @@ export interface CommandSpec {
   readonly cwd: string;
   /** Written to the command's standard input, and its standard input closed. */
   readonly input?: string;
+  /** Kill the child and reject after this many milliseconds. */
+  readonly timeoutMs?: number;
 }
 
 /** Runs a command and returns its standard output. */
@@ -110,10 +112,15 @@ export const runGit: GitRunner = (args, options) =>
  */
 export const runCommand: CommandRunner = (spec) =>
   new Promise<string>((resolve, reject) => {
+    const timeoutMs = spec.timeoutMs ?? 15 * 60 * 1000;
     const child = spawn(spec.command, [...spec.args], {
       cwd: spec.cwd,
       stdio: ["pipe", "pipe", "pipe"],
     });
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error(`command timed out after ${timeoutMs}ms: ${spec.command} ${spec.args.join(" ")}`));
+    }, timeoutMs);
     let stdout = "";
     let stderr = "";
     child.stdout.setEncoding("utf8");
@@ -124,8 +131,9 @@ export const runCommand: CommandRunner = (spec) =>
     child.stderr.on("data", (chunk: string) => {
       stderr += chunk;
     });
-    child.on("error", reject);
+    child.on("error", (err) => { clearTimeout(timer); reject(err); });
     child.on("close", (code) => {
+      clearTimeout(timer);
       if (code === 0) {
         resolve(stdout);
       } else {
