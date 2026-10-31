@@ -675,6 +675,88 @@ describe("the log the host shows", () => {
   });
 });
 
+describe("the log the CLI shows", () => {
+  it("shows a tool call once, and the assistant's text with its marker", async () => {
+    // The CLI reads the session's events through the handlers the factory
+    // installs. A tool call is already a line of its own — the tool_call
+    // handler says what the tool was — so a tool-call block in the message
+    // says nothing twice.
+    const fixture = await createFixtureRepository();
+    const agentDirectory = join(fixture.root, "agent");
+    const previous = process.env.PI_CODING_AGENT_DIR;
+    const lines: string[] = [];
+    try {
+      await mkdir(agentDirectory, { recursive: true });
+      await writeFile(
+        join(agentDirectory, "models.json"),
+        JSON.stringify({
+          providers: {
+            fake: {
+              api: "openai-completions",
+              baseUrl: "http://127.0.0.1:1",
+              apiKey: "test",
+              models: [{ id: "beam" }],
+            },
+          },
+        }),
+        "utf8",
+      );
+      process.env.PI_CODING_AGENT_DIR = agentDirectory;
+
+      const session = await piSessionFactory({
+        agentDirectory,
+        model: "fake/beam",
+        onEvent: (line) => lines.push(line),
+      })({ cwd: fixture.repo, systemPromptSections: {} });
+      const judging = session as unknown as {
+        readonly extensionRunner: {
+          emitMessageEnd(event: unknown): Promise<unknown>;
+          emitToolCall(event: unknown): Promise<unknown>;
+        };
+        dispose(): void;
+      };
+
+      try {
+        // The tool call is a line of its own: the tool and the command.
+        await judging.extensionRunner.emitToolCall({
+          type: "tool_call",
+          toolName: "bash",
+          toolCallId: "t",
+          input: { command: "ls" },
+        });
+        // The colour the CLI dims it with is not part of the line.
+        expect(lines).toHaveLength(1);
+        expect(lines[0]).toContain("→ bash: ls");
+
+        lines.length = 0;
+        await judging.extensionRunner.emitMessageEnd({
+          type: "message_end",
+          message: {
+            role: "assistant",
+            content: [{ type: "toolCall", id: "c", name: "bash", arguments: { command: "ls" } }],
+          },
+        });
+        expect(lines).toEqual([]);
+
+        await judging.extensionRunner.emitMessageEnd({
+          type: "message_end",
+          message: { role: "assistant", content: [{ type: "text", text: "hi" }] },
+        });
+        expect(lines).toEqual(["· hi"]);
+      } finally {
+        judging.dispose();
+      }
+    } finally {
+      if (previous === undefined) {
+        delete process.env.PI_CODING_AGENT_DIR;
+      } else {
+        process.env.PI_CODING_AGENT_DIR = previous;
+      }
+      await fixture.dispose();
+    }
+  });
+});
+
 describe("what the door takes from the host session", () => {
   it("runs on the model the session is already using", () => {
     expect(hostModel({ provider: "commandcode", id: "reflection/beam:free" })).toBe(
