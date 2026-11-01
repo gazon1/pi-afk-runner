@@ -21,7 +21,29 @@ own diff.
 4. **Fix what you find.** If the gates found something, it is fixed now, not
    described. If you find something the gates cannot see, fix it too.
 
-5. **Say why.** If you changed your approach, or left something out, say so
+5. **Run the gates again.** The gates ran before your fixes, so they have not
+   seen them. If you changed anything, run them again, in this order:
+
+   ```bash
+   ./check.sh
+   just tcheck-evals
+   just docs-audit
+   ```
+
+   Fix what they report and run them again. A gate that fails is the work not
+   being finished, not an obstacle to work around. If you changed nothing, the
+   run you did in the previous turn still stands.
+
+6. **Report the gates.** End this turn with the `agent_gates` tool: one entry
+   per gate — `./check.sh`, `just tcheck-evals` and `just docs-audit` — with
+   what it said. A gate that failed is reported as a failure: the run stops on
+   a red gate, and that is where the failure belongs.
+
+   The runner pushes the tree the gates saw, so the report has to be about the
+   tree as it is. The turn that follows may change it: if it does, it runs the
+   gates again and reports them again.
+
+7. **Say why.** If you changed your approach, or left something out, say so
    in the commit message, in one sentence a reader can check.
 
 The next turn is about what follows from this change: the improvements it leaves

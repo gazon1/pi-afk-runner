@@ -23,6 +23,7 @@ import {
   type SessionFactory,
 } from "../src/session.js";
 import { assistantTextLines, repoFromRemoteUrl, resolveRepo } from "../src/cli.js";
+import { GATES, GATES_TOOL_NAME } from "../src/gates.js";
 import { type StateName } from "../src/workflow.js";
 import { createLeftoverTool, LEFTOVER_TOOL_NAME, MAX_LEFTOVERS_PER_RUN } from "../src/leftovers.js";
 import { pullRequestArgs } from "../src/gh.js";
@@ -423,6 +424,25 @@ function isReviewer(tools: readonly unknown[] | undefined): boolean {
     (tool) => (tool as { readonly name?: string }).name === VERDICT_TOOL_NAME,
   );
 }
+
+/**
+ * The tool the session was given, by name.
+ *
+ * The work session is given the gates tool and the review session the verdict
+ * tool, and the name is what tells the two apart.
+ */
+function toolNamed(
+  tools: readonly unknown[] | undefined,
+  name: string,
+): { execute: (id: string, params: unknown) => Promise<unknown> } | undefined {
+  const found = (tools ?? []).find((tool) => (tool as { name?: string }).name === name);
+  return found as { execute: (id: string, params: unknown) => Promise<unknown> } | undefined;
+}
+
+/** What the agent reports when every gate is green. */
+const GREEN_GATES = {
+  gates: GATES.map((gate) => ({ gate, outcome: "pass", detail: "ok" })),
+};
 
 const execFileAsync = promisify(execFile);
 
@@ -2386,24 +2406,26 @@ describe("the CLI's run", () => {
         return {
           async prompt() {
             turn += 1;
-            if (turn > 1) {
-              return;
+            if (turn === 1) {
+              await writeFile(join(cwd, "work.txt"), "the work\n", "utf8");
+              await runGit(["add", "-A"], { cwd });
+              await runGit(
+                [
+                  "-c",
+                  "user.name=Fixture",
+                  "-c",
+                  "user.email=fixture@example.com",
+                  "commit",
+                  "-q",
+                  "-m",
+                  "the work",
+                ],
+                { cwd },
+              );
             }
-            await writeFile(join(cwd, "work.txt"), "the work\n", "utf8");
-            await runGit(["add", "-A"], { cwd });
-            await runGit(
-              [
-                "-c",
-                "user.name=Fixture",
-                "-c",
-                "user.email=fixture@example.com",
-                "commit",
-                "-q",
-                "-m",
-                "the work",
-              ],
-              { cwd },
-            );
+            // The gates are reported at the end of every turn, so the last
+            // report names the tree the run ends on.
+            await toolNamed(tools, GATES_TOOL_NAME)?.execute("call-1", GREEN_GATES);
           },
           async abort() {},
           dispose() {},
@@ -2449,6 +2471,7 @@ describe("the CLI's run", () => {
           return {
             async prompt() {
               await writeFile(join(cwd, "work.txt"), "the work\n", "utf8");
+              await toolNamed(tools, GATES_TOOL_NAME)?.execute("call-1", GREEN_GATES);
             },
             async abort() {},
             dispose() {},
@@ -2469,6 +2492,210 @@ describe("the CLI's run", () => {
       expect(
         await gitOutput(["show", `${sha}:work.txt`], { cwd: fixture.repo, env: fixture.env }),
       ).toContain("the work");
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("test_a_report_from_an_earlier_turn_is_accepted_when_the_tree_did_not_move", async () => {
+    // The gates ran in the turn that fixed something, and the turns after it
+    // changed nothing: the report still names the tree the run ends on, and
+    // the run pushes.
+    const fixture = await fixtureWithSetupScript();
+    try {
+      const { gh } = stubGh([{ number: 42, title: "an issue" }]);
+      let turn = 0;
+
+      await runOnce({
+        ...runOptions(fixture, gh),
+        session: async ({ cwd, tools }) => {
+          if (isReviewer(tools)) {
+            return {
+              async prompt() {
+                const tool = tools?.[0] as unknown as {
+                  execute: (id: string, params: unknown) => Promise<unknown>;
+                };
+                await tool.execute("call-1", { verdict: "pass", findings: [] });
+              },
+              async abort() {},
+              dispose: () => {},
+            };
+          }
+          return {
+            async prompt() {
+              turn += 1;
+              if (turn === 1) {
+                await writeFile(join(cwd, "work.txt"), "the work\n", "utf8");
+                await toolNamed(tools, GATES_TOOL_NAME)?.execute("call-1", GREEN_GATES);
+              }
+            },
+            async abort() {},
+            dispose: () => {},
+          };
+        },
+      });
+
+      const pushed = (
+        await gitOutput(["ls-remote", fixture.remote, workBranch(42)], {
+          cwd: fixture.repo,
+          env: fixture.env,
+        })
+      ).trim();
+      expect(pushed).not.toBe("");
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("test_a_gate_that_failed_stops_the_run_before_the_push", async () => {
+    // The self-review fixed something and broke a gate. The gate is the
+    // target repository's own, and the run stops on it — here, not in CI.
+    const fixture = await fixtureWithSetupScript();
+    try {
+      const { gh } = stubGh([{ number: 42, title: "an issue" }]);
+
+      await expect(
+        runOnce({
+          ...runOptions(fixture, gh),
+          session: async ({ cwd, tools }) => {
+            if (isReviewer(tools)) {
+              return {
+                async prompt() {
+                  const tool = tools?.[0] as unknown as {
+                    execute: (id: string, params: unknown) => Promise<unknown>;
+                  };
+                  await tool.execute("call-1", { verdict: "pass", findings: [] });
+                },
+                async abort() {},
+                dispose() {},
+              };
+            }
+            return {
+              async prompt() {
+                await writeFile(join(cwd, "work.txt"), "the work\n", "utf8");
+                await toolNamed(tools, GATES_TOOL_NAME)?.execute("call-1", {
+                  gates: [
+                    { gate: "./check.sh", outcome: "fail", detail: "the JVM tests are red" },
+                    { gate: "just tcheck-evals", outcome: "pass", detail: "ok" },
+                    { gate: "just docs-audit", outcome: "pass", detail: "ok" },
+                  ],
+                });
+              },
+              async abort() {},
+              dispose() {},
+            };
+          },
+        }),
+      ).rejects.toThrow(/the gates failed: \.\/check\.sh/);
+
+      // And nothing reached the remote: the branch is not on it.
+      const pushed = (
+        await gitOutput(["ls-remote", fixture.remote, workBranch(42)], {
+          cwd: fixture.repo,
+          env: fixture.env,
+        })
+      ).trim();
+      expect(pushed).toBe("");
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("test_a_fix_made_after_the_gates_stops_the_run_before_the_push", async () => {
+    // The agent reported the gates and then changed the tree: the work that
+    // would be pushed is not the work the gates saw.
+    const fixture = await fixtureWithSetupScript();
+    try {
+      const { gh } = stubGh([{ number: 42, title: "an issue" }]);
+      let turn = 0;
+
+      await expect(
+        runOnce({
+          ...runOptions(fixture, gh),
+          session: async ({ cwd, tools }) => {
+            if (isReviewer(tools)) {
+              return {
+                async prompt() {
+                  const tool = tools?.[0] as unknown as {
+                    execute: (id: string, params: unknown) => Promise<unknown>;
+                  };
+                  await tool.execute("call-1", { verdict: "pass", findings: [] });
+                },
+                async abort() {},
+                dispose: () => {},
+              };
+            }
+            return {
+              async prompt() {
+                turn += 1;
+                if (turn === 1) {
+                  await writeFile(join(cwd, "work.txt"), "the work\n", "utf8");
+                  await toolNamed(tools, GATES_TOOL_NAME)?.execute("call-1", GREEN_GATES);
+                  return;
+                }
+                // A fix made after the gates were reported.
+                await writeFile(join(cwd, "late.txt"), "the late fix\n", "utf8");
+              },
+              async abort() {},
+              dispose: () => {},
+            };
+          },
+        }),
+      ).rejects.toThrow(/changed after the gates were reported/);
+
+      const pushed = (
+        await gitOutput(["ls-remote", fixture.remote, workBranch(42)], {
+          cwd: fixture.repo,
+          env: fixture.env,
+        })
+      ).trim();
+      expect(pushed).toBe("");
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("test_an_agent_that_reports_no_gates_stops_the_run_before_the_push", async () => {
+    // No report is not a pass: a run whose work has not been through the
+    // gates does not push it.
+    const fixture = await fixtureWithSetupScript();
+    try {
+      const { gh } = stubGh([{ number: 42, title: "an issue" }]);
+
+      await expect(
+        runOnce({
+          ...runOptions(fixture, gh),
+          session: async ({ cwd, tools }) => {
+            if (isReviewer(tools)) {
+              return {
+                async prompt() {
+                  const tool = tools?.[0] as unknown as {
+                    execute: (id: string, params: unknown) => Promise<unknown>;
+                  };
+                  await tool.execute("call-1", { verdict: "pass", findings: [] });
+                },
+                async abort() {},
+                dispose: () => {},
+              };
+            }
+            return {
+              async prompt() {
+                await writeFile(join(cwd, "work.txt"), "the work\n", "utf8");
+              },
+              async abort() {},
+              dispose: () => {},
+            };
+          },
+        }),
+      ).rejects.toThrow(/reported no gates/);
+
+      const pushed = (
+        await gitOutput(["ls-remote", fixture.remote, workBranch(42)], {
+          cwd: fixture.repo,
+          env: fixture.env,
+        })
+      ).trim();
+      expect(pushed).toBe("");
     } finally {
       await fixture.dispose();
     }
@@ -2520,25 +2747,25 @@ describe("the CLI's run", () => {
       }
       return {
         async prompt() {
-          if (worked.has(cwd)) {
-            return;
+          if (!worked.has(cwd)) {
+            worked.add(cwd);
+            await writeFile(join(cwd, "work.txt"), "the work\n", "utf8");
+            await runGit(["add", "-A"], { cwd });
+            await runGit(
+              [
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.com",
+                "commit",
+                "-q",
+                "-m",
+                "the work",
+              ],
+              { cwd },
+            );
           }
-          worked.add(cwd);
-          await writeFile(join(cwd, "work.txt"), "the work\n", "utf8");
-          await runGit(["add", "-A"], { cwd });
-          await runGit(
-            [
-              "-c",
-              "user.name=Fixture",
-              "-c",
-              "user.email=fixture@example.com",
-              "commit",
-              "-q",
-              "-m",
-              "the work",
-            ],
-            { cwd },
-          );
+          await toolNamed(tools, GATES_TOOL_NAME)?.execute("call-1", GREEN_GATES);
         },
         async abort() {},
         dispose() {},

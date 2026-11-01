@@ -19,6 +19,10 @@ The plan is settled. Now do the work.
    this machine has no device. Fix what the gates report. A gate that fails
    is the work not being finished, not an obstacle to work around.
 
+   This run is a checkpoint, not the last word. The next turn looks at the
+   change again with fresh eyes, fixes what it finds, and runs the gates again
+   — so a tree you leave red is a tree the run stops on.
+
    A small change — a few lines in one module — needs `./check.sh` only. The
    long evals and the docs audit earn their cost on a change that reaches them,
    and the runner skips the pre-push hook for a small change for the same
