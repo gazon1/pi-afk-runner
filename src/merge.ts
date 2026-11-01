@@ -36,6 +36,7 @@ import {
   pushWorkBranch,
   readRemoteSha,
   removeWorktree,
+  WORK_BRANCH_PATTERN,
   type CommandRunner,
   type GitRunner,
 } from "./git.js";
@@ -58,8 +59,14 @@ import {
   type SessionFactory,
 } from "./session.js";
 
-/** The branch an issue's work is pushed to. A pull request from it is ours. */
-export const WORK_BRANCH_PATTERN = /^agent\/issue-(\d+)$/;
+/**
+ * The branch an issue's work is pushed to. A pull request from it is ours.
+ *
+ * The pattern is the runner's own — it lives beside the name it recognises,
+ * so the two cannot drift — and the merge pipeline asks it rather than
+ * spelling a branch of its own.
+ */
+export { WORK_BRANCH_PATTERN };
 
 /** The repository's own gate — the command the work prompt names. */
 export const GATE_SCRIPT = "./check.sh";
