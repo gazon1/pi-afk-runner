@@ -14,8 +14,8 @@ tags: [extension, worktree, session, attach]
 The runner makes every worktree with the repository's own recipe: `scripts/setup-worktree.sh` runs
 in it before anything else happens there, and it does what no generic worktree tool can — the
 `core.bare` repair, the per-worktree `core.hooksPath`, the `.env` copy and the private Gradle
-home. The contract says so, and the runner's own worktree steps (`prepareWorktree`,
-`prepareExistingWorktree`) do it.
+home. The contract says so, and the runner's own worktree steps do it — `prepareWorktree`, and
+`checkoutPullRequestBranch`, which `prepareExistingWorktree` uses.
 
 The live door is a second way a worktree is made. When a chat was switched into a run's session,
 the run's cleanup removes the worktree as scratch, and the door puts it back
@@ -65,8 +65,8 @@ worktree that was never removed is left as the runner left it.
 
 ## Consequences
 
-- The door needs a command runner, and takes one as a dependency (`LiveDependencies.run`) so that
-  a test can drive it. The real one is `runCommand`, the same one the runner uses.
+- The door runs commands through one runner — `runCommand`, the same one the runner uses — and takes
+  it as a dependency (`LiveDependencies.run`), so that one place decides how a command runs.
 - The preparation is paid twice over a run's life: once when the runner makes the worktree, once
   when the door puts it back. That is the cost of a worktree a human can use.
 - A repository whose setup script fails leaves the human with a worktree and a warning, not with a
@@ -75,7 +75,7 @@ worktree that was never removed is left as the runner left it.
 ## Links
 
 - `src/extension.ts` — `restoreWorktree`, the preparation, and the two messages.
-- `src/runner.ts` — `SETUP_SCRIPT`, `prepareWorktree`, `prepareExistingWorktree`.
+- `src/runner.ts` — `SETUP_SCRIPT`, `prepareWorktree`, `checkoutPullRequestBranch`.
 - `test/extension.test.ts` — the worktree that comes back is prepared, and a worktree that was not
   removed is not prepared twice.
 - `contract/afk-runner.md` — the worktree section, and what the setup script does.

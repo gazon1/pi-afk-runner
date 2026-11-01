@@ -13,6 +13,7 @@ import type {
 import { describe, expect, it, vi } from "vitest";
 
 import { isOwnExtension, piSessionFactory } from "../src/cli.js";
+import { runCommand } from "../src/git.js";
 import {
   LOG_KEY,
   STATUS_KEY,
@@ -33,7 +34,6 @@ import {
 import { RUN_STATUS_ENTRY, statusFromEntries, statusLine } from "../src/live.js";
 import { takeLock } from "../src/lock.js";
 import type { RunOptions, RunResult } from "../src/runner.js";
-import { runCommand } from "../src/git.js";
 import { createFixtureRepository, gitOutput } from "./git-sandbox.js";
 
 
@@ -567,6 +567,57 @@ describe("the run the front door owns", () => {
       // door does not prepare it again.
       await door.attach(ctx);
       expect(await readFile(join(worktreeRoot, "prepared.log"), "utf8")).toBe("prepared\n");
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("says so when the worktree it puts back cannot be prepared", async () => {
+    // A repository whose setup script is not there: the worktree comes back,
+    // and the door says that it is not prepared rather than leaving the human
+    // to find it out from a gate.
+    const fixture = await createFixtureRepository();
+    const worktreeRoot = join(fixture.root, "worktrees");
+    const worktreePath = join(worktreeRoot, "issue-42");
+    try {
+      const git = (args: readonly string[]) =>
+        gitOutput(args, { cwd: fixture.repo, env: fixture.env });
+      await git(["branch", "agent/issue-42"]);
+      await mkdir(worktreeRoot, { recursive: true });
+      await git(["worktree", "add", worktreePath, "agent/issue-42"]);
+
+      const host = fakePi();
+      const fake = fakeSession();
+      const created = deferred();
+      const release = deferred();
+      let removed = false;
+      const work = async (options: RunOptions): Promise<RunResult> => {
+        options.onIssue?.({ number: 42, title: "Fix the thing" });
+        await options.session({ cwd: worktreePath, systemPromptSections: {} });
+        created.resolve();
+        await release.promise;
+        await git(["worktree", "remove", "--force", worktreePath]);
+        removed = true;
+        return { issue: 42, outcome: "completed", steps: [], record: "" };
+      };
+
+      const door = liveFrontDoor(host.pi, { session: async () => fake.session, work });
+      const { ctx, notes } = fakeContext();
+      await door.start(
+        `--repo gazon1/cardinalfish --checkout ${fixture.repo} --worktree-root ${worktreeRoot}`,
+        ctx,
+      );
+      await created.promise;
+      release.resolve();
+      await vi.waitFor(() => expect(removed).toBe(true));
+
+      // The worktree is back, and the door says what is missing.
+      await vi.waitFor(() => expect(existsSync(worktreePath)).toBe(true));
+      await vi.waitFor(() => {
+        const said = notes.map((note) => note.message).join("\n");
+        expect(said).toContain("unprepared");
+        expect(said).toContain("scripts/setup-worktree.sh");
+      });
     } finally {
       await fixture.dispose();
     }

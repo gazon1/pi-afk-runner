@@ -582,7 +582,7 @@ export function liveFrontDoor(
             } else if (restored.unprepared !== null) {
               talk(
                 ctx,
-                `afk-runner: the worktree this chat is in came back unprepared — ${SETUP_SCRIPT} did not run in it: ${restored.unprepared}`,
+                `afk-runner: the worktree this chat is in came back unprepared — ${SETUP_SCRIPT} did not run in it (${restored.unprepared}). Run it in the worktree before the gates.`,
                 "warning",
               );
             }
@@ -820,7 +820,7 @@ export function liveFrontDoor(
     if (restored.unprepared !== null) {
       talk(
         ctx,
-        `afk-runner: the worktree came back unprepared — ${SETUP_SCRIPT} did not run in it: ${restored.unprepared}`,
+        `afk-runner: the worktree came back unprepared — ${SETUP_SCRIPT} did not run in it (${restored.unprepared}). Run it in the worktree before the gates.`,
         "warning",
       );
     }
