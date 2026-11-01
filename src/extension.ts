@@ -233,7 +233,14 @@ export interface LiveDependencies {
   readonly session?: SessionFactory;
   /** The run itself. One issue, worked to its end; `runOnce` when it is absent. */
   readonly work?: (options: RunOptions) => Promise<RunResult>;
-  /** How the repository's own setup script is run in a worktree the door puts back. */
+  /**
+   * How the run's commands are run.
+   *
+   * The runner's own command runner, and the one the door uses for the
+   * repository's setup script: the gates, the digest tool and the registry
+   * tool all run through it, so a test that gives the door a command runner
+   * gives it to the whole run.
+   */
   readonly run?: CommandRunner;
 }
 

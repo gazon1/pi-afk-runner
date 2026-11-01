@@ -26,7 +26,7 @@
  * only on the remote, and the runner's own checkout is left as it found it.
  */
 
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -45,6 +45,23 @@ export interface CommandSpec {
   readonly input?: string;
   /** Kill the child and reject after this many milliseconds. */
   readonly timeoutMs?: number;
+  /**
+   * How much of the command's output is kept.
+   *
+   * The tail is kept and the rest is dropped: a command that fails says a
+   * great deal, and a runner that holds all of it holds megabytes of a
+   * compiler's findings in memory and writes them into a record nobody reads
+   * whole.
+   */
+  readonly maxOutputBytes?: number;
+  /**
+   * Whether a timeout kills the command's whole tree, not just the command.
+   *
+   * The command leads a process group of its own, and the group is what the
+   * timeout kills: a build the command started is the work that must stop
+   * with it.
+   */
+  readonly killGroup?: boolean;
 }
 
 /** Runs a command and returns its standard output. */
@@ -98,6 +115,65 @@ export class CommandFailed extends Error {
 export const COMMAND_TIMEOUT_MS = 15 * 60 * 1000;
 
 /**
+ * A command that was killed before it finished.
+ *
+ * It is a failure of its own, not a failure of the command: the command never
+ * got to answer, so it has no exit code. What it printed before it was killed
+ * is kept — that output is the only evidence there is.
+ */
+export class CommandTimedOut extends Error {
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly timeoutMs: number;
+
+  constructor(
+    timeoutMs: number,
+    command: string,
+    args: readonly string[],
+    stdout: string,
+    stderr: string,
+  ) {
+    super(`command timed out after ${timeoutMs}ms: ${command} ${args.join(" ")}`);
+    this.name = "CommandTimedOut";
+    this.stdout = stdout;
+    this.stderr = stderr;
+    this.timeoutMs = timeoutMs;
+  }
+}
+
+/**
+ * The tail of a command's output, and nothing before it.
+ *
+ * The chunks are dropped from the front as the output grows, so the memory a
+ * command's output takes is bounded by the limit rather than by how much the
+ * command had to say.
+ */
+class OutputTail {
+  private chunks: Buffer[] = [];
+  private size = 0;
+
+  constructor(private readonly limit: number) {}
+
+  push(chunk: Buffer): void {
+    this.chunks.push(chunk);
+    this.size += chunk.length;
+    while (this.size > this.limit && this.chunks.length > 1) {
+      const dropped = this.chunks.shift();
+      this.size -= dropped?.length ?? 0;
+    }
+    if (this.size > this.limit && this.chunks.length === 1) {
+      const only = this.chunks[0] ?? Buffer.alloc(0);
+      this.chunks = [only.subarray(only.length - this.limit)];
+      this.size = this.limit;
+    }
+  }
+
+  text(): string {
+    return Buffer.concat(this.chunks).toString("utf8");
+  }
+}
+
+/**
  * Runs the real `git`.
  *
  * `spawn` rather than `execFile`, because `git mktag` reads its payload from
@@ -113,6 +189,26 @@ export const runGit: GitRunner = (args, options) =>
   });
 
 /**
+ * Kill the command, and the tree it started when it leads one.
+ *
+ * A negative pid is a process group, so the group is what dies: a gate that
+ * is killed half-way through takes its build with it. The command alone is
+ * not enough — the build it started is the work that must stop, and it is
+ * the build that writes into the worktree.
+ */
+function killTree(child: ChildProcess, group: boolean): void {
+  if (group && child.pid !== undefined) {
+    try {
+      process.kill(-child.pid, "SIGTERM");
+      return;
+    } catch {
+      // The group is gone already, or the command never led one.
+    }
+  }
+  child.kill();
+}
+
+/**
  * Runs a command.
  *
  * `spawn` rather than `execFile`, because `git mktag` reads its payload from
@@ -125,28 +221,41 @@ export const runCommand: CommandRunner = (spec) =>
     const child = spawn(spec.command, [...spec.args], {
       cwd: spec.cwd,
       stdio: ["pipe", "pipe", "pipe"],
+      // The command leads its own process group, when the caller asks for it:
+      // a gate that is killed half-way through must take its build with it,
+      // or the build keeps writing into the worktree the runner restores and
+      // pushes.
+      detached: spec.killGroup === true,
     });
+    const stdout = new OutputTail(spec.maxOutputBytes ?? Number.POSITIVE_INFINITY);
+    const stderr = new OutputTail(spec.maxOutputBytes ?? Number.POSITIVE_INFINITY);
     const timer = setTimeout(() => {
-      child.kill();
-      reject(new Error(`command timed out after ${timeoutMs}ms: ${spec.command} ${spec.args.join(" ")}`));
+      killTree(child, spec.killGroup === true);
+      reject(
+        new CommandTimedOut(
+          timeoutMs,
+          spec.command,
+          spec.args,
+          stdout.text(),
+          stderr.text(),
+        ),
+      );
     }, timeoutMs);
-    let stdout = "";
-    let stderr = "";
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk: string) => {
-      stdout += chunk;
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdout.push(chunk);
     });
-    child.stderr.on("data", (chunk: string) => {
-      stderr += chunk;
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderr.push(chunk);
     });
     child.on("error", (err) => { clearTimeout(timer); reject(err); });
     child.on("close", (code) => {
       clearTimeout(timer);
       if (code === 0) {
-        resolve(stdout);
+        resolve(stdout.text());
       } else {
-        reject(new CommandFailed(code ?? 1, spec.command, spec.args, stdout, stderr));
+        reject(
+          new CommandFailed(code ?? 1, spec.command, spec.args, stdout.text(), stderr.text()),
+        );
       }
     });
     child.stdin.on("error", () => {

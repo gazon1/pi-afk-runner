@@ -1,13 +1,22 @@
 ---
 title: The self-review runs the gates again, and the agent's work is pushed only when they are green
-status: accepted
+status: superseded
 date: 2026-11-01
 authors: Command Code
 deciders: Singularity Developer
+superseded-by: 2026-11-02-the-runner-runs-the-repositorys-gates
 tags: [gates, prompts, session, pull-request, agent]
 ---
 
 # The self-review runs the gates again, and the agent's work is pushed only when they are green
+
+> **Superseded** by
+> [2026-11-02-the-runner-runs-the-repositorys-gates](2026-11-02-the-runner-runs-the-repositorys-gates.md).
+> The runner runs the gates itself now, so the agent's report of them is gone: the report was the
+> agent's word about gates the runner now runs on the tree it is about to push. This record is
+> kept for the reasoning it holds — why the tree travels with a verdict — and because the
+> "Why the runner does not run the gates itself" section below is where that decision was
+> deferred to issue #28.
 
 ## Context
 

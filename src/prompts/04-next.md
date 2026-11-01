@@ -67,7 +67,6 @@ nobody else is going to notice them.
      report rather than filing it.
 
 5. **Report.** One short report at the end: what you fixed, and what you filed
-   (one line per issue). Nothing else. Then end the turn with the `agent_gates`
-   tool — one entry per gate, with what it said — because the runner pushes the
-   tree the gates saw: if you changed anything in this turn, run the gates
-   again first and report what that run said.
+   (one line per issue). Nothing else. If you changed anything in this turn,
+   run the gates again first: the runner runs them when you stop, on the tree
+   you leave, and a gate that fails there ends the run.

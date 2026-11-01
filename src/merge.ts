@@ -27,6 +27,7 @@ import {
   type GhRunner,
   type OpenPullRequest,
 } from "./gh.js";
+import { GATE_OUTPUT_LIMIT_BYTES, GATE_TIMEOUT_MS } from "./gates.js";
 import {
   CommandFailed,
   fetchCommit,
@@ -64,9 +65,6 @@ export const GATE_SCRIPT = "./check.sh";
 
 /** A marker a resolved conflict must not leave behind. */
 const CONFLICT_MARKER = "^<<<<<<< ";
-
-/** How long the gate may run before it is a failure of its own. */
-const DEFAULT_GATE_TIMEOUT_MS = 60 * 60 * 1000;
 
 /**
  * The prompt the merge agent is given.
@@ -436,7 +434,13 @@ async function verifyGate(options: MergeOptions, worktreePath: string): Promise<
       command: "bash",
       args: [GATE_SCRIPT],
       cwd: worktreePath,
-      timeoutMs: options.gateTimeoutMs ?? DEFAULT_GATE_TIMEOUT_MS,
+      timeoutMs: options.gateTimeoutMs ?? GATE_TIMEOUT_MS,
+      // The tail of the output is the evidence; the rest is noise neither the
+      // runner nor the record has to hold.
+      maxOutputBytes: GATE_OUTPUT_LIMIT_BYTES,
+      // The build the gate starts dies with the gate: a build that keeps
+      // going writes into the worktree the merge pushes.
+      killGroup: true,
     });
   };
   try {

@@ -10,8 +10,8 @@ and its CI say so.
 
 ## Status
 
-The runner works end to end: claim, worktree, agent, push, pull request, review and re-count have
-been run against a real GitHub repository, unattended and through the live chat. It is not published
+The runner works end to end: claim, worktree, agent, gates, push, pull request, review and re-count
+have been run against a real GitHub repository, unattended and through the live chat. It is not published
 to npm yet — attach it to a Pi session with `--extension`, or install it from a checkout. The plan
 and the specification live in the repository this runner operates on — see
 [the change directory](https://github.com/gazon1/sing/tree/main/openspec/changes/afk-issue-agent-pipeline)
@@ -140,18 +140,32 @@ A model has to resolve, too: `--model <provider/id>` names one; without it the C
 model of the first provider with a credential, and the live chat uses the model of the session it
 was started in.
 
-### The gates the agent runs
+### The gates the runner runs
 
-The agent runs the target repository's own gates — `./check.sh`, `just tcheck-evals` and
-`just docs-audit` — and it runs them **again** in the self-review turn, after the fixes that turn
-made. A fix the gates have not seen is not a fix.
+The **runner** runs the target repository's own gates — `./check.sh`, `just tcheck-evals` and
+`just docs-audit` — in the worktree, on the tree the agent left, as the `gates` step between the
+session and the push. A gate that does not pass ends the run there: the claim is released, the
+work stays on the local branch, and nothing is pushed. The record carries the tail of what the
+gate printed, so a failed run says which gate failed and why.
 
-The agent reports the gates with a tool, and the report carries **the tree it was made against**.
-The runner reads the report before the push, and a run stops at the session step when the agent
-reported no gates, when a gate failed, when one of the three was not reported, or when the tree
-changed after the report. The agent's work reaches the remote only when the gates are green — the
-runner's own writes, the registry entry and the verdict file, come after the gates have run,
-because the verdict file cannot exist before the review.
+The agent runs the gates too — it has to, to fix what they report — and the runner runs them
+again, because an agent that skipped them is not a gate. The list is written down **once**, in
+`src/gates.ts`, and a test holds it against the contract copy the target repository owns.
+
+A review's **fix** changes the tree, so the gates run again on it: a fix that does not pass them
+is not pushed, and the tree on the remote is the tree the gates judged.
+
+The run's budget is divided into three **reserved** shares: the session keeps an hour, the gates
+keep an hour each — the same the merge door gives the same gate — and the review keeps what is
+left. A session that spends its whole budget cannot leave the gates nothing to run with, and a
+gate that is killed half-way through leaves a run that pushes nothing. A smaller ceiling
+(`--deadline-ms`) is a smaller run all the way through. A gate that is killed, or that never
+started, has no exit code, and the record does not claim one.
+
+**The host needs the repository's own tools.** `just` and whatever the target's gates call —
+`bash`, `python3`, the target's build — have to be on the machine the run works on. A gate that
+could not run says so: `the gate just tcheck-evals could not run: just is not on this host` is
+not the same as a gate that refused the change.
 
 ### From Pi — the live chat
 
@@ -220,12 +234,13 @@ pi-afk-runner --checkout ~/work/singularity          # --repo defaults to that c
 
 A systemd timer runs it every hour; the unit passes `--all`, so one invocation drains the queue — it
 works every eligible issue in turn, each one to the end of its journey (claim, worktree, triage,
-scope, agent, push, pull request, review, re-count) — and then stops.
+scope, agent, gates, push, pull request, review, re-count) — and then stops.
 
 The **exit code says which step the run reached**, because a scheduler has nothing else to read:
 `0` is a finished run, `1` says an issue could not be worked, `10`..`80` are the steps, `75` says
-another runner holds the lock and `76` says the lock could not be taken. The unit and the codes are
-in [systemd/](systemd/README.md).
+another runner holds the lock and `76` says the lock could not be taken. A run that stopped at the
+gates leaves `45`, so a red gate is not read as an issue that could not be worked. The unit and the
+codes are in [systemd/](systemd/README.md).
 
 The lock is a real `flock`, held for the whole run: a lock file a killed runner leaves behind would
 block the next one for ever, and a marker is not a lock — adding a label is idempotent. It is **per
@@ -260,8 +275,10 @@ run: the claim is released, the branch and the pull request stay, and the next
 run continues them.
 
 A **small change** — a few files, a few dozen lines — skips the repository's
-pre-push hook; an explicit `--no-verify`, or its absence, decides the rest. CI
-still gates landing in the merge mode.
+pre-push hook; an explicit `--no-verify`, or its absence, decides the rest. The
+runner's own gates are not part of that rule: they run the whole list on every
+worked issue, because they are the run's own verdict and not the repository's
+hook. CI still gates landing in the merge mode.
 
 ### What a run leaves behind
 

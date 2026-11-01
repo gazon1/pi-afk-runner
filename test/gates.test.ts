@@ -1,206 +1,201 @@
 /**
- * The gates the agent reports, and the check the runner makes of the report.
+ * The gates the runner runs, and what it says when one of them does not pass.
  *
- * The report is the only thing that stands between the work the agent left and
- * the tree the runner pushes, so each of the ways it can be wrong needs a
- * test that says so: no report, a failed gate, a gate nobody reported, and a
- * tree that moved after the report.
+ * The list is the target repository's, and it is written down in two places —
+ * the contract copy and the runner's own — so a test holds the two together.
+ * The rest is about the failure: a gate that refused the change, a host that
+ * cannot run the gate, and a gate that never got to answer are three
+ * different stories, and the record tells them apart.
  */
 import { describe, expect, it } from "vitest";
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import {
   GATES,
-  GATES_TOOL_NAME,
-  assertGatesGreen,
-  createGatesTool,
-  type GateReport,
+  GATE_OUTPUT_LIMIT_BYTES,
+  GATE_TIMEOUT_MS,
+  GateFailed,
+  gateInvocation,
+  runGates,
 } from "../src/gates.js";
-import { promptsDirectory } from "../src/session.js";
-import { runGit } from "../src/git.js";
-import { createFixtureRepository } from "./git-sandbox.js";
+import { CommandFailed, CommandTimedOut, runCommand, type CommandRunner } from "../src/git.js";
 
-/** What the agent reports when every gate is green. */
-const GREEN = {
-  gates: GATES.map((gate) => ({ gate, outcome: "pass", detail: "ok" })),
-};
+/** The contract copy the list is checked against. */
+const CONTRACT = join(process.cwd(), "contract", "afk-runner.md");
 
-/** The tool the runner gives the agent, as something a test can call. */
-function gatesTool(options: {
-  readonly cwd: string;
-  readonly holder: { value?: GateReport };
-}): { execute: (id: string, params: unknown) => Promise<unknown> } {
-  return createGatesTool({ git: runGit, cwd: options.cwd, holder: options.holder }) as unknown as {
-    execute: (id: string, params: unknown) => Promise<unknown>;
-  };
-}
+describe("the gates the runner runs", () => {
+  it("names the gates the target repository's contract names", async () => {
+    // The contract copy is the target's own document, and it lists the gates
+    // in a code block. The runner's list is the same list: two lists are two
+    // rules that drift apart, and the one that drifts is the one that judges
+    // the work.
+    const contract = await readFile(CONTRACT, "utf8");
+    const gatesSection = contract.slice(contract.indexOf("## The gates the agent runs"));
+    const block = /```bash\n([\s\S]*?)```/.exec(gatesSection)?.[1] ?? "";
+    const gates = block
+      .split("\n")
+      .map((line) => (line.split("#")[0] ?? "").trim())
+      .filter((line) => line !== "");
 
-describe("the gates the agent reports", () => {
-  it("records what each gate said, and the tree it was made against", async () => {
-    const fixture = await createFixtureRepository();
-    try {
-      const holder: { value?: GateReport } = {};
-      const tool = gatesTool({ cwd: fixture.repo, holder });
+    expect(gates).toEqual([...GATES]);
+  });
 
-      await tool.execute("call-1", GREEN);
+  it("runs a gate the way the contract writes it", () => {
+    // The list is the only place the gates are written down, so the command
+    // that runs one is derived from it.
+    expect(gateInvocation("./check.sh")).toEqual({ command: "bash", args: ["./check.sh"] });
+    expect(gateInvocation("just tcheck-evals")).toEqual({
+      command: "just",
+      args: ["tcheck-evals"],
+    });
+  });
 
-      expect(holder.value?.outcomes.map((entry) => entry.gate)).toEqual([...GATES]);
-      expect(holder.value?.tree).not.toBe("");
-    } finally {
-      await fixture.dispose();
+  it("runs the gates in order, in the worktree", async () => {
+    const called: string[] = [];
+    const run: CommandRunner = async (spec) => {
+      called.push(`${spec.command} ${spec.args.join(" ")}`);
+      return "";
+    };
+
+    const summary = await runGates({ run, cwd: "/the/worktree", budgetMs: 60_000 });
+
+    expect(called).toEqual([
+      "bash ./check.sh",
+      "just tcheck-evals",
+      "just docs-audit",
+    ]);
+    expect(summary).toContain("./check.sh — ok");
+  });
+
+  it("gives each gate the gate's own budget, and no more than the run has left", async () => {
+    const budgets: (number | undefined)[] = [];
+    const run: CommandRunner = async (spec) => {
+      budgets.push(spec.timeoutMs);
+      return "";
+    };
+
+    await runGates({ run, cwd: "/the/worktree", budgetMs: 90_000 });
+
+    expect(budgets).toEqual([90_000, 90_000, 90_000]);
+    for (const budget of budgets) {
+      expect(budget).toBeLessThanOrEqual(GATE_TIMEOUT_MS);
     }
   });
 
-  it("names the tool the agent ends its turn with", () => {
-    expect(GATES_TOOL_NAME).toBe("agent_gates");
+  it("stops at the first gate that does not pass", async () => {
+    const called: string[] = [];
+    const run: CommandRunner = async (spec) => {
+      called.push(`${spec.command} ${spec.args.join(" ")}`);
+      if (spec.command === "just" && spec.args[0] === "tcheck-evals") {
+        throw new CommandFailed(2, "just", [...spec.args], "", "the evals are red");
+      }
+      return "";
+    };
+
+    const failure = await runGates({ run, cwd: "/the/worktree", budgetMs: 60_000 }).then(
+      () => null,
+      (error: unknown) => error,
+    );
+
+    expect(failure).toBeInstanceOf(GateFailed);
+    const gate = failure as GateFailed;
+    expect(gate.gate).toBe("just tcheck-evals");
+    expect(gate.reason).toBe("failed");
+    expect(gate.exitCode).toBe(2);
+    expect(gate.output).toContain("the evals are red");
+    // The gates after it would judge a tree that is already refused.
+    expect(called).toEqual(["bash ./check.sh", "just tcheck-evals"]);
   });
 
-  it("keeps the last report, when the agent reports more than once", async () => {
-    // The runner reads the report at the end of the session, so the last one
-    // is the one that counts: it is the report about the tree the run ends on.
-    const fixture = await createFixtureRepository();
-    try {
-      const holder: { value?: GateReport } = {};
-      const tool = gatesTool({ cwd: fixture.repo, holder });
+  it("says that a gate could not run, when the host has no such program", async () => {
+    // A host without `just` is not a gate that refused the change, and the
+    // record must not say it was.
+    const run: CommandRunner = async (spec) => {
+      if (spec.command !== "just") {
+        return "";
+      }
+      const error = new Error("spawn just ENOENT") as Error & { code?: string };
+      error.code = "ENOENT";
+      throw error;
+    };
 
-      await tool.execute("call-1", GREEN);
-      await tool.execute("call-2", {
-        gates: [{ gate: GATES[0], outcome: "fail", detail: "the JVM tests are red" }],
-      });
+    const failure = await runGates({ run, cwd: "/the/worktree", budgetMs: 60_000 }).then(
+      () => null,
+      (error: unknown) => error,
+    );
 
-      expect(holder.value?.outcomes).toEqual([
-        { gate: GATES[0], outcome: "fail", detail: "the JVM tests are red" },
-      ]);
-    } finally {
-      await fixture.dispose();
-    }
+    expect(failure).toBeInstanceOf(GateFailed);
+    const gate = failure as GateFailed;
+    expect(gate.reason).toBe("missing");
+    expect(gate.exitCode).toBeUndefined();
+    expect(gate.message).toContain("just is not on this host");
   });
 
-  it("names every gate in the prompt that asks the agent to run them", async () => {
-    // The runner refuses a run that reported no result for a gate, so the
-    // prompt that asks for the report has to name the gates the runner wants.
-    const prompt = await readFile(join(promptsDirectory(), "03-verify.md"), "utf8");
-    for (const gate of GATES) {
-      expect(prompt).toContain(gate);
-    }
+  it("says that a gate never got to answer, when it was killed", async () => {
+    const run: CommandRunner = async (spec) => {
+      throw new CommandTimedOut(1000, spec.command, spec.args, "half a build", "");
+    };
+
+    const failure = await runGates({ run, cwd: "/the/worktree", budgetMs: 60_000 }).then(
+      () => null,
+      (error: unknown) => error,
+    );
+
+    expect(failure).toBeInstanceOf(GateFailed);
+    const gate = failure as GateFailed;
+    expect(gate.reason).toBe("unfinished");
+    expect(gate.exitCode).toBeUndefined();
+    // What it printed before it was killed is the only evidence there is.
+    expect(gate.output).toContain("half a build");
   });
 
-  it("accepts a report whose gates are green and whose tree has not moved", async () => {
-    const fixture = await createFixtureRepository();
-    try {
-      const holder: { value?: GateReport } = {};
-      await gatesTool({ cwd: fixture.repo, holder }).execute("call-1", GREEN);
+  it("does not run a gate the run has no budget for", async () => {
+    const called: string[] = [];
+    const run: CommandRunner = async (spec) => {
+      called.push(`${spec.command} ${spec.args.join(" ")}`);
+      return "";
+    };
 
-      await expect(
-        assertGatesGreen({ git: runGit, cwd: fixture.repo, report: holder.value }),
-      ).resolves.toBeUndefined();
-    } finally {
-      await fixture.dispose();
-    }
+    const failure = await runGates({ run, cwd: "/the/worktree", budgetMs: 0 }).then(
+      () => null,
+      (error: unknown) => error,
+    );
+
+    expect(failure).toBeInstanceOf(GateFailed);
+    expect((failure as GateFailed).reason).toBe("unfinished");
+    expect((failure as GateFailed).message).toContain("budget");
+    expect(called).toEqual([]);
   });
 
-  it("refuses a run whose agent reported no gates at all", async () => {
-    const fixture = await createFixtureRepository();
-    try {
-      await expect(
-        assertGatesGreen({ git: runGit, cwd: fixture.repo, report: undefined }),
-      ).rejects.toThrow(/reported no gates/);
-    } finally {
-      await fixture.dispose();
-    }
+  it("asks the command runner for the tail of a gate's output, and not the whole of it", async () => {
+    // A failing `./check.sh` prints megabytes. The runner keeps the tail of
+    // it, and the record carries no more than that.
+    const limits: (number | undefined)[] = [];
+    const run: CommandRunner = async (spec) => {
+      limits.push(spec.maxOutputBytes);
+      return "";
+    };
+
+    await runGates({ run, cwd: "/the/worktree", budgetMs: 60_000 });
+
+    expect(limits).toEqual([
+      GATE_OUTPUT_LIMIT_BYTES,
+      GATE_OUTPUT_LIMIT_BYTES,
+      GATE_OUTPUT_LIMIT_BYTES,
+    ]);
   });
 
-  it("refuses a gate that failed, and says which one", async () => {
-    const fixture = await createFixtureRepository();
-    try {
-      const holder: { value?: GateReport } = {};
-      await gatesTool({ cwd: fixture.repo, holder }).execute("call-1", {
-        gates: [
-          { gate: "./check.sh", outcome: "fail", detail: "the JVM tests are red" },
-          { gate: "just tcheck-evals", outcome: "pass", detail: "ok" },
-          { gate: "just docs-audit", outcome: "pass", detail: "ok" },
-        ],
-      });
+  it("keeps the tail of a command's output, and not the whole of it", async () => {
+    // The cap is the command runner's: the output a gate prints is evidence,
+    // not a thing to be kept whole.
+    const output = await runCommand({
+      command: "bash",
+      args: ["-c", "head -c 200000 /dev/zero | tr '\\0' 'x'"],
+      cwd: process.cwd(),
+      maxOutputBytes: 1024,
+    });
 
-      await expect(
-        assertGatesGreen({ git: runGit, cwd: fixture.repo, report: holder.value }),
-      ).rejects.toThrow(/the gates failed: \.\/check\.sh — the JVM tests are red/);
-    } finally {
-      await fixture.dispose();
-    }
-  });
-
-  it("refuses a report that names no result for one of the gates", async () => {
-    const fixture = await createFixtureRepository();
-    try {
-      const holder: { value?: GateReport } = {};
-      await gatesTool({ cwd: fixture.repo, holder }).execute("call-1", {
-        gates: [
-          { gate: "./check.sh", outcome: "pass", detail: "ok" },
-          { gate: "just tcheck-evals", outcome: "pass", detail: "ok" },
-        ],
-      });
-
-      await expect(
-        assertGatesGreen({ git: runGit, cwd: fixture.repo, report: holder.value }),
-      ).rejects.toThrow(/no result for just docs-audit/);
-    } finally {
-      await fixture.dispose();
-    }
-  });
-
-  it("ignores a gate this workflow does not run", async () => {
-    // `just gate` needs a device, and the agent was not asked to run it: the
-    // three gates it was asked about are the ones that count.
-    const fixture = await createFixtureRepository();
-    try {
-      const holder: { value?: GateReport } = {};
-      await gatesTool({ cwd: fixture.repo, holder }).execute("call-1", {
-        gates: [
-          ...GREEN.gates,
-          { gate: "just gate", outcome: "fail", detail: "no device" },
-        ],
-      });
-
-      await expect(
-        assertGatesGreen({ git: runGit, cwd: fixture.repo, report: holder.value }),
-      ).resolves.toBeUndefined();
-    } finally {
-      await fixture.dispose();
-    }
-  });
-
-  it("says what is wrong when the call carries no gates at all", async () => {
-    const fixture = await createFixtureRepository();
-    try {
-      const holder: { value?: GateReport } = {};
-      const tool = gatesTool({ cwd: fixture.repo, holder });
-
-      await expect(tool.execute("call-1", {})).rejects.toThrow(
-        /the gates tool takes a list of gates/,
-      );
-      expect(holder.value).toBeUndefined();
-    } finally {
-      await fixture.dispose();
-    }
-  });
-
-  it("refuses a tree that changed after the gates were reported", async () => {
-    const fixture = await createFixtureRepository();
-    try {
-      const holder: { value?: GateReport } = {};
-      await gatesTool({ cwd: fixture.repo, holder }).execute("call-1", GREEN);
-
-      // A fix the self-review made after the gates ran: the gates saw a
-      // different tree from the one the runner is about to push.
-      await writeFile(join(fixture.repo, "late.txt"), "the late fix\n", "utf8");
-
-      await expect(
-        assertGatesGreen({ git: runGit, cwd: fixture.repo, report: holder.value }),
-      ).rejects.toThrow(/changed after the gates were reported/);
-    } finally {
-      await fixture.dispose();
-    }
+    expect(output.length).toBe(1024);
   });
 });

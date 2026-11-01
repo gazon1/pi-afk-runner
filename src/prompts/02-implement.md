@@ -23,10 +23,16 @@ The plan is settled. Now do the work.
    change again with fresh eyes, fixes what it finds, and runs the gates again
    — so a tree you leave red is a tree the run stops on.
 
-   A small change — a few lines in one module — needs `./check.sh` only. The
-   long evals and the docs audit earn their cost on a change that reaches them,
-   and the runner skips the pre-push hook for a small change for the same
-   reason.
+   While you work, a small change — a few lines in one module — needs
+   `./check.sh` only: the long evals and the docs audit earn their cost on a
+   change that reaches them, and the runner skips the pre-push hook for a
+   small change for the same reason.
+
+   **The runner runs the whole list again when you stop**, in the worktree,
+   on the tree you leave. That run is the one that counts: a gate that fails
+   there ends the run — the claim is released, nothing is pushed, and the
+   record says which gate failed. Run the gates yourself so that you can fix
+   what they report; a gate you never ran is a gate that ends the run.
 
 3. **Do not commit or push.** The runner commits whatever is left in the
    worktree on your behalf and pushes under its own branch name, so the push

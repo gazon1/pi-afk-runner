@@ -33,6 +33,17 @@ The unit needs two things from the environment that systemd does not have:
 - `PI_AGENT_DIR` must point at Pi's agent directory, so that the session the
   runner creates has its settings and its credentials.
 
+**The host needs the target repository's own tools.** The runner runs the
+repository's gates — `./check.sh`, `just tcheck-evals`, `just docs-audit` — in
+the worktree, so `just` and whatever those gates call have to be on the machine
+the timer runs on, and on the PATH the unit gives it. A gate that could not run
+says so and ends the run (`45`); it does not look like a gate that refused the
+change. The run's budget is divided into three shares: the session keeps an
+hour, the gates keep an hour each — the same the merge door gives the same
+gate — and the review keeps what is left. A sweep that works several issues
+takes several hours — the timer fires hourly, and the lock keeps the ticks
+from overlapping.
+
 ## What the exit code says
 
 The unit's status is the exit code, and the code names the step:
@@ -45,6 +56,7 @@ The unit's status is the exit code, and the code names the step:
 | 20 | the claim failed |
 | 30 | the worktree failed |
 | 40 | the agent's session failed, or was cut off by the deadline |
+| 45 | the repository's gates did not pass — the run pushed nothing |
 | 50 | the push failed |
 | 60 | the pull request failed |
 | 70 | the review failed |
@@ -127,8 +139,8 @@ stale claim's ref is deleted, the issue is claimed again, and the work is redone
 — the session that made it is gone with the process that died.
 
 `--stale-after-ms` is how long a claim may sit before that happens. It is two
-hours here: a run is capped at one hour, and the issue's lock means no second
-runner on this machine can be working that issue. So a claim a killed sweep left
+hours here: a run is capped at the deadline, and the issue's lock means no
+second runner on this machine can be working that issue. So a claim a killed sweep left
 behind is taken over a tick or two later, not after a week. A human who comments
 on the issue moves its last-update time, and the comment defers the take-over
 without anybody having to know there is one.

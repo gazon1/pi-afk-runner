@@ -894,8 +894,6 @@ export interface WorkSessionResult extends PromptArrayResult {
 export async function startAgent(options: {
   readonly factory: SessionFactory;
   readonly cwd: string;
-  /** The tools the session is given — the gates tool, for the work. */
-  readonly tools?: readonly ToolDefinition[];
   /** The repository the issue lives in. */
   readonly repo: string;
   /** The issue being worked. */
@@ -941,13 +939,11 @@ export async function startAgent(options: {
     // scope's decision, and the leftover the fourth turn files. The runner
     // performs the decisions' effects, not the agent: closing an issue,
     // splitting one and filing a leftover are the runner's writes, and the
-    // bounds on them are the runner's to hold. The tools the runner adds are
-    // the ones the runner reads — the gates report — and they go with them.
+    // bounds on them are the runner's to hold.
     tools: [
       createIssueDecisionTool(triage),
       createScopeDecisionTool(scope),
       createLeftoverTool({ repo: options.repo, gh }),
-      ...(options.tools ?? []),
     ],
   });
 

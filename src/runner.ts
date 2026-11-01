@@ -31,8 +31,9 @@ import { join } from "node:path";
 
 import { claimIssue, reclaimClaim, releaseClaim } from "./claim.js";
 import { errorMessage } from "./cli.js";
+import { budgetShares } from "./budget.js";
 import { GUARD_POLICY } from "./guard.js";
-import { assertGatesGreen, createGatesTool, type GateReport } from "./gates.js";
+import { GateFailed, runGates } from "./gates.js";
 import {
   UNTRUSTED_INPUT_RULE,
   UNTRUSTED_INPUT_SECTION,
@@ -959,6 +960,14 @@ export interface StepRecord {
   readonly outcome: "ok" | "failed";
   /** The first line the step printed — enough to tell two failures apart. */
   readonly detail: string;
+  /**
+   * What the step's command printed, when it failed and said something.
+   *
+   * The detail names the failure; this is the evidence behind it. Only the
+   * gates step carries it: a gate says why it refused the change, and a
+   * record that says only "a gate failed" says nothing a reader can act on.
+   */
+  readonly output?: string;
 }
 
 /** One step of a run. */
@@ -1045,6 +1054,13 @@ function renderRecord(options: {
   for (const step of options.steps) {
     const detail = step.detail === "" ? "" : ` — ${step.detail}`;
     lines.push(`- ${step.step} — ${step.outcome}${detail}`);
+    // What the command printed, indented under the step it belongs to.
+    for (const line of (step.output ?? "").split("\n")) {
+      if (line.trim() === "") {
+        continue;
+      }
+      lines.push(`  ${line}`);
+    }
   }
   lines.push("");
   return lines.join("\n");
@@ -1158,14 +1174,26 @@ export async function runSteps(options: {
       record = { step: step.name, outcome: "ok", detail: redact(firstLine(output)) };
     } catch (error) {
       const cause = error instanceof Error ? error : new Error(String(error));
+      // Only the gates step carries its output into the record. A gate says
+      // why it refused the change; the other steps say what they said in
+      // their detail, and a record of every failed command's output would be
+      // a record of megabytes.
+      const output = cause instanceof GateFailed ? cause.output : "";
       record = {
         step: step.name,
         outcome: "failed",
         detail: redact(firstLine(cause.message)),
+        ...(output === "" ? {} : { output: redact(output) }),
       };
       steps.push(record);
       options.onStep?.(record);
-      failure = { step: step.name, error: cause };
+      // A gate that failed belongs to the gates step, wherever it happened:
+      // the review's fix path runs the gates too, and a failure there is the
+      // gates' failure, not the review's.
+      failure = {
+        step: cause instanceof GateFailed ? "gates" : step.name,
+        error: cause,
+      };
       break;
     }
     steps.push(record);
@@ -1535,6 +1563,62 @@ export async function commitAll(
     ],
     { cwd },
   );
+}
+
+/**
+ * Run the gates on the worktree, and put the worktree back afterwards.
+ *
+ * The gates build in the worktree, and the runner's own commits are made with
+ * `git add -A`: the artifacts would go to the remote with the work. The tree
+ * the gates judged is the tree that is pushed, so the worktree goes back to it
+ * — whether the gates passed or not.
+ *
+ * A worktree that could not be put back is a run that stops: a tree with a
+ * gate's build in it is not a tree to push. The gate's own failure is the one
+ * the record carries, though: a failed gate is what the reader needs to see.
+ */
+async function gateTheTree(options: {
+  readonly git: GitRunner;
+  readonly run: CommandRunner;
+  readonly cwd: string;
+  readonly budgetMs: number;
+}): Promise<string> {
+  const outcome = await runGates({
+    run: options.run,
+    cwd: options.cwd,
+    budgetMs: options.budgetMs,
+  }).then(
+    (summary) => ({ summary, failure: undefined as unknown }),
+    (error: unknown) => ({ summary: "", failure: error }),
+  );
+  try {
+    await restoreWorktree(options.git, options.cwd);
+  } catch (restoreError) {
+    if (outcome.failure === undefined) {
+      throw restoreError;
+    }
+  }
+  if (outcome.failure !== undefined) {
+    throw outcome.failure;
+  }
+  return outcome.summary;
+}
+
+/**
+ * Put the worktree back to the tree the gates judged.
+ *
+ * A gate that builds leaves its build in the worktree, and the runner's own
+ * commits are made with `git add -A`: the artifacts would go to the remote
+ * with the work. The tree the gates judged is the tree that is pushed, so the
+ * worktree goes back to it — the files the gates changed and the files they
+ * left behind.
+ *
+ * The ignored files stay: the worktree's own Gradle home, its `.env` copy
+ * and its build outputs are the repository's, not the runner's to delete.
+ */
+export async function restoreWorktree(git: GitRunner, cwd: string): Promise<void> {
+  await git(["reset", "--hard"], { cwd });
+  await git(["clean", "-fd"], { cwd });
 }
 
 /**
@@ -1911,6 +1995,43 @@ async function runPlan(
   let reviews = works || plan.kind === "pull request" || plan.kind === "review";
   let workSessionStartedAt: number | undefined;
 
+  // The run's budget is one wall-clock for everything it does: the session,
+  // the gates and the review. Each keeps a share of it, and the share is
+  // reserved: a session that may spend the whole budget must not leave the
+  // gates nothing to run with.
+  const shares = budgetShares(options.deadlineMs);
+  const sessionBudgetMs = shares.sessionMs;
+  const runStartedAt = Date.now();
+  /**
+   * What is left of the run's budget.
+   *
+   * One clock for the whole run: the session, the gates and the review share
+   * it, and each of them asks what is left when its turn comes.
+   */
+  const remaining = (): number =>
+    options.deadlineMs - (Date.now() - (workSessionStartedAt ?? runStartedAt));
+  /** What the gates have spent of their share. */
+  let gatesSpentMs = 0;
+  /**
+   * The gates run on the tree the agent left, and again on the tree a
+   * review's fix left. Both sets come out of the one share, so a fix loop
+   * that runs the suite on every iteration cannot spend the run's whole
+   * budget on gates.
+   */
+  const runTheGates = async (): Promise<string> => {
+    const startedAt = Date.now();
+    try {
+      return await gateTheTree({
+        git: options.git,
+        run: options.run,
+        cwd: state.worktreePath,
+        budgetMs: Math.max(0, shares.gatesMs - gatesSpentMs),
+      });
+    } finally {
+      gatesSpentMs += Date.now() - startedAt;
+    }
+  };
+
   const steps: Step[] = [];
 
   if (works) {
@@ -1961,10 +2082,6 @@ async function runPlan(
       name: "session",
       run: async () => {
         workSessionStartedAt = Date.now();
-        // The report the agent ends its last turn with. The gates it names are
-        // the ones the target repository runs, and the tree it names is the
-        // tree they were run against.
-        const gates: { value?: GateReport } = {};
         const result = await startAgent({
           factory: options.session,
           cwd: state.worktreePath,
@@ -1972,14 +2089,14 @@ async function runPlan(
           issueNumber: issue.number,
           ...(plan.issueDetail === undefined ? {} : { issue: plan.issueDetail }),
           gh: options.gh,
-          deadlineMs: options.deadlineMs,
-          tools: [
-            createGatesTool({ git: options.git, cwd: state.worktreePath, holder: gates }),
-          ],
+          // The session does not get the whole budget: the gates run after
+          // it, and a session that may spend everything leaves them nothing
+          // to run with.
+          deadlineMs: sessionBudgetMs,
           ...(options.stopped === undefined ? {} : { stopped: options.stopped }),
         });
         const workElapsedMs = workSessionStartedAt === undefined ? 0 : Date.now() - workSessionStartedAt;
-        if (workElapsedMs >= options.deadlineMs) {
+        if (workElapsedMs >= sessionBudgetMs) {
           reviews = false;
         }
         if (result.aborted) {
@@ -2007,25 +2124,14 @@ async function runPlan(
         if (count === "0") {
           throw new Error("the agent made no commits — no changes to push or open a pull request");
         }
-        // The work is committed, and the gates are read: a fix the self-review
-        // made after the gates ran is not a fix the gates have seen. The run
-        // stops here, before the push, rather than in the target's CI.
-        await assertGatesGreen({
-          git: options.git,
-          cwd: state.worktreePath,
-          report: gates.value,
-        });
-        return `${result.completed} turns`;
-      },
-    });
-    steps.push({
-      name: "push",
-      run: async () => {
-        if (state.decision !== "work") {
-          return "skipped — the issue was not worked";
-        }
+        // The work is committed, and the gates run on it: the tree they judge
+        // is the tree that is pushed.
+        //
         // A change the work landed needs its registry entry, and the entry
-        // belongs to the pull request.
+        // belongs to the pull request. It is created here and not in the push
+        // step, because the gates run between the two: a gate that judged the
+        // tree without the entry would judge a tree the pull request never
+        // carries.
         state.slug = await changedChangeSlug(options.git, state.worktreePath, {
           base: state.base,
           head: await headSha(options.git, state.worktreePath),
@@ -2037,6 +2143,32 @@ async function runPlan(
             state.worktreePath,
             "chore: the change's registry entry",
           );
+        }
+        return `${result.completed} turns`;
+      },
+    });
+    steps.push({
+      name: "gates",
+      run: async () => {
+        if (state.decision !== "work") {
+          return "skipped — the issue was not worked";
+        }
+        // The repository's own gates, in the worktree, on the tree the agent
+        // left. The agent was told to run them too — it has to, to fix what
+        // they report — but the runner runs them because an agent that
+        // skipped them is not a gate, and a broken diff that reaches the
+        // review costs a whole review cycle.
+        //
+        // A gate that does not pass ends the run here: the claim is released
+        // and nothing is pushed.
+        return await runTheGates();
+      },
+    });
+    steps.push({
+      name: "push",
+      run: async () => {
+        if (state.decision !== "work") {
+          return "skipped — the issue was not worked";
         }
         const sha = await headSha(options.git, state.worktreePath);
         const size = await changedSize(options.git, state.worktreePath, {
@@ -2110,16 +2242,19 @@ async function runPlan(
         const detail =
           state.issue ?? (await readIssue(options.repo, issue.number, options.gh));
         state.issue = detail;
-        const startedAt = workSessionStartedAt ?? Date.now();
-        const remaining = (): number => options.deadlineMs - (Date.now() - startedAt);
         let exhausted = false;
 
         // `gate` is the engine's retry-until-pass block: review, and when the
         // verdict failed, fix what it found and review the fixed diff again.
+        //
+        // The review keeps its own share of the budget: the gates have theirs,
+        // and a review that is given what the gates left is a review that
+        // never gets to answer.
+        const reviewBudget = (): number => Math.min(shares.reviewMs, remaining());
         const outcome = await runReviewGate({
           attempts: MAX_FIX_ITERATIONS + 1,
           review: async () => {
-            const budget = remaining();
+            const budget = reviewBudget();
             if (budget <= 0) {
               exhausted = true;
               return "fail";
@@ -2142,7 +2277,7 @@ async function runPlan(
             return reviewed.verdict;
           },
           fix: async () => {
-            const budget = remaining();
+            const budget = reviewBudget();
             if (budget <= 0) {
               exhausted = true;
               return;
@@ -2162,6 +2297,16 @@ async function runPlan(
               state.worktreePath,
               "fix: the review's findings",
             );
+            // The fix changed the tree, so the tree the gates judged is not
+            // the tree that would be pushed: the gates run again, and a fix
+            // that does not pass them is not pushed. The tree on the remote
+            // is the tree the gates judged.
+            //
+            // The commit comes first, because the restore puts the worktree
+            // back to the tree the gates judged — and that tree is the
+            // commit. The build the gates leave is what the restore takes
+            // away, and the next commit is what it keeps out of.
+            await runTheGates();
             const sha = await headSha(options.git, state.worktreePath);
             const size = await changedSize(options.git, state.worktreePath, {
               base: state.base,
@@ -2174,6 +2319,12 @@ async function runPlan(
               verify: verifyPush({ verifyPushes: options.verifyPushes, size }),
             });
           },
+        }).catch((error: unknown) => {
+          // A gate that refused the fix is under the workflow's error: the
+          // engine stops on it, and the failure itself is what the record
+          // and the exit code must name.
+          const cause = (error as { readonly details?: unknown }).details;
+          throw cause instanceof Error ? cause : error;
         });
 
         if (outcome.passed) {
