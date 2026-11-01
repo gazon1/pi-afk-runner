@@ -44,9 +44,9 @@ import {
   type CliOptions,
 } from "./cli.js";
 import { existsSync, rmSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { resolve } from "node:path";
 
-import { runGit, workBranch } from "./git.js";
+import { runGit, issueWorktreePath, workBranch } from "./git.js";
 import { RUN_STATUS_ENTRY, statusFromEntries, statusLine, type RunStatus } from "./live.js";
 import { lockNameFor, takeLock } from "./lock.js";
 import { RunFailed, blockedReason, newRunId, runOnce, type RunOptions, type RunResult, unworkableReason } from "./runner.js";
@@ -476,7 +476,7 @@ export function liveFrontDoor(
         publish(ctx, run);
         last = {
           transcript: null,
-          worktreePath: join(options.worktreeRoot, `issue-${issue.number}`),
+          worktreePath: issueWorktreePath(options.worktreeRoot, issue.number),
           branch: workBranch(issue.number),
           remote: options.remote,
           checkout: options.checkout,
