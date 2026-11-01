@@ -4846,6 +4846,18 @@ describe("the CLI's run", () => {
   });
 });
 
+/**
+ * A prompt as one line of text.
+ *
+ * The prompts are wrapped for a reader, so a claim that spans two lines is
+ * one sentence to the agent and two to a string match. The tests that check
+ * what a prompt says match against the flattened text, so that re-wrapping a
+ * prompt cannot break them.
+ */
+function flatten(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
+}
+
 describe("the leftovers a run files", () => {
   /** A brief in the target repository's own format. */
   const BRIEF = [
@@ -4996,6 +5008,27 @@ describe("the leftovers a run files", () => {
     expect(verify).toContain("The work is the tree's");
     expect(verify).toContain("not part of what the next run continues");
     expect(verify).toContain("stashed tree");
+  });
+
+  it("test_the_implement_prompt_says_the_work_is_the_tree_s", async () => {
+    // The turn that writes the work is the turn where the rule matters most:
+    // the work stays in the tree while the turn runs, and a stash is not part
+    // of what the next run continues.
+    const prompts = await readPrompts();
+    const implement = prompts[3] ?? "";
+    const verify = prompts[4] ?? "";
+
+    // Both turns make the same claim about the same thing, so they cannot
+    // drift apart: the verify turn already says it, and it keeps saying it.
+    for (const turn of [implement, verify]) {
+      expect(flatten(turn)).toContain("The work is the tree's");
+      expect(flatten(turn)).toContain("not part of what the next run continues");
+    }
+
+    // The rules the implement turn already had stay: the runner commits the
+    // tree, and the agent does not commit or push itself.
+    expect(flatten(implement)).toContain("commits whatever is left in the worktree");
+    expect(flatten(implement)).toContain("Do not commit or push");
   });
 
   it("test_the_work_session_is_given_the_tool_that_files_a_leftover", async () => {

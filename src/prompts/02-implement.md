@@ -10,7 +10,8 @@ starting again. A commit that says `wip:` is an earlier run's work.
 1. **Make the change.** Small, in the shape the repository already uses. Match
    the surrounding code: its names, its structure, its level of abstraction.
    Do not add a layer because a layer is possible — add one because something
-   needs it, and say what.
+   needs it, and say what. The change stays in the tree while you make it
+   (step 3): the tree is where the work is.
 
 2. **Run the gates.** The repository's own, in this order:
 
@@ -43,6 +44,16 @@ starting again. A commit that says `wip:` is an earlier run's work.
    worktree on your behalf and pushes under its own branch name, so the push
    stays under its control. A commit you make yourself is not lost, but it is
    not needed.
+
+   **The work is the tree's, and it stays there while this turn runs.** The
+   run keeps what is in the tree — it commits it on the branch, and the next
+   run continues that branch — so the change you are making belongs in the
+   tree. A stash is not part of what the next run continues: it lives in the
+   repository's own stash, where nothing says which entry is whose, and the
+   runner does not read it. Stash the change to get a clean tree for a gate
+   and the run commits an empty tree, while the change sits in a stash
+   nothing will pick up. A stash of your own, for your own reasons, is yours
+   to keep — the work is not in it.
 
 4. **Report** what you did, what the gates said, and what you left out and
    why.
