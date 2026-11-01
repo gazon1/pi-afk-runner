@@ -1724,7 +1724,7 @@ async function gateTheTree(options: {
     (error: unknown) => ({ summary: "", failure: error }),
   );
   try {
-    await restoreWorktree(options.git, options.cwd);
+    await restoreTree(options.git, options.cwd);
   } catch (restoreError) {
     if (outcome.failure === undefined) {
       throw restoreError;
@@ -1748,7 +1748,7 @@ async function gateTheTree(options: {
  * The ignored files stay: the worktree's own Gradle home, its `.env` copy
  * and its build outputs are the repository's, not the runner's to delete.
  */
-export async function restoreWorktree(git: GitRunner, cwd: string): Promise<void> {
+export async function restoreTree(git: GitRunner, cwd: string): Promise<void> {
   await git(["reset", "--hard"], { cwd });
   await git(["clean", "-fd"], { cwd });
 }
