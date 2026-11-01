@@ -1119,25 +1119,19 @@ export function recordDirectory(root: string, issue: number): string {
  * commit is written next to the built module, so a run from `src/` — the tests —
  * has none, and says so by leaving it out.
  */
+function readJson(file: URL): Record<string, unknown> {
+  try {
+    return JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+}
+
 const RUNNER_STAMP = ((): string => {
-  let version = "unknown";
-  try {
-    const pkg = JSON.parse(
-      readFileSync(new URL("../package.json", import.meta.url), "utf8"),
-    ) as { readonly version?: string };
-    version = pkg.version ?? version;
-  } catch {
-    // A record must not fail over what it says about itself.
-  }
-  let sha: string | null = null;
-  try {
-    const built = JSON.parse(
-      readFileSync(new URL("./build-info.json", import.meta.url), "utf8"),
-    ) as { readonly sha?: string | null };
-    sha = built.sha ?? null;
-  } catch {
-    // No build stamp: the module is running from `src/`.
-  }
+  const pkg = readJson(new URL("../package.json", import.meta.url));
+  const version = (typeof pkg.version === "string" ? pkg.version : "unknown");
+  const built = readJson(new URL("./build-info.json", import.meta.url));
+  const sha = typeof built.sha === "string" ? built.sha : null;
   return sha === null ? version : `${version} ${sha}`;
 })();
 
