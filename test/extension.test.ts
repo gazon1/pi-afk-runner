@@ -11,7 +11,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
 
-import { piSessionFactory } from "../src/cli.js";
+import { isOwnExtension, piSessionFactory } from "../src/cli.js";
 import {
   LOG_KEY,
   STATUS_KEY,
@@ -915,5 +915,19 @@ describe("the guard's policy", () => {
   it("names the factory Pi activates, not the service it exports", () => {
     expect(existsSync(guardExtensionPath())).toBe(true);
     expect(guardExtensionPath().endsWith("/src/index.ts")).toBe(true);
+  });
+
+  it("does not mistake a synthetic path for a copy of this package", () => {
+    // The runner's own inline factory is named `<inline:...>`, and the SDK's own
+    // extensions are named `builtin:...`. Neither names a file, and neither is a
+    // second copy of this package.
+    //
+    // The bug this guards: the check read the package name off the working
+    // directory's **parent**, and a CI runner checks the repository out at
+    // `<repo>/<repo>`. There the parent is named after the package, so the
+    // runner's own inline factory was read as a second copy of itself and
+    // dropped — and the tool-call log went with it.
+    expect(isOwnExtension("<inline:afk-runner-guardrail>")).toBe(false);
+    expect(isOwnExtension("builtin:read")).toBe(false);
   });
 });
