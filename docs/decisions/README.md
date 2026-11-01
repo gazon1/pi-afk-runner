@@ -27,6 +27,7 @@ for the rule that the copies follow.
 | `2026-11-01-the-session-share-is-two-hours.md` | the work session's share of the budget, and the claim's staleness window that outlasts a run |
 | `2026-11-02-a-run-that-did-not-finish-leaves-its-work.md` | a failed run keeps its unfinished work on the branch, and the next run continues it |
 | `2026-11-02-the-work-is-the-tree-and-not-the-stash.md` | the work is the tree's, and a stash is not work the next run continues |
+| `2026-11-02-the-implement-turn-says-where-the-work-has-to-stay.md` | the turn that writes the work says where the work has to stay while it runs |
 | `2026-10-31-an-interrupted-run-releases-its-claim.md` | what a killed run does with its claim, and why the signal releases it |
 | `2026-10-30-the-brief-is-the-body-when-no-comment-carries-the-marker.md` | where the brief is, and what happens when there is none |
 | `2026-11-02-the-fourth-turn-asks-what-follows.md` | the fourth turn, and who files the leftovers |
