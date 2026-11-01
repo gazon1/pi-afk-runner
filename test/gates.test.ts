@@ -56,6 +56,27 @@ describe("the gates the agent reports", () => {
     expect(GATES_TOOL_NAME).toBe("agent_gates");
   });
 
+  it("keeps the last report, when the agent reports more than once", async () => {
+    // The runner reads the report at the end of the session, so the last one
+    // is the one that counts: it is the report about the tree the run ends on.
+    const fixture = await createFixtureRepository();
+    try {
+      const holder: { value?: GateReport } = {};
+      const tool = gatesTool({ cwd: fixture.repo, holder });
+
+      await tool.execute("call-1", GREEN);
+      await tool.execute("call-2", {
+        gates: [{ gate: GATES[0], outcome: "fail", detail: "the JVM tests are red" }],
+      });
+
+      expect(holder.value?.outcomes).toEqual([
+        { gate: GATES[0], outcome: "fail", detail: "the JVM tests are red" },
+      ]);
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
   it("names every gate in the prompt that asks the agent to run them", async () => {
     // The runner refuses a run that reported no result for a gate, so the
     // prompt that asks for the report has to name the gates the runner wants.

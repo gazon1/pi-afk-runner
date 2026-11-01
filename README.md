@@ -149,7 +149,9 @@ made. A fix the gates have not seen is not a fix.
 The agent reports the gates with a tool, and the report carries **the tree it was made against**.
 The runner reads the report before the push, and a run stops at the session step when the agent
 reported no gates, when a gate failed, when one of the three was not reported, or when the tree
-changed after the report. The work that reaches the remote is the work the gates saw.
+changed after the report. The agent's work reaches the remote only when the gates are green — the
+runner's own writes, the registry entry and the verdict file, come after the gates have run,
+because the verdict file cannot exist before the review.
 
 ### From Pi — the live chat
 

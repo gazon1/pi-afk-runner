@@ -99,6 +99,12 @@ export function createGatesTool(options: {
           },
         ],
         details: report,
+        // The report ends the turn: the prompt asks for it as the last
+        // action, and a tool result that says so is what makes it true. The
+        // agent that edits after it would trip the tree check in
+        // `assertGatesGreen`, and the failure would blame the tree rather
+        // than the agent that kept writing after it had reported.
+        terminate: true,
       };
     },
   });

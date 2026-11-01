@@ -15,7 +15,7 @@ for the rule that the copies follow.
 
 | Decision | What it settles |
 |---|---|
-| `2026-11-01-the-self-review-runs-the-gates-again.md` | the self-review runs the gates again, and the tree the runner pushes is the tree they saw |
+| `2026-11-01-the-self-review-runs-the-gates-again.md` | the self-review runs the gates again, and the agent's work is pushed only when they are green |
 | `2026-10-30-the-host-lock-is-a-real-flock.md` | the host lock, and why the runner is a Linux tool |
 | `2026-11-01-the-lock-is-per-issue.md` | the lock's unit: one per issue, one for the sweep, one for merge |
 | `2026-10-30-the-work-session-is-the-runners-minus-the-runner.md` | what a work session loads, and where the guard's policy lives |

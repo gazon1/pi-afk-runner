@@ -1,5 +1,5 @@
 ---
-title: The self-review runs the gates again, and the tree it pushes is the tree they saw
+title: The self-review runs the gates again, and the agent's work is pushed only when they are green
 status: accepted
 date: 2026-11-01
 authors: Command Code
@@ -7,7 +7,7 @@ deciders: Singularity Developer
 tags: [gates, prompts, session, pull-request, agent]
 ---
 
-# The self-review runs the gates again, and the tree it pushes is the tree they saw
+# The self-review runs the gates again, and the agent's work is pushed only when they are green
 
 ## Context
 
@@ -38,10 +38,16 @@ fixes and ends the turn with the `agent_gates` tool — one entry per gate, with
 `src/prompts/02-implement.md` says that the run there is a checkpoint, and that the tree it leaves
 is the tree the next turn pushes.
 
+The turn that follows the self-review — the one that says what the change leaves behind, and that
+may fix the cheap ones — can change the tree as well, so `src/prompts/04-next.md` ends with the
+same report. The last report is the one the runner reads, and the tree it names is the tree the
+run ends on.
+
 **The runner side.** The work session is given the `agent_gates` tool (`src/gates.ts`). The tool
-records what each gate said **and the tree the report was made against**. After the session, and
-before the push, the runner reads the report (`assertGatesGreen`), and the run stops at the session
-step when:
+records what each gate said **and the tree the report was made against**, and its result ends the
+turn: the report is the last action, and a tool result that says so is what makes it true. After
+the session, and before the push, the runner reads the report (`assertGatesGreen`), and the run
+stops at the session step when:
 
 - the agent reported no gates at all;
 - a gate failed — the report says so, and the run stops on it;
@@ -82,7 +88,8 @@ the report unnecessary, and until then the report is what stands between the fix
 - The report is the agent's word. The runner cannot tell that the gates really ran; it can tell
   that the tree it pushes is the tree the report was made against. #28 is what closes the rest.
 - The gates run twice per issue when the self-review changed something: once in the implement turn,
-  as a checkpoint, and once after the fixes.
+  as a checkpoint, and once after the fixes — and once more when the turn that follows changed
+  something.
 - The runner's own writes — the registry entry and the verdict file — are committed after the gates
   have run, because the verdict file cannot exist before the review. They are generated files the
   target repository's own gates check.
@@ -90,7 +97,8 @@ the report unnecessary, and until then the report is what stands between the fix
 ## Links
 
 - `src/gates.ts` — the tool, the report, and the check.
-- `src/prompts/03-verify.md`, `src/prompts/02-implement.md` — the prompt side.
+- `src/prompts/02-implement.md`, `src/prompts/03-verify.md`, `src/prompts/04-next.md` — the prompt
+  side.
 - `src/runner.ts` — the session step, which reads the report before the push.
 - `test/gates.test.ts`, `test/runner.test.ts` — the gates that can say no.
 - Issue #28 — the runner running the target's gates itself.

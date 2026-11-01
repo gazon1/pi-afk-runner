@@ -2497,6 +2497,56 @@ describe("the CLI's run", () => {
     }
   });
 
+  it("test_a_report_from_an_earlier_turn_is_accepted_when_the_tree_did_not_move", async () => {
+    // The gates ran in the turn that fixed something, and the turns after it
+    // changed nothing: the report still names the tree the run ends on, and
+    // the run pushes.
+    const fixture = await fixtureWithSetupScript();
+    try {
+      const { gh } = stubGh([{ number: 42, title: "an issue" }]);
+      let turn = 0;
+
+      await runOnce({
+        ...runOptions(fixture, gh),
+        session: async ({ cwd, tools }) => {
+          if (isReviewer(tools)) {
+            return {
+              async prompt() {
+                const tool = tools?.[0] as unknown as {
+                  execute: (id: string, params: unknown) => Promise<unknown>;
+                };
+                await tool.execute("call-1", { verdict: "pass", findings: [] });
+              },
+              async abort() {},
+              dispose: () => {},
+            };
+          }
+          return {
+            async prompt() {
+              turn += 1;
+              if (turn === 1) {
+                await writeFile(join(cwd, "work.txt"), "the work\n", "utf8");
+                await toolNamed(tools, GATES_TOOL_NAME)?.execute("call-1", GREEN_GATES);
+              }
+            },
+            async abort() {},
+            dispose: () => {},
+          };
+        },
+      });
+
+      const pushed = (
+        await gitOutput(["ls-remote", fixture.remote, workBranch(42)], {
+          cwd: fixture.repo,
+          env: fixture.env,
+        })
+      ).trim();
+      expect(pushed).not.toBe("");
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
   it("test_a_gate_that_failed_stops_the_run_before_the_push", async () => {
     // The self-review fixed something and broke a gate. The gate is the
     // target repository's own, and the run stops on it — here, not in CI.

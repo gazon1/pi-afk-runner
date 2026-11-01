@@ -34,12 +34,14 @@ own diff.
    being finished, not an obstacle to work around. If you changed nothing, the
    run you did in the previous turn still stands.
 
-6. **Report the gates.** End your turn with the `agent_gates` tool: one entry
+6. **Report the gates.** End this turn with the `agent_gates` tool: one entry
    per gate — `./check.sh`, `just tcheck-evals` and `just docs-audit` — with
-   what it said. It is your last action — the runner pushes the tree the gates
-   saw, so nothing may change after it. A gate that failed is reported as a
-   failure: the run stops on a red gate, and that is where the failure
-   belongs.
+   what it said. A gate that failed is reported as a failure: the run stops on
+   a red gate, and that is where the failure belongs.
+
+   The runner pushes the tree the gates saw, so the report has to be about the
+   tree as it is. The turn that follows may change it: if it does, it runs the
+   gates again and reports them again.
 
 7. **Say why.** If you changed your approach, or left something out, say so
    in the commit message, in one sentence a reader can check.
