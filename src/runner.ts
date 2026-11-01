@@ -2527,6 +2527,11 @@ async function runPlan(
               ...(options.stopped === undefined ? {} : { stopped: options.stopped }),
               issue: detail,
             });
+            // The fix session may have built in the worktree; its artifacts
+            // are not the fix. Put them back before the commit, the way the
+            // gates put their build back — untracked files only, so the fix's
+            // own changes survive.
+            await options.git(["clean", "-fd"], { cwd: state.worktreePath });
             await commitAll(
               options.git,
               state.worktreePath,
