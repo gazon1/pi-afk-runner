@@ -1534,7 +1534,7 @@ export function blockedReason(
   if (blockedBy === undefined || blockedBy.length === 0) {
     return null;
   }
-  return `it waits for ${blockedBy.map((number) => `#${number}`).join(", ")} — a parent issue is not merged yet`;
+  return `it waits for ${blockedBy.map((number) => `#${number}`).join(", ")} — that pull request is not merged yet`;
 }
 
 /** The commit the worktree is at. */
