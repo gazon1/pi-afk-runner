@@ -34,6 +34,11 @@ own diff.
    being finished, not an obstacle to work around. If you changed nothing, the
    run you did in the previous turn still stands.
 
+   A failure the base branch already has is not yours to fix. Name it and move
+   on: do not re-run a gate suite on a stashed tree to attribute a failure to
+   the base. Your time is a share of the run's, and a second run of a long
+   suite spends it.
+
 6. **Report.** Say what you changed and what the gates said. The runner runs
    the gates itself when you stop, on the tree you leave: a gate that fails
    there ends the run, and that is where the failure belongs.
