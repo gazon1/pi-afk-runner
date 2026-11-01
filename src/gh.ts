@@ -21,6 +21,12 @@
  * - **The exclusion is the minus form.** `--search '-label:agent-in-progress'`
  *   excludes; `--search 'no:label:agent-in-progress'` returns nothing at all,
  *   because there is no such thing as an issue with no labels.
+ *
+ * The transport is `gh`, and it stays: a third-party package
+ * (`@narumitw/pi-github-pr`) was audited for this and rejected — it is a Pi
+ * statusline extension that shows the current branch's pull request, and it
+ * exposes no client for the reads and writes below. See
+ * `docs/decisions/2026-11-02-the-github-access-stays-behind-one-module.md`.
  */
 
 import { execFile } from "node:child_process";
