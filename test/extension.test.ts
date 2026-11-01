@@ -1,7 +1,8 @@
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import type {
   ExtensionAPI,
@@ -11,7 +12,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
 
-import { piSessionFactory } from "../src/cli.js";
+import { isOwnExtension, piSessionFactory } from "../src/cli.js";
 import {
   LOG_KEY,
   STATUS_KEY,
@@ -30,7 +31,7 @@ import {
   installGuardPolicy,
 } from "../src/guard.js";
 import { RUN_STATUS_ENTRY, statusFromEntries, statusLine } from "../src/live.js";
-import type { RunOptions, RunResult } from "../src/runner.js";
+import { unworkableReason, type RunOptions, type RunResult } from "../src/runner.js";
 import { createFixtureRepository, gitOutput } from "./git-sandbox.js";
 
 
@@ -319,6 +320,40 @@ describe("the run the front door owns", () => {
         title: "Fix the thing",
         stage: "done",
       });
+    } finally {
+      await rm(checkout, { recursive: true, force: true });
+    }
+  });
+
+  it("says why the issue could not be worked, in the words the CLI prints", async () => {
+    const checkout = await mkdtemp(join(tmpdir(), "afk-live-"));
+    try {
+      const host = fakePi();
+      const fake = fakeSession();
+      const work = async (): Promise<RunResult> => ({
+        issue: 42,
+        outcome: "unworkable",
+        steps: [],
+        record: "",
+        derivedState: "Claimed",
+      });
+
+      const door = liveFrontDoor(host.pi, { session: async () => fake.session, work });
+      const { ctx, notes } = fakeContext();
+
+      await door.start(`--repo gazon1/cardinalfish --checkout ${checkout}`, ctx);
+
+      await vi.waitFor(() => {
+        expect(
+          notes.some((note) => note.message.includes("could not be worked")),
+        ).toBe(true);
+      });
+      // The reason is the runner's mapping, not a second copy of it: the CLI
+      // prints the same words for the same derived state.
+      const said = notes.find((note) => note.message.includes("could not be worked"));
+      expect(said?.message).toBe(
+        `afk-runner: issue 42 could not be worked — ${unworkableReason("Claimed")}`,
+      );
     } finally {
       await rm(checkout, { recursive: true, force: true });
     }
@@ -675,6 +710,88 @@ describe("the log the host shows", () => {
   });
 });
 
+describe("the log the CLI shows", () => {
+  it("shows a tool call once, and the assistant's text with its marker", async () => {
+    // The CLI reads the session's events through the handlers the factory
+    // installs. A tool call is already a line of its own — the tool_call
+    // handler says what the tool was — so a tool-call block in the message
+    // says nothing twice.
+    const fixture = await createFixtureRepository();
+    const agentDirectory = join(fixture.root, "agent");
+    const previous = process.env.PI_CODING_AGENT_DIR;
+    const lines: string[] = [];
+    try {
+      await mkdir(agentDirectory, { recursive: true });
+      await writeFile(
+        join(agentDirectory, "models.json"),
+        JSON.stringify({
+          providers: {
+            fake: {
+              api: "openai-completions",
+              baseUrl: "http://127.0.0.1:1",
+              apiKey: "test",
+              models: [{ id: "beam" }],
+            },
+          },
+        }),
+        "utf8",
+      );
+      process.env.PI_CODING_AGENT_DIR = agentDirectory;
+
+      const session = await piSessionFactory({
+        agentDirectory,
+        model: "fake/beam",
+        onEvent: (line) => lines.push(line),
+      })({ cwd: fixture.repo, systemPromptSections: {} });
+      const judging = session as unknown as {
+        readonly extensionRunner: {
+          emitMessageEnd(event: unknown): Promise<unknown>;
+          emitToolCall(event: unknown): Promise<unknown>;
+        };
+        dispose(): void;
+      };
+
+      try {
+        // The tool call is a line of its own: the tool and the command.
+        await judging.extensionRunner.emitToolCall({
+          type: "tool_call",
+          toolName: "bash",
+          toolCallId: "t",
+          input: { command: "ls" },
+        });
+        // The colour the CLI dims it with is not part of the line.
+        expect(lines).toHaveLength(1);
+        expect(lines[0]).toContain("→ bash: ls");
+
+        lines.length = 0;
+        await judging.extensionRunner.emitMessageEnd({
+          type: "message_end",
+          message: {
+            role: "assistant",
+            content: [{ type: "toolCall", id: "c", name: "bash", arguments: { command: "ls" } }],
+          },
+        });
+        expect(lines).toEqual([]);
+
+        await judging.extensionRunner.emitMessageEnd({
+          type: "message_end",
+          message: { role: "assistant", content: [{ type: "text", text: "hi" }] },
+        });
+        expect(lines).toEqual(["· hi"]);
+      } finally {
+        judging.dispose();
+      }
+    } finally {
+      if (previous === undefined) {
+        delete process.env.PI_CODING_AGENT_DIR;
+      } else {
+        process.env.PI_CODING_AGENT_DIR = previous;
+      }
+      await fixture.dispose();
+    }
+  });
+});
+
 describe("what the door takes from the host session", () => {
   it("runs on the model the session is already using", () => {
     expect(hostModel({ provider: "commandcode", id: "reflection/beam:free" })).toBe(
@@ -691,6 +808,12 @@ describe("the guard's policy", () => {
     // Without a bash entry the guard reports a configuration issue and the shell
     // inherits the allow silently.
     expect(GUARD_POLICY.bash["*"]).toBe("allow");
+    // The leftovers go through the runner's tool, which holds the bounds on the
+    // queue. A shell command is a way around them.
+    expect(GUARD_POLICY.bash["gh issue create*"]).toEqual({
+      action: "deny",
+      reason: expect.stringContaining("agent_leftover"),
+    });
     // The guard's own wildcards: `*` crosses `/`, and the last matching entry wins.
     expect(GUARD_POLICY.path["*.env"]).toBe("deny");
     expect(GUARD_POLICY.path["*.env.*"]).toBe("deny");
@@ -833,5 +956,50 @@ describe("the guard's policy", () => {
   it("names the factory Pi activates, not the service it exports", () => {
     expect(existsSync(guardExtensionPath())).toBe(true);
     expect(guardExtensionPath().endsWith("/src/index.ts")).toBe(true);
+  });
+
+  it("does not mistake a synthetic path for a copy of this package", () => {
+    // The runner's own inline factory is named `<inline:...>`, and the SDK's own
+    // extensions are named `builtin:...`. Neither names a file, and neither is a
+    // second copy of this package.
+    //
+    // The bug this guards: the check read the package name off the working
+    // directory's **parent**, and a CI runner checks the repository out at
+    // `<repo>/<repo>`. There the parent is named after the package, so the
+    // runner's own inline factory was read as a second copy of itself and
+    // dropped — and the tool-call log went with it.
+    expect(isOwnExtension("<inline:afk-runner-guardrail>")).toBe(false);
+    expect(isOwnExtension("builtin:read")).toBe(false);
+  });
+
+  it("keeps the runner's own inline extension whatever the directory is called", async () => {
+    // The check reads the package name off the working directory's parent, so
+    // it only misfires when that parent happens to be named after the package.
+    // That is the shape of a CI runner's checkout, `<repo>/<repo>`, and the
+    // runner's own inline factory was dropped there — taking the tool-call log
+    // with it.
+    //
+    // The working directory is put in that shape here, so the test fails the
+    // same way on every machine and not only where the checkout is named so.
+    //
+    // The name is the one the check compares against, read the way the check
+    // reads it: the directory the package is installed in.
+    const packageName = basename(dirname(dirname(fileURLToPath(import.meta.url))));
+    const layout = await mkdtemp(join(tmpdir(), "afk-runner-layout-"));
+    const parent = join(layout, packageName);
+    const working = join(parent, "checkout");
+    await mkdir(working, { recursive: true });
+    const previous = process.cwd();
+    try {
+      process.chdir(working);
+      // The inline factory is this package's own — never a second copy of it.
+      expect(isOwnExtension("<inline:afk-runner-guardrail>")).toBe(false);
+      expect(isOwnExtension("builtin:read")).toBe(false);
+      // And the check still says yes to a real copy of the package.
+      expect(isOwnExtension(join(parent, "dist", "extension.js"))).toBe(true);
+    } finally {
+      process.chdir(previous);
+      await rm(layout, { recursive: true, force: true });
+    }
   });
 });

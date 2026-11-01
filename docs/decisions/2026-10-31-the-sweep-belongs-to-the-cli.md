@@ -48,9 +48,9 @@ issue per `/afk-runner-run`.
 The unit passes `--all`, its `Description` says so, and `TimeoutStartSec` is `infinity`: a sweep has
 no fixed length, so any finite value is a kill in the middle of one. The runner's own one-hour
 deadline still bounds each issue's turn. The unit also sets `--stale-after-ms 7200000` instead of
-the week a hand-run uses: a run is capped at one hour and the host lock excludes a second local
-runner, so a claim older than two hours is dead, and a claim a killed sweep left is taken over a
-tick or two later.
+the week a hand-run uses: a run is capped at one hour, so a claim older than two
+hours is dead, and a claim a killed sweep left is taken over a tick or two
+later.
 
 ## Rationale
 

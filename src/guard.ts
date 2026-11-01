@@ -44,10 +44,23 @@ export const GUARD_PACKAGE = "@gotgenes/pi-permission-system";
  * makes the guard report a configuration issue, and the shell would silently
  * inherit the allow. `path` covers reads and writes alike, and a deny there
  * cannot be undone by a per-tool allow.
+ *
+ * The one denied command is `gh issue create`. The leftovers a run files go
+ * through the runner's own tool, which holds the bounds on the queue — three a
+ * run, and never a second copy of something already open — and a shell command
+ * is a way around those bounds. The reason says what to do instead, so the
+ * agent is not left guessing.
  */
 export const GUARD_POLICY = {
   "*": "allow",
-  bash: { "*": "allow" },
+  bash: {
+    "*": "allow",
+    "gh issue create*": {
+      action: "deny",
+      reason:
+        "File a leftover with the `agent_leftover` tool — it holds the bounds on the queue.",
+    },
+  },
   path: {
     "*.env": "deny",
     "*.env.*": "deny",

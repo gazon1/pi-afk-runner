@@ -1,6 +1,7 @@
 ---
 title: The host lock is a real flock, and the runner is therefore a Linux tool
-status: accepted
+status: superseded
+superseded-by: 2026-11-01-the-lock-is-per-issue
 date: 2026-10-30
 authors: MiniMax Code
 deciders: Singularity Developer

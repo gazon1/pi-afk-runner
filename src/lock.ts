@@ -1,10 +1,16 @@
 /**
  * The host lock.
  *
- * One runner at a time on one machine. The claim on the issue is what excludes
- * a runner **anywhere** — that is the layer that works across hosts — and this
- * is the layer below it: it keeps two runs on one host from fighting over the
- * same worktree root, the same Gradle home and the same record directory.
+ * One runner per issue at a time on one machine, and one sweep at a time. The
+ * claim on the issue is what excludes a runner **anywhere** — that is the layer
+ * that works across hosts — and this is the layer below it: it keeps two runs
+ * on one host from fighting over the same worktree, the same Gradle home and
+ * the same record directory.
+ *
+ * The lock is per issue, so several runners may work different issues on one
+ * host at once. A sweep (`--all`) and a run that picks the queue's first issue
+ * take the one sweep lock; a merge takes its own, so it does not wait for a run
+ * that is working an issue.
  *
  * It is a real `flock`, held by a child process for as long as the run lasts.
  * Two other locks were considered and rejected: a lock *file* that a killed
@@ -16,9 +22,10 @@
  * anything else the lock is **unusable**, and the runner says so rather than
  * quietly running two of itself.
  *
- * The lock cannot outlive the runner: the holder watches its parent and exits
- * when the parent is gone. A lock that a killed runner left behind would keep
- * the next runner out for ever, over a process that no longer exists.
+ * The lock cannot outlive the runner: the holder blocks on its standard input
+ * and exits when stdin closes. If the parent dies, stdin closes and the lock
+ * is released — so a lock left behind by a killed runner does not block the
+ * next one forever.
  */
 
 import { spawn } from "node:child_process";
@@ -28,8 +35,21 @@ import { join } from "node:path";
 /** The exit code `flock` uses when the lock is held and `--conflict-exit-code` says so. */
 const CONFLICT_EXIT_CODE = 75;
 
-/** The name of the lock file inside the lock directory. */
+/** The name of the lock file a sweep — or a queue's first issue — takes. */
 export const LOCK_NAME = "runner.lock";
+
+/** The name of the lock file a merge takes: one merge at a time, beside the work. */
+export const MERGE_LOCK_NAME = "merge.lock";
+
+/** The lock a work run takes: the issue's own when one is named, else the sweep's. */
+export function workLockName(issue: number | undefined): string {
+  return issue === undefined ? LOCK_NAME : `issue-${issue}.lock`;
+}
+
+/** The lock the run takes: merge's own, or the work run's. */
+export function lockNameFor(run: { readonly merge?: boolean; readonly issue?: number }): string {
+  return run.merge === true ? MERGE_LOCK_NAME : workLockName(run.issue);
+}
 
 /** The word the holder prints once the lock is its own. */
 const HELD = "locked";
@@ -37,10 +57,12 @@ const HELD = "locked";
 /**
  * The command the lock holder runs.
  *
- * The holder watches its parent and exits when the parent is gone. A runner
- * that is killed — with a signal, or with a crash — must not leave the lock
- * held by an orphan: the next runner would find the lock taken and refuse to
- * work, for ever, over a process that no longer exists.
+ * The holder echoes that the lock is held and then blocks on `cat`, which
+ * reads from standard input. When the parent dies, stdin closes and `cat`
+ * exits, releasing the lock. A runner that is killed — with a signal, or with a
+ * crash — must not leave the lock held by an orphan: the next runner would
+ * find the lock taken and refuse to work, for ever, over a process that no
+ * longer exists.
  */
 export const HOLDER_COMMAND = `echo ${HELD}; cat`;
 
