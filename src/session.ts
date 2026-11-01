@@ -252,6 +252,22 @@ export interface AgentSession {
   readonly messages?: readonly TurnMessage[];
 }
 
+/**
+ * One event from the session the runner drives, as far as this package reads it.
+ *
+ * It is Pi's own event, narrowed to the parts two callers need: the log
+ * projection, which turns a tool call and an assistant's words into lines, and
+ * the steering bridge, which reads the boundaries a delivery may happen at.
+ */
+export interface SessionEvent {
+  readonly type: string;
+  /** `tool_execution_start`: the tool, and its input. */
+  readonly toolName?: string;
+  readonly args?: unknown;
+  /** `message_end`: the finished message. */
+  readonly message?: { readonly role?: string; readonly content?: unknown };
+}
+
 /** Creates a session bound to a directory. */
 export type SessionFactory = (options: {
   readonly cwd: string;

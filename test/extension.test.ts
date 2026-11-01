@@ -16,14 +16,13 @@ import { isOwnExtension, piSessionFactory } from "../src/cli.js";
 import {
   LOG_KEY,
   STATUS_KEY,
-  boundaryOf,
-  deliverRow,
   liveFrontDoor,
   hostModel,
-  logLine,
-  type SessionEvent,
-  type SteerableSession,
+  report,
 } from "../src/extension.js";
+import { logLine } from "../src/logview.js";
+import type { SessionEvent } from "../src/session.js";
+import { boundaryOf, deliverRow, type SteerableSession } from "../src/steering.js";
 import {
   GUARD_POLICY,
   GUARD_POLICY_PATH,
@@ -320,6 +319,67 @@ describe("the run the front door owns", () => {
         title: "Fix the thing",
         stage: "done",
       });
+    } finally {
+      await rm(checkout, { recursive: true, force: true });
+    }
+  });
+
+  it("starts the next run without the last run's log", async () => {
+    const checkout = await mkdtemp(join(tmpdir(), "afk-live-"));
+    try {
+      const host = fakePi();
+      // A run drives its own session: the second run gets its own, or the first
+      // run's listener would mirror into the second run's log as well.
+      const sessions = [fakeSession(), fakeSession()];
+      let sessionsMade = 0;
+      const first = deferred();
+      const second = deferred();
+      const release = deferred();
+      let runs = 0;
+      const work = async (options: RunOptions): Promise<RunResult> => {
+        runs += 1;
+        options.onIssue?.({ number: 42, title: "Fix the thing" });
+        await options.session({ cwd: checkout, systemPromptSections: {} });
+        if (runs === 1) {
+          first.resolve();
+          await release.promise;
+        } else {
+          second.resolve();
+        }
+        return { issue: 42, outcome: "completed", steps: [], record: "" };
+      };
+
+      const door = liveFrontDoor(host.pi, {
+        session: async () => sessions[sessionsMade++]!.session,
+        work,
+      });
+      const { ctx, widgets } = fakeContext();
+
+      // Each run takes its own lock: the first run's is released as the run
+      // ends, and the second run should not race that release.
+      await door.start(
+        `--repo gazon1/cardinalfish --checkout ${checkout} --lock-dir ${join(checkout, "lock-1")}`,
+        ctx,
+      );
+      await first.promise;
+
+      sessions[0]!.emit({ type: "tool_execution_start", toolName: "read", args: { path: "README.md" } });
+      expect(widgets.get(LOG_KEY)).toEqual(["→ read"]);
+
+      release.resolve();
+      await vi.waitFor(() => {
+        expect(widgets.get(LOG_KEY)).toBeUndefined();
+      });
+
+      await door.start(
+        `--repo gazon1/cardinalfish --checkout ${checkout} --lock-dir ${join(checkout, "lock-2")}`,
+        ctx,
+      );
+      await second.promise;
+
+      // The second run's log holds its own line: the first run's is gone.
+      sessions[1]!.emit({ type: "tool_execution_start", toolName: "write", args: { path: "README.md" } });
+      expect(widgets.get(LOG_KEY)).toEqual(["→ write"]);
     } finally {
       await rm(checkout, { recursive: true, force: true });
     }
@@ -765,6 +825,61 @@ describe("what the door takes from the host session", () => {
     );
     // A session with no model falls back to the runner's own choice.
     expect(hostModel(undefined)).toBeNull();
+  });
+});
+
+describe("what a run's outcome is said", () => {
+  it("says a worked issue, an empty queue and an issue that cannot be worked", () => {
+    expect(
+      report({ issue: 42, outcome: "completed", steps: [], record: "/tmp/record" }, {}),
+    ).toEqual({
+      message: "afk-runner: worked issue 42 — the record is at /tmp/record",
+      kind: "info",
+    });
+
+    expect(report({ issue: null, outcome: "empty", steps: [], record: "" }, {})).toEqual({
+      message: "afk-runner: the queue is empty — there was nothing to work",
+      kind: "info",
+    });
+
+    // An issue that cannot be worked says which state says so, and warns.
+    expect(
+      report(
+        { issue: 42, outcome: "unworkable", steps: [], record: "", derivedState: "Claimed" },
+        {},
+      ),
+    ).toEqual({
+      message: "afk-runner: issue 42 could not be worked — it is held by another runner",
+      kind: "warning",
+    });
+    expect(
+      report(
+        { issue: 42, outcome: "unworkable", steps: [], record: "", derivedState: "Reviewed" },
+        {},
+      ),
+    ).toEqual({
+      message: "afk-runner: issue 42 could not be worked — already reviewed",
+      kind: "warning",
+    });
+    expect(
+      report(
+        { issue: 42, outcome: "unworkable", steps: [], record: "", derivedState: "Counted" },
+        {},
+      ),
+    ).toEqual({
+      message: "afk-runner: issue 42 could not be worked — already counted",
+      kind: "warning",
+    });
+
+    // A state that does not say which one: the human is told what to check, and
+    // the issue the command named is the one it is about.
+    expect(
+      report({ issue: null, outcome: "unworkable", steps: [], record: "" }, { issue: 7 }),
+    ).toEqual({
+      message:
+        "afk-runner: issue 7 could not be worked — check whether it is claimed by another runner, already reviewed, or already counted",
+      kind: "warning",
+    });
   });
 });
 
