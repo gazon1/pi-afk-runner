@@ -4,9 +4,13 @@ import { PROMPT_FILES, readPrompts, runPromptArray, type AgentSession } from "..
 import {
   cutOffError,
   isCutOff,
+  runReviewGate,
   runStates,
+  runWorkSession,
   stateFailure,
+  WORKFLOW_ACTIONS,
   WORKFLOW_STATES,
+  type WorkflowState,
 } from "../src/workflow.js";
 
 /**
@@ -149,10 +153,12 @@ describe("the session's workflow", () => {
     expect(isCutOff(new Error("the run was cut off"))).toBe(false);
   });
 
-  it("maps the prompt files onto the four states", () => {
+  it("maps the prompt files onto the six turn states", () => {
     // The states name the file each of them runs, and the file list is read
     // from them: the two cannot drift apart.
     expect(WORKFLOW_STATES.map((state) => state.promptFile)).toEqual([
+      "00-triage.md",
+      "00-scope.md",
       "01-brief.md",
       "02-implement.md",
       "03-verify.md",
@@ -160,10 +166,17 @@ describe("the session's workflow", () => {
     ]);
     expect(PROMPT_FILES).toEqual(WORKFLOW_STATES.map((state) => state.promptFile));
     expect(WORKFLOW_STATES.map((state) => state.phase)).toEqual([
+      "Triage",
+      "Scope",
       "Brief",
       "Implement",
       "Verify",
       "Next",
+    ]);
+    // The two actions run no prompt: they are the runner's own work.
+    expect(WORKFLOW_ACTIONS.map((action) => action.name)).toEqual([
+      "close-skip",
+      "split",
     ]);
   });
 
@@ -222,5 +235,138 @@ describe("the session's workflow", () => {
     });
 
     await expect(run).rejects.toThrow("two states named brief");
+  });
+});
+
+/** The nodes the work script names, with a text equal to their name. */
+function workNodes(): WorkflowState[] {
+  return [
+    ...WORKFLOW_STATES.map((state) => ({
+      name: state.name,
+      phase: state.phase,
+      text: state.name,
+      counts: true,
+      kind: "turn" as const,
+    })),
+    ...WORKFLOW_ACTIONS.map((action) => ({
+      name: action.name,
+      phase: action.phase,
+      text: "",
+      counts: false,
+      kind: "action" as const,
+      action: action.action,
+    })),
+  ];
+}
+
+describe("the work session's branch", () => {
+  it("closes the issue and stops when the triage says skip", async () => {
+    const ran: string[] = [];
+    const result = await runWorkSession({
+      nodes: workNodes(),
+      run: async (state) => {
+        ran.push(state.name);
+        return { state: "ok", result: state.name === "triage" ? "skip" : "ok" };
+      },
+    });
+
+    // The four work turns never ran: the branch is the engine's own flow.
+    expect(ran).toEqual(["triage", "close-skip"]);
+    expect(result.completed.map((state) => state.name)).toEqual([
+      "triage",
+      "close-skip",
+    ]);
+  });
+
+  it("splits and stops when the scope says split", async () => {
+    const ran: string[] = [];
+    await runWorkSession({
+      nodes: workNodes(),
+      run: async (state) => {
+        ran.push(state.name);
+        return { state: "ok", result: state.name === "scope" ? "split" : "ok" };
+      },
+    });
+
+    expect(ran).toEqual(["triage", "scope", "split"]);
+  });
+
+  it("runs the work turns when the issue fits", async () => {
+    const ran: string[] = [];
+    const result = await runWorkSession({
+      nodes: workNodes(),
+      run: async (state) => {
+        ran.push(state.name);
+        return { state: "ok", result: "ok" };
+      },
+    });
+
+    expect(ran).toEqual([
+      "triage",
+      "scope",
+      "brief",
+      "implement",
+      "verify",
+      "next",
+    ]);
+    expect(result.completed).toHaveLength(6);
+  });
+
+  it("runs the intake before the triage", async () => {
+    const ran: string[] = [];
+    await runWorkSession({
+      nodes: [
+        { name: "issue-body", phase: "Intake", text: "body", counts: false, kind: "turn" },
+        {
+          name: "issue-comments",
+          phase: "Intake",
+          text: "comments",
+          counts: false,
+          kind: "turn",
+        },
+        ...workNodes(),
+      ],
+      run: async (state) => {
+        ran.push(state.name);
+        return { state: "ok", result: "ok" };
+      },
+    });
+
+    expect(ran.slice(0, 2)).toEqual(["issue-body", "issue-comments"]);
+  });
+});
+
+describe("the review loop", () => {
+  it("fixes and reviews again until the verdict passes", async () => {
+    const calls: string[] = [];
+    let reviewed = 0;
+    const result = await runReviewGate({
+      attempts: 4,
+      review: async () => {
+        reviewed += 1;
+        calls.push(`review ${reviewed}`);
+        return reviewed < 2 ? "fail" : "pass";
+      },
+      fix: async () => {
+        calls.push("fix");
+      },
+    });
+
+    // `gate` is the engine's block: the failed verdict's feedback buys a fix,
+    // then the fixed diff is reviewed again.
+    expect(result.passed).toBe(true);
+    expect(result.reviews).toBe(2);
+    expect(calls).toEqual(["review 1", "fix", "review 2"]);
+  });
+
+  it("stops when the attempts run out", async () => {
+    const result = await runReviewGate({
+      attempts: 3,
+      review: async () => "fail",
+      fix: async () => {},
+    });
+
+    expect(result.passed).toBe(false);
+    expect(result.reviews).toBe(3);
   });
 });

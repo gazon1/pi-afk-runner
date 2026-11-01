@@ -19,6 +19,11 @@ The plan is settled. Now do the work.
    this machine has no device. Fix what the gates report. A gate that fails
    is the work not being finished, not an obstacle to work around.
 
+   A small change — a few lines in one module — needs `./check.sh` only. The
+   long evals and the docs audit earn their cost on a change that reaches them,
+   and the runner skips the pre-push hook for a small change for the same
+   reason.
+
 3. **Do not commit or push.** The runner commits whatever is left in the
    worktree on your behalf and pushes under its own branch name, so the push
    stays under its control. A commit you make yourself is not lost, but it is
