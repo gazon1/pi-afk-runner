@@ -1,7 +1,8 @@
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import type {
   ExtensionAPI,
@@ -929,5 +930,36 @@ describe("the guard's policy", () => {
     // dropped — and the tool-call log went with it.
     expect(isOwnExtension("<inline:afk-runner-guardrail>")).toBe(false);
     expect(isOwnExtension("builtin:read")).toBe(false);
+  });
+
+  it("keeps the runner's own inline extension whatever the directory is called", async () => {
+    // The check reads the package name off the working directory's parent, so
+    // it only misfires when that parent happens to be named after the package.
+    // That is the shape of a CI runner's checkout, `<repo>/<repo>`, and the
+    // runner's own inline factory was dropped there — taking the tool-call log
+    // with it.
+    //
+    // The working directory is put in that shape here, so the test fails the
+    // same way on every machine and not only where the checkout is named so.
+    //
+    // The name is the one the check compares against, read the way the check
+    // reads it: the directory the package is installed in.
+    const packageName = basename(dirname(dirname(fileURLToPath(import.meta.url))));
+    const layout = await mkdtemp(join(tmpdir(), "afk-runner-layout-"));
+    const parent = join(layout, packageName);
+    const working = join(parent, "checkout");
+    await mkdir(working, { recursive: true });
+    const previous = process.cwd();
+    try {
+      process.chdir(working);
+      // The inline factory is this package's own — never a second copy of it.
+      expect(isOwnExtension("<inline:afk-runner-guardrail>")).toBe(false);
+      expect(isOwnExtension("builtin:read")).toBe(false);
+      // And the check still says yes to a real copy of the package.
+      expect(isOwnExtension(join(parent, "dist", "extension.js"))).toBe(true);
+    } finally {
+      process.chdir(previous);
+      await rm(layout, { recursive: true, force: true });
+    }
   });
 });
