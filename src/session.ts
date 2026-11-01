@@ -831,8 +831,8 @@ export function createScopeDecisionTool(holder: { value?: ScopeDecision }) {
  *
  * The pieces are chained: each subtask's brief carries `**Depends on:** #N` for
  * the one before it, and the runner's own queue check refuses to start a piece
- * until its parent is closed. The original is closed because it is no longer
- * one piece of work — the queue takes the pieces instead.
+ * until its parent's pull request is merged. The original is closed because it
+ * is no longer one piece of work — the queue takes the pieces instead.
  */
 export async function splitIssue(options: {
   readonly repo: string;

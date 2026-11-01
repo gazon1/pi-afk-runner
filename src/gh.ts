@@ -184,6 +184,36 @@ export function pullRequestArgs(repo: string, branch: string): string[] {
   ];
 }
 
+/**
+ * The arguments that read the merged pull request of a branch.
+ *
+ * The question is whether the work **landed**, and a merged pull request is
+ * the answer. The state filter asks the server for it, so a branch that never
+ * had a pull request, or whose pull request was closed unmerged, answers with
+ * an empty list and an exit code of 0 — the same shape as "no pull request".
+ *
+ * The branch is the runner's own work branch, `agent/issue-<N>` (see
+ * `workBranch`). The pull request keeps its head branch after the branch is
+ * deleted, so a merged pull request is still found after the merge mode
+ * deleted the branch.
+ */
+export function mergedPullRequestArgs(repo: string, branch: string): string[] {
+  return [
+    "pr",
+    "list",
+    "--repo",
+    repo,
+    "--head",
+    branch,
+    "--state",
+    "merged",
+    "--limit",
+    "1",
+    "--json",
+    "number",
+  ];
+}
+
 /** Runs `gh` and returns its standard output. */
 export type GhRunner = (args: readonly string[]) => Promise<string>;
 
@@ -460,6 +490,25 @@ export async function readPullRequest(
     return null;
   }
   return parsePullRequest(JSON.stringify(parsed[0]));
+}
+
+/**
+ * The merged pull request of a branch, or null when the work has not landed.
+ *
+ * A read that cannot be parsed is not a landing: the caller decides what an
+ * unknown answer means, and this one raises.
+ */
+export async function readMergedPullRequest(
+  repo: string,
+  branch: string,
+  gh: GhRunner = runGh,
+): Promise<number | null> {
+  const parsed: unknown = JSON.parse(await gh(mergedPullRequestArgs(repo, branch)));
+  if (!Array.isArray(parsed) || parsed.length === 0) {
+    return null;
+  }
+  const first = parsed[0] as Record<string, unknown> | null;
+  return typeof first?.number === "number" ? first.number : null;
 }
 
 /** An open pull request, as far as the merge pipeline cares. */

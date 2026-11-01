@@ -73,6 +73,7 @@ import {
   readAllOpenPullRequests,
   readClaimed,
   readIssue,
+  readMergedPullRequest,
   readPullRequest,
   readQueue,
   reviewCommentBody,
@@ -1408,9 +1409,8 @@ export function unworkableReason(derivedState: DerivedState | undefined): string
  * Why an issue is waiting for its parent, in the words the front doors say.
  *
  * A dependency is the issue's own text — `**Depends on:** #N` — and it is
- * satisfied by the parent being closed. "Not merged" and "not closed" are the
- * same observable here: the runner cannot see a merge that did not close the
- * issue, and a human who closed the parent has said the work is done.
+ * satisfied by the parent's work landing: its pull request is merged. A parent
+ * that was closed without a merge is not merged yet, and the child waits.
  */
 export function blockedReason(
   blockedBy: readonly number[] | undefined,
@@ -1742,13 +1742,18 @@ export async function runOnce(options: RunOptions): Promise<RunResult> {
 }
 
 /**
- * The parent issues an issue waits for, of which at least one is still open.
+ * The parent issues an issue waits for, of which at least one has not landed.
  *
  * An issue's dependency is written in its own text, as `**Depends on:** #N`,
- * and it is settled when the parent is closed. The read is best-effort: an
- * issue whose text cannot be read, or a parent that cannot be read, does not
- * block the issue — guessing wrong in that direction would hold an issue out
- * of the queue for ever, which is the failure this check exists to avoid.
+ * and it is settled when the parent's work has **landed** — its pull request
+ * is merged. Nothing else settles it: not a parent that was closed as
+ * won't-fix, not a parent whose pull request is open or closed unmerged, and
+ * not a parent whose pull request could not be read. The rule is recorded in
+ * `docs/decisions/2026-11-03-a-dependency-is-settled-by-a-merge.md`.
+ *
+ * The child's own text is read best-effort: an issue whose text cannot be
+ * read has no dependency the runner can see, and the run cannot go on without
+ * the brief either — it stops there, where the brief is read.
  */
 export async function openDependencies(
   options: { readonly repo: string; readonly gh: GhRunner },
@@ -1766,16 +1771,33 @@ export async function openDependencies(
     if (dependency === issue.number) {
       continue;
     }
-    try {
-      const parent = await readIssue(options.repo, dependency, options.gh);
-      if (parent.state === "OPEN") {
-        open.push(dependency);
-      }
-    } catch {
-      // A parent that cannot be read is not treated as open.
+    if (!(await hasLanded(options.repo, dependency, options.gh))) {
+      open.push(dependency);
     }
   }
   return open;
+}
+
+/**
+ * Whether the parent's work has landed — its pull request is merged.
+ *
+ * The observable is the runner's own work branch, `agent/issue-<N>`: a parent
+ * whose work landed on another branch keeps the child waiting.
+ *
+ * A read that fails is not a landing: the parent keeps the child waiting, and
+ * the next run reads it again. The queue is read once per run, so a read that
+ * fails holds an issue out for one run, not for ever.
+ */
+async function hasLanded(
+  repo: string,
+  parent: number,
+  gh: GhRunner,
+): Promise<boolean> {
+  try {
+    return (await readMergedPullRequest(repo, workBranch(parent), gh)) !== null;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -1881,9 +1903,9 @@ async function chooseIssue(
       staleAfterMs: options.staleAfterMs,
     });
     const plan = planFor(observation);
-    // An issue that has not been started waits for its parents; one that is
-    // already pushed, opened or reviewed is past the waiting, whatever its
-    // text says.
+    // An issue that has not been started waits for its parents' work to land;
+    // one that is already pushed, opened or reviewed is past the waiting,
+    // whatever its text says.
     if (plan.kind === "work") {
       const blockedBy = await openDependencies(
         { repo: options.repo, gh: options.gh },
@@ -1926,9 +1948,9 @@ async function chooseIssue(
   } catch (failure) {
     throw selectFailed(failure);
   }
-  // The queue is worked in order, and an issue whose parent is still open is
-  // passed over — not worked, and not removed: it is the next run's turn once
-  // the parent closes.
+  // The queue is worked in order, and an issue whose parent's work has not
+  // landed is passed over — not worked, and not removed: it is the next run's
+  // turn once the parent's pull request is merged.
   for (const candidate of queue) {
     if (candidate.labels.includes(CLAIM_LABEL)) {
       continue;
