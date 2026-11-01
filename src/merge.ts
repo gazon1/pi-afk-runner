@@ -16,7 +16,8 @@
  * `build/diagnostics/merge/pr-<N>/`, beside the work runs' own records.
  */
 
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { mkdir, rm } from "node:fs/promises";
 
 import { budgetShares } from "./budget.js";
 import { errorMessage } from "./cli.js";
@@ -28,7 +29,7 @@ import {
   type GhRunner,
   type OpenPullRequest,
 } from "./gh.js";
-import { GATE_OUTPUT_LIMIT_BYTES, GATE_TIMEOUT_MS } from "./gates.js";
+import { GATE_OUTPUT_LIMIT_BYTES, GATE_TIMEOUT_MS, gateFailure, gateInvocation } from "./gates.js";
 import {
   CommandFailed,
   fetchCommit,
@@ -370,7 +371,19 @@ async function mergeOne(
         if (!state.changed) {
           return "not needed — CI judged this commit";
         }
-        return await verifyGate(options, worktreePath, remainingMs);
+        return await verifyGate(
+          options,
+          worktreePath,
+          join(
+            options.checkout,
+            "build",
+            "diagnostics",
+            "merge",
+            `pr-${candidate.number}`,
+            `${runId}-gates.log`,
+          ),
+          remainingMs,
+        );
       },
     },
     {
@@ -497,37 +510,40 @@ async function mergeOne(
 async function verifyGate(
   options: MergeOptions,
   worktreePath: string,
+  outputFile: string,
   remainingMs: () => number,
 ): Promise<string> {
   const startedAt = Date.now();
   const budgetMs = budgetShares(remainingMs()).gatesMs;
   const left = (): number => Math.max(0, budgetMs - (Date.now() - startedAt));
+  const invocation = gateInvocation(GATE_SCRIPT);
   const run = async (): Promise<void> => {
     const remaining = left();
     if (remaining <= 0) {
       throw new Error("the run's deadline left no budget for the gate");
     }
+    await mkdir(dirname(outputFile), { recursive: true }).catch(() => {});
     await options.run({
-      command: "bash",
-      args: [GATE_SCRIPT],
+      command: invocation.command,
+      args: [...invocation.args],
       cwd: worktreePath,
-      // The gate's own budget, and no more than the run has left: a timeout the
-      // gate never chose is not a verdict.
       timeoutMs: Math.min(options.gateTimeoutMs ?? GATE_TIMEOUT_MS, remaining),
-      // The tail of the output is the evidence; the rest is noise neither the
-      // runner nor the record has to hold.
       maxOutputBytes: GATE_OUTPUT_LIMIT_BYTES,
-      // The build the gate starts dies with the gate: a build that keeps
-      // going writes into the worktree the merge pushes.
       killGroup: true,
+      outputFile,
+    }).catch(async (failure) => {
+      const failed = await gateFailure(GATE_SCRIPT, invocation, failure, outputFile);
+      if (failed.outputFile === undefined) {
+        await rm(outputFile, { force: true }).catch(() => {});
+      }
+      throw failed;
     });
   };
   try {
     await run();
+    await rm(outputFile, { force: true }).catch(() => {});
     return "passed";
   } catch (failure) {
-    // A gate the run's own clock killed is not a failure for the agent to fix:
-    // there is nothing left to spend on the fix either.
     if (left() <= 0) {
       throw failure;
     }
@@ -536,8 +552,29 @@ async function verifyGate(
       worktreePath,
       budgetShares(remainingMs()).sessionMs,
     );
-    await run();
-    return "passed after the agent's fix";
+    const remaining = left();
+    if (remaining <= 0) {
+      throw new Error("the run's deadline left no budget for the gate");
+    }
+    try {
+      await options.run({
+        command: invocation.command,
+        args: [...invocation.args],
+        cwd: worktreePath,
+        timeoutMs: Math.min(options.gateTimeoutMs ?? GATE_TIMEOUT_MS, remaining),
+        maxOutputBytes: GATE_OUTPUT_LIMIT_BYTES,
+        killGroup: true,
+        outputFile,
+      });
+      await rm(outputFile, { force: true }).catch(() => {});
+      return "passed after the agent's fix";
+    } catch (failure2) {
+      const failed = await gateFailure(GATE_SCRIPT, invocation, failure2, outputFile);
+      if (failed.outputFile === undefined) {
+        await rm(outputFile, { force: true }).catch(() => {});
+      }
+      throw failed;
+    }
   }
 }
 
