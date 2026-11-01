@@ -15,6 +15,7 @@ for the rule that the copies follow.
 
 | Decision | What it settles |
 |---|---|
+| `2026-11-03-the-reviewers-tree-is-put-back.md` | the tree the reviewer judged is the tree that is pushed, and a fix that changed nothing is named |
 | `2026-11-01-the-self-review-runs-the-gates-again.md` | the self-review runs the gates again, and the agent's work is pushed only when they are green — **superseded** by the runner running the gates itself |
 | `2026-10-30-the-host-lock-is-a-real-flock.md` | the host lock, and why the runner is a Linux tool |
 | `2026-11-01-the-lock-is-per-issue.md` | the lock's unit: one per issue, one for the sweep, one for merge |

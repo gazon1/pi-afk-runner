@@ -203,6 +203,37 @@ return result
 `;
 
 /**
+ * A fix that changed nothing.
+ *
+ * The review's findings were not addressed: the tree after the fix is the tree
+ * before it. It is a failure of its own, because the loop would otherwise
+ * review the same diff again — and a review that judges the same diff twice
+ * says nothing the first one did not.
+ */
+export class EmptyFix extends Error {
+  constructor(
+    message = "the fix changed nothing: the review's findings were not addressed",
+  ) {
+    super(message);
+    this.name = "EmptyFix";
+  }
+}
+
+/**
+ * The error an empty fix is reported as.
+ *
+ * Unrecoverable, so the engine stops the run on it: a recoverable failure is
+ * retried, and the retry would fix nothing and review the same diff again.
+ */
+export function emptyFixError(error: EmptyFix): WorkflowError {
+  return new WorkflowError(
+    error.message,
+    WorkflowErrorCode.AGENT_EXECUTION_ERROR,
+    { recoverable: false, details: error },
+  );
+}
+
+/**
  * The error that says the run was cut off.
  *
  * It is the engine's own abort error, so the engine stops the run on it
@@ -416,6 +447,13 @@ export async function runReviewGate(options: {
         try {
           await options.fix(prompt === "" ? undefined : prompt);
         } catch (error) {
+          if (error instanceof EmptyFix) {
+            // A fix that changed nothing is not a failure the engine may
+            // swallow: it would carry on to the next review, and that review
+            // would judge the same diff again — and say what the last one
+            // said.
+            throw emptyFixError(error);
+          }
           if (error instanceof GateFailed) {
             // A gate that refused the fix is not a failure the engine may
             // swallow: it would carry on to the next review, and the review
