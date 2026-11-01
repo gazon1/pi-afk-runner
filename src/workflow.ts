@@ -409,6 +409,15 @@ export interface ReviewGateResult {
   readonly reviews: number;
   /** Whether the loop stopped because a fix changed nothing. */
   readonly noChange: boolean;
+  /**
+   * The cut-off that stopped the loop, when one did.
+   *
+   * It is the message the run's record carries: what was cut off, and what
+   * cut it off. A review that was cut off stated no verdict and a fix that
+   * was cut off wrote nothing — there is nothing to fix and nothing to review
+   * again, so the loop ends where it is.
+   */
+  readonly cutOff: string | null;
 }
 
 /**
@@ -422,6 +431,13 @@ export interface ReviewGateResult {
  * A `fix` that raises {@link FixChangedNothing} stops the loop: there is
  * nothing to push and nothing to review again, and the loop comes back with
  * `noChange` set.
+ *
+ * A review that was cut off stops the loop too. The cut-off is the engine's
+ * own abort error — an unknown failure is **recoverable**, and a recoverable
+ * failure is swallowed: the engine logs it, returns nothing, and the loop
+ * carries on to the next attempt. A review that was cut off stated no
+ * verdict, so there is nothing to fix and nothing to review again, and the
+ * loop comes back with `cutOff` set.
  */
 export async function runReviewGate(options: {
   readonly attempts: number;
@@ -434,6 +450,11 @@ export async function runReviewGate(options: {
       const label = agentOptions?.label ?? "";
       if (label === "review") {
         reviews += 1;
+        // A review that was cut off raises the engine's own abort error: the
+        // engine stops the run on it and the loop ends where it is. A plain
+        // failure would be swallowed — an unknown failure is recoverable —
+        // and the loop would buy another fix turn and another review of the
+        // same diff.
         return await options.review();
       }
       if (label === "fix") {
@@ -474,12 +495,30 @@ export async function runReviewGate(options: {
       agentRetries: 0,
       persistLogs: false,
     });
-    return { passed: run.result?.ok === true, reviews, noChange: false };
+    return {
+      passed: run.result?.ok === true,
+      reviews,
+      noChange: false,
+      cutOff: null,
+    };
   } catch (error) {
     // The fix that changed nothing stops the loop, and the loop's verdict is
     // a failure: the review did not pass, and the fix did not answer it.
     if (error instanceof FixChangedNothing) {
-      return { passed: false, reviews, noChange: true };
+      return { passed: false, reviews, noChange: true, cutOff: null };
+    }
+    // The run was cut off — the review's session or the fix's. The engine
+    // stopped on it: it is the engine's own abort error, and an unknown
+    // failure would have been swallowed and the loop would have carried on.
+    // There is no verdict to answer, so the loop ends where it is and the
+    // reason comes back with it.
+    if (isCutOff(error)) {
+      return {
+        passed: false,
+        reviews,
+        noChange: false,
+        cutOff: error instanceof Error ? error.message : String(error),
+      };
     }
     throw error;
   }

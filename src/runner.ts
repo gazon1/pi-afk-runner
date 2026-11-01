@@ -652,7 +652,12 @@ export async function reviewPullRequest(options: {
   if (result.aborted) {
     // The same cut the work session reports; a review that did not finish is
     // not a review that stated no verdict.
-    throw new Error(
+    //
+    // The cut is the engine's own abort error, not a plain failure: the
+    // engine treats an unknown failure as recoverable and carries on to the
+    // next state, and a review that was cut off would then be reviewed again
+    // — the same diff, a second verdict, for a review that never happened.
+    throw cutOffError(
       cutOffMessage({
         what: "the review's session",
         deadlineMs: options.deadlineMs,
@@ -2484,6 +2489,15 @@ async function runPlan(
 
         if (outcome.passed) {
           return `${state.reviewCount} review(s) — pass`;
+        }
+
+        // The run was cut off — the review's session, or the fix's. There is
+        // no verdict to answer: nothing to fix, and nothing to review again.
+        // The run says what was cut off and what cut it off, and it does not
+        // say the review failed: a review that was cut off is not a review
+        // that said `fail`.
+        if (outcome.cutOff !== null) {
+          throw new Error(outcome.cutOff);
         }
 
         // The review never passed. The finding goes on the issue — where the

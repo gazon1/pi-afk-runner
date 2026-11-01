@@ -41,6 +41,7 @@ for the rule that the copies follow.
 | `2026-11-01-the-queue-is-read-in-one-call.md` | the cost of a run: the queue and the branches are read once, and every `gh` call is bounded |
 | `2026-11-01-the-work-is-a-conditional-graph.md` | triage, scope and split as a branch; `gate` for the review loop; dependencies; the small-change skip |
 | `2026-11-01-a-fix-that-changes-nothing-stops-the-loop.md` | a fix that leaves the head where it was stops the review loop, and the run says why |
+| `2026-11-01-a-review-that-is-cut-off-stops-the-loop.md` | a review that was cut off stops the review loop, and the run says what cut it off |
 | `2026-11-01-the-work-is-a-conditional-graph.md` | triage, scope and split as a branch; `gate` for the review loop; dependencies; the small-change skip — **the dependency rule replaced** by `2026-11-03-a-dependency-is-settled-by-a-merge.md` |
 | `2026-11-03-a-dependency-is-settled-by-a-merge.md` | what settles a dependency: the parent's pull request is merged, and nothing else |
 | `2026-11-01-the-triage-judges-the-base-not-the-branch.md` | what "already done" is asked of, when the worktree is the issue's own branch |

@@ -3438,6 +3438,95 @@ describe("the CLI's run", () => {
     }
   });
 
+  it("test_a_review_that_is_cut_off_does_not_review_the_same_diff_again", async () => {
+    // The review's session was cut off before it stated a verdict. There is
+    // no verdict to answer the finding, so there is nothing to fix and nothing
+    // to review again: the loop stops where it is.
+    const fixture = await fixtureWithSetupScript();
+    try {
+      const { gh, calls } = stubGh([{ number: 42, title: "an issue" }]);
+      let reviews = 0;
+      // The run is stopped while the review is answering: the review's session
+      // is cut off before it states a verdict.
+      let stopped = false;
+      const failure = await runOnce({
+        ...runOptions(fixture, gh),
+        stopped: () => stopped,
+        session: async ({ cwd, tools }) => {
+          if (isReviewer(tools)) {
+            reviews += 1;
+            return {
+              async prompt() {
+                // The stop arrives before the verdict.
+                stopped = true;
+              },
+              async abort() {},
+              dispose: () => {},
+            };
+          }
+          // The implementer: it writes the work.
+          return {
+            async prompt() {
+              await writeFile(join(cwd, "work.txt"), "the work\n", "utf8");
+            },
+            async abort() {},
+            dispose: () => {},
+          };
+        },
+      }).then(
+        () => null,
+        (error: unknown) => error,
+      );
+
+      expect(failure).toBeInstanceOf(RunFailed);
+      expect((failure as RunFailed).step).toBe("review");
+      // The run says the review was cut off, and what cut it off.
+      expect((failure as RunFailed).message).toContain(
+        "the review's session was cut off",
+      );
+
+      // The same diff was not reviewed again.
+      expect(reviews).toBe(1);
+
+      // And the review is not reported as a review that failed: nothing on the
+      // issue says the review did not pass.
+      const comments = calls.filter((call) => call.startsWith("gh issue comment"));
+      expect(comments.some((call) => call.includes("did not pass"))).toBe(false);
+
+      // The record names the cut-off, next to the steps that finished.
+      const record = await readFile(
+        join(
+          fixture.repo,
+          "build",
+          "diagnostics",
+          "issue-42",
+          "2026-10-30T09-00-00-000Z-abcdef12.md",
+        ),
+        "utf8",
+      );
+      expect(record).toContain("the review's session was cut off");
+
+      // The work the run left stays on the branch, and the next run
+      // continues it.
+      const pushed = (
+        await gitOutput(["ls-remote", fixture.remote, workBranch(42)], {
+          cwd: fixture.repo,
+          env: fixture.env,
+        })
+      ).trim();
+      const sha = pushed.split(/\s+/)[0] ?? "";
+      const files = (
+        await gitOutput(["ls-tree", "-r", "--name-only", sha], {
+          cwd: fixture.repo,
+          env: fixture.env,
+        })
+      ).split("\n");
+      expect(files).toContain("work.txt");
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
   it("test_the_gates_keep_their_own_share_of_the_runs_budget", () => {
     // The gates keep what the merge door gives the same gate — an hour each,
     // because the gate has the same work to do there — and the session and
