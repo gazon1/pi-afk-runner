@@ -51,7 +51,9 @@ The copy's pipeline is `select → claim → worktree → session → push → p
 re-count`. The runner's has one step more: a **`gates`** step between the session and the push, in
 which the runner runs the target's own gates — the three the copy's "The gates the agent runs"
 section names — in the worktree, on the tree the agent left. A gate that does not pass ends the
-run there: the claim is released, nothing is pushed, and the record says which gate failed.
+run there: the claim is released, nothing is pushed, and the record says which gate failed. The
+gate's whole output goes to a log beside the record, and the record names it: the record is a
+document a person reads, and the whole build log is kept without being read.
 
 The copy is **not** edited to match. It is the target's document, and the target owns it: the
 pipeline it describes is the target's, and a runner that rewrote the copy to agree with itself

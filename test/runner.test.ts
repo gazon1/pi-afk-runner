@@ -106,6 +106,8 @@ import {
   openPullRequest,
   parseCiVerdict,
   readCiVerdict,
+  recordDirectory,
+  RECORD_OUTPUT_LIMIT_BYTES,
   releaseRun,
   reviewPullRequest,
   runOnce,
@@ -121,7 +123,7 @@ import {
   type RunOptions,
   type Step,
 } from "../src/runner.js";
-import { GATE_TIMEOUT_MS } from "../src/gates.js";
+import { GATE_OUTPUT_LIMIT_BYTES, GATE_TIMEOUT_MS } from "../src/gates.js";
 import { HOLDER_COMMAND, takeLock, workLockName } from "../src/lock.js";
 import {
   EXIT_LOCKED,
@@ -2395,6 +2397,14 @@ describe("the failure path and the record", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it("test_the_record_quotes_at_least_as_much_as_it_says_it_quotes", () => {
+    // The record says "only its last 16 KiB are quoted here". That is true
+    // only while the runner keeps at least that much in memory: the record
+    // quotes the tail of what the runner kept, and a smaller tail would make
+    // the record's own words wrong.
+    expect(GATE_OUTPUT_LIMIT_BYTES).toBeGreaterThanOrEqual(RECORD_OUTPUT_LIMIT_BYTES);
+  });
 });
 
 /**
@@ -2900,6 +2910,89 @@ describe("the CLI's run", () => {
       expect(record).toContain("gates — failed");
       expect(record).toContain("./check.sh");
       expect(record).toContain("detekt found a problem");
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("test_the_record_quotes_the_tail_of_a_gate_s_output_and_names_the_file_that_holds_it", async () => {
+    // A record is a document a person reads: it says which gate failed, it
+    // quotes the end of what the gate printed, and it says where the whole of
+    // the output is.
+    const fixture = await fixtureWithSetupScript();
+    try {
+      const { gh } = stubGh([{ number: 42, title: "an issue" }]);
+      const run: CommandRunner = async (spec) => {
+        if (spec.command === "bash" && spec.args[0] === "./check.sh") {
+          // A gate that prints a whole build log and fails.
+          await writeFile(
+            join(spec.cwd, "check.sh"),
+            "#!/bin/sh\nfor i in $(seq 1 20000); do echo \"line $i\"; done\nexit 1\n",
+            "utf8",
+          );
+          return runCommand(spec);
+        }
+        return JSON.stringify({ verdict: "ci.yml  run 1  success" });
+      };
+
+      const failure = await runOnce({ ...runOptions(fixture, gh), run }).then(
+        () => null,
+        (error: unknown) => error,
+      );
+
+      expect(failure).toBeInstanceOf(RunFailed);
+      const record = await readFile((failure as RunFailed).record, "utf8");
+
+      // Which gate failed, and why.
+      expect(record).toContain("gates — failed");
+      expect(record).toContain("./check.sh");
+      expect(record).toContain("exit 1");
+
+      // The end of what it printed, and not the whole of it.
+      expect(record).toContain("line 20000");
+      expect(record).not.toContain("line 1\n");
+
+      // And where the whole of it is: a file the record names, in the
+      // record's own directory, so that it outlives the worktree the run
+      // removes.
+      const named = /the whole output is at (.+?)(?: — |$)/m.exec(record)?.[1];
+      expect(named).toBeTruthy();
+      expect(named?.startsWith(recordDirectory(fixture.repo, 42))).toBe(true);
+      expect(existsSync(named ?? "")).toBe(true);
+      const whole = await readFile(named ?? "", "utf8");
+      expect(whole).toContain("line 1\n");
+      expect(whole).toContain("line 20000\n");
+
+      // And the record says that what it quotes is a tail.
+      expect(record).toContain("only its last 16 KiB are quoted here");
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("test_a_gate_that_printed_nothing_is_still_recorded_as_a_failure_that_named_the_gate", async () => {
+    // A gate that says nothing has still refused the change, and the record
+    // has to say which gate it was.
+    const fixture = await fixtureWithSetupScript();
+    try {
+      const { gh } = stubGh([{ number: 42, title: "an issue" }]);
+      const run: CommandRunner = async (spec) => {
+        if (spec.command === "bash" && spec.args[0] === "./check.sh") {
+          throw new CommandFailed(1, "bash", [...spec.args], "", "");
+        }
+        return JSON.stringify({ verdict: "ci.yml  run 1  success" });
+      };
+
+      const failure = await runOnce({ ...runOptions(fixture, gh), run }).then(
+        () => null,
+        (error: unknown) => error,
+      );
+
+      expect(failure).toBeInstanceOf(RunFailed);
+      const record = await readFile((failure as RunFailed).record, "utf8");
+      expect(record).toContain("gates — failed");
+      expect(record).toContain("./check.sh");
+      expect(record).toContain("exit 1");
     } finally {
       await fixture.dispose();
     }
