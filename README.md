@@ -135,6 +135,17 @@ A model has to resolve, too: `--model <provider/id>` names one; without it the C
 model of the first provider with a credential, and the live chat uses the model of the session it
 was started in.
 
+### The gates the agent runs
+
+The agent runs the target repository's own gates — `./check.sh`, `just tcheck-evals` and
+`just docs-audit` — and it runs them **again** in the self-review turn, after the fixes that turn
+made. A fix the gates have not seen is not a fix.
+
+The agent reports the gates with a tool, and the report carries **the tree it was made against**.
+The runner reads the report before the push, and a run stops at the session step when the agent
+reported no gates, when a gate failed, when one of the three was not reported, or when the tree
+changed after the report. The work that reaches the remote is the work the gates saw.
+
 ### From Pi — the live chat
 
 ```bash

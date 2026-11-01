@@ -32,6 +32,7 @@ import { join } from "node:path";
 import { claimIssue, reclaimClaim, releaseClaim } from "./claim.js";
 import { errorMessage } from "./cli.js";
 import { GUARD_POLICY } from "./guard.js";
+import { assertGatesGreen, createGatesTool, type GateReport } from "./gates.js";
 import {
   UNTRUSTED_INPUT_RULE,
   UNTRUSTED_INPUT_SECTION,
@@ -1426,6 +1427,10 @@ async function runPlan(
       name: "session",
       run: async () => {
         workSessionStartedAt = Date.now();
+        // The report the agent ends its last turn with. The gates it names are
+        // the ones the target repository runs, and the tree it names is the
+        // tree they were run against.
+        const gates: { value?: GateReport } = {};
         const result = await startAgent({
           factory: options.session,
           cwd: state.worktreePath,
@@ -1434,6 +1439,9 @@ async function runPlan(
           ...(plan.issueDetail === undefined ? {} : { issue: plan.issueDetail }),
           gh: options.gh,
           deadlineMs: options.deadlineMs,
+          tools: [
+            createGatesTool({ git: options.git, cwd: state.worktreePath, holder: gates }),
+          ],
           ...(options.stopped === undefined ? {} : { stopped: options.stopped }),
         });
         const workElapsedMs = workSessionStartedAt === undefined ? 0 : Date.now() - workSessionStartedAt;
@@ -1454,6 +1462,14 @@ async function runPlan(
         if (count === "0") {
           throw new Error("the agent made no commits — no changes to push or open a pull request");
         }
+        // The work is committed, and the gates are read: a fix the self-review
+        // made after the gates ran is not a fix the gates have seen. The run
+        // stops here, before the push, rather than in the target's CI.
+        await assertGatesGreen({
+          git: options.git,
+          cwd: state.worktreePath,
+          report: gates.value,
+        });
         return `${result.completed} turns`;
       },
     });

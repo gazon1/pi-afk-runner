@@ -378,6 +378,8 @@ export async function runPromptArray(options: {
 export async function startAgent(options: {
   readonly factory: SessionFactory;
   readonly cwd: string;
+  /** The tools the session is given — the gates tool, for the work. */
+  readonly tools?: readonly ToolDefinition[];
   /** The repository the issue lives in. */
   readonly repo: string;
   /** The issue being worked. */
@@ -409,6 +411,7 @@ export async function startAgent(options: {
   }
   const session = await options.factory({
     cwd: options.cwd,
+    ...(options.tools === undefined ? {} : { tools: options.tools }),
     systemPromptSections: {
       ...(options.systemPromptSections ?? {
         [UNTRUSTED_INPUT_SECTION]: UNTRUSTED_INPUT_RULE,

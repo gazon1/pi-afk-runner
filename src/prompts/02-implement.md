@@ -19,6 +19,10 @@ The plan is settled. Now do the work.
    this machine has no device. Fix what the gates report. A gate that fails
    is the work not being finished, not an obstacle to work around.
 
+   This run is a checkpoint, not the last word. The next turn looks at the
+   change again with fresh eyes, fixes what it finds, and runs the gates again
+   — so a tree you leave red is a tree the run stops on.
+
 3. **Do not commit or push.** The runner commits whatever is left in the
    worktree on your behalf and pushes under its own branch name, so the push
    stays under its control. A commit you make yourself is not lost, but it is
