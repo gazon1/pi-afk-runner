@@ -376,6 +376,8 @@ const defaultScheduler: Scheduler = (action, delayMs) => {
 export interface PromptArrayResult {
   /** How many prompts were sent. */
   readonly completed: number;
+  /** How many prompts the run had to send. */
+  readonly total: number;
   /** Whether the deadline cut the run short. */
   readonly aborted: boolean;
   /**
@@ -403,16 +405,31 @@ export function cutOffMessage(options: {
   readonly deadlineMs: number;
   /** Why it was cut off. */
   readonly reason: "deadline" | "stopped" | null;
+  /**
+   * How many of the session's turns were done, and how many it had.
+   *
+   * A session of one turn says nothing: "before the last turn" is the whole of
+   * what there is to say about it, and "0 of 1" is noise in the record.
+   */
+  readonly progress?: { readonly completed: number; readonly total: number };
 }): string {
+  const turns =
+    options.progress !== undefined && options.progress.total > 1
+      ? options.progress
+      : null;
   if (options.reason === "deadline") {
     const minutes = options.deadlineMs / 60_000;
     const budget =
       minutes >= 1
         ? `${Math.ceil(minutes)}-minute`
         : `${Math.max(1, Math.round(options.deadlineMs / 1000))}-second`;
-    return `${options.what} hit its ${budget} deadline`;
+    const after =
+      turns === null ? "" : ` after ${turns.completed} of ${turns.total} turns`;
+    return `${options.what} hit its ${budget} deadline${after}`;
   }
-  return `${options.what} was cut off before its last turn`;
+  const note =
+    turns === null ? "" : ` (${turns.completed} of ${turns.total} turns done)`;
+  return `${options.what} was cut off before its last turn${note}`;
 }
 
 /**
@@ -613,6 +630,9 @@ export async function runPromptArray(options: {
         : { issueComments: options.issueComments }),
     });
   const branched = options.nodes !== undefined;
+  // The turns the run had to take. The intake turns and the actions are not
+  // counted, exactly as `completed` does not count them.
+  const total = nodes.filter((node) => node.counts).length;
 
   // The deadline is a promise the run **races**, not a signal the run hopes
   // for. An abort that fails would otherwise leave the run waiting on a turn
@@ -685,7 +705,7 @@ export async function runPromptArray(options: {
       ? await runWorkSession({ nodes, run })
       : await runStates({ states: nodes, run });
     const completed = result.completed.filter((state) => state.counts).length;
-    return { completed, aborted: aborted || result.aborted, cutReason, abortError };
+    return { completed, total, aborted: aborted || result.aborted, cutReason, abortError };
   } catch (error) {
     // The engine wraps a failed turn and says which state it failed in. The
     // failure underneath it is the cause; the caller reads the message.

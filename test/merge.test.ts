@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
+import { GATE_TIMEOUT_MS } from "../src/gates.js";
 import {
   RECOUNT_LABEL,
   REVIEW_MARKER,
@@ -455,6 +456,7 @@ describe("the merge pipeline", () => {
       await moveMain(fixture, "the base moved\n");
 
       let gateCalls = 0;
+      const gateTimeouts: (number | undefined)[] = [];
       const flakyGate: CommandRunner = async (spec) => {
         if (spec.command === "python3") {
           return JSON.stringify({
@@ -465,6 +467,7 @@ describe("the merge pipeline", () => {
         }
         if (spec.args[0] === "./check.sh") {
           gateCalls += 1;
+          gateTimeouts.push(spec.timeoutMs);
           if (gateCalls === 1) {
             throw new Error("the gate is red");
           }
@@ -482,6 +485,12 @@ describe("the merge pipeline", () => {
 
       expect(result.merged).toEqual([]);
       expect(gateCalls).toBe(2);
+      // The gate takes its own hour or what the run has left, whichever is
+      // smaller: at this run's ceiling that is the share, not the hour. Without
+      // the clip a merge could sit in `./check.sh` past the sweep's clock.
+      expect(gateTimeouts).toHaveLength(2);
+      expect(gateTimeouts[0]).toBeGreaterThan(0);
+      expect(gateTimeouts[0]).toBeLessThan(GATE_TIMEOUT_MS);
 
       // The fix was committed after merge-sync recorded the head, and it is on
       // the branch that was pushed — not dropped with the worktree.
@@ -587,6 +596,98 @@ describe("the merge pipeline", () => {
       const landed = await mergeReviewedPullRequests(options(fixture, next.gh));
       expect(landed.merged).toEqual([7]);
       expect(next.merged).toEqual([7]);
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("test_the_record_says_the_deadline_cut_the_merge_session", async () => {
+    const fixture = await createFixtureRepository({
+      files: { "scripts/setup-worktree.sh": SETUP, "shared.txt": "the base\n" },
+    });
+    try {
+      // A conflict, and a merge agent whose turn never settles: the deadline is
+      // what ends it. The record has to say so, or it is the same record a
+      // human's stop would leave.
+      await pushBranch(fixture, "shared.txt", "the branch\n");
+      await moveMain(fixture, "the base moved\n");
+
+      const wedged: SessionFactory = async ({ tools }) =>
+        isReviewer(tools)
+          ? reviewer(tools, "pass")
+          : {
+              async prompt() {
+                await new Promise<void>(() => {
+                  // never settles on its own
+                });
+              },
+              async abort() {},
+              dispose() {},
+            };
+
+      const { gh } = stubGh([reviewedPullRequest()]);
+      const result = await mergeReviewedPullRequests(
+        options(fixture, gh, { session: wedged, deadlineMs: 2000 }),
+      );
+
+      expect(result.merged).toEqual([]);
+      // The resolution is one turn, so the message does not count turns.
+      expect(result.failed[0]?.message).toContain("the merge session hit its");
+      expect(result.failed[0]?.message).not.toContain("of 1 turn");
+
+      const record = await readFile(
+        join(
+          fixture.repo,
+          "build",
+          "diagnostics",
+          "merge",
+          "pr-7",
+          "2026-11-02T09-00-00-000Z-abcdef12.md",
+        ),
+        "utf8",
+      );
+      expect(record).toContain("merge-sync — failed");
+      expect(record).toContain("the merge session hit its");
+      expect(record).toContain("deadline");
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("test_a_spent_budget_starts_no_pull_request", async () => {
+    const fixture = await createFixtureRepository({
+      files: { "scripts/setup-worktree.sh": SETUP },
+    });
+    try {
+      const { gh } = stubGh([reviewedPullRequest()]);
+      const started: string[] = [];
+      const counting: SessionFactory = async ({ tools }) => {
+        started.push(isReviewer(tools) ? "review" : "agent");
+        return {
+          async prompt() {},
+          async abort() {},
+          dispose() {},
+        };
+      };
+      const reads: string[] = [];
+      const countingRun: CommandRunner = async (spec) => {
+        reads.push(spec.command);
+        return "";
+      };
+
+      const result = await mergeReviewedPullRequests(
+        options(fixture, gh, { session: counting, run: countingRun, deadlineMs: 0 }),
+      );
+
+      // The clock was gone before the first candidate: it is left whole, and
+      // the reason names the run's clock rather than the pull request.
+      expect(started).toEqual([]);
+      // And nothing was asked about it: a spent clock does not spend a `gh`
+      // call either.
+      expect(reads).toEqual([]);
+      expect(result.merged).toEqual([]);
+      expect(result.failed).toEqual([]);
+      expect(result.skipped[0]?.reason).toBe("the run's deadline left no budget");
     } finally {
       await fixture.dispose();
     }

@@ -14,6 +14,10 @@ this mode never works an issue. The two modes take different host locks — work
 is its own — so a merge runs beside the work runs. What keeps it from landing work in flight is
 its candidates: a pull request is landed only once its review and CI have judged it.
 
+The sweep has **one wall-clock**: the resolution, the gate and the fresh review take shares of
+`--deadline-ms` as it runs out, and a pull request the clock does not reach is left for the next run.
+A gate the run's clock killed is not handed to the agent: there is nothing left to spend on the fix.
+
 It lands with `gh pr merge --squash --delete-branch`.
 
 ## A candidate

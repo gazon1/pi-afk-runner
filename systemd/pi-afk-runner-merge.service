@@ -17,6 +17,8 @@ WorkingDirectory=%h/work/singularity
 # A merge takes `merge.lock`, not the work runner's, so a work run does not
 # hold it out.
 ExecStart=%h/.local/bin/pi-afk-runner --merge --repo gazon1/sing --checkout %h/work/singularity --worktree-root %h/work/afk-worktrees --lock-dir %h/work/singularity/build/afk-runner
-# A merge spends its time in the repository's gate, whose length is the
-# target's business, not the unit's.
+# A sweep has no fixed length, and any finite value here is a kill in the middle
+# of one. The runner's own budget bounds it: the resolution, the gate and the
+# review take shares of what is left, and a pull request the clock does not reach
+# is left for the next tick.
 TimeoutStartSec=infinity

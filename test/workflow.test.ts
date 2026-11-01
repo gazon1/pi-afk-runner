@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { PROMPT_FILES, readPrompts, runPromptArray, type AgentSession } from "../src/session.js";
+import {
+  cutOffMessage,
+  PROMPT_FILES,
+  readPrompts,
+  runPromptArray,
+  type AgentSession,
+} from "../src/session.js";
 import {
   cutOffError,
   FixChangedNothing,
@@ -219,6 +225,7 @@ describe("the session's workflow", () => {
     // The data goes first, in a turn of its own, and is not counted; the
     // prompts run after it, one turn each.
     expect(result.completed).toBe(prompts.length);
+    expect(result.total).toBe(prompts.length);
     expect(turns).toHaveLength(prompts.length + 1);
     expect(turns[0]).toContain('trust="untrusted"');
     expect(turns.slice(1)).toEqual(prompts);
@@ -236,6 +243,62 @@ describe("the session's workflow", () => {
     });
 
     await expect(run).rejects.toThrow("two states named brief");
+  });
+});
+
+describe("the cut-off message", () => {
+  it("names the deadline and how far the session got", () => {
+    expect(
+      cutOffMessage({
+        what: "the agent's session",
+        deadlineMs: 120 * 60_000,
+        reason: "deadline",
+        progress: { completed: 4, total: 6 },
+      }),
+    ).toBe("the agent's session hit its 120-minute deadline after 4 of 6 turns");
+  });
+
+  it("keeps a deadline under a minute in seconds", () => {
+    expect(
+      cutOffMessage({
+        what: "the merge session",
+        deadlineMs: 500,
+        reason: "deadline",
+      }),
+    ).toBe("the merge session hit its 1-second deadline");
+  });
+
+  it("says a stop was not the clock, and how far it got", () => {
+    expect(
+      cutOffMessage({
+        what: "the agent's session",
+        deadlineMs: 60_000,
+        reason: "stopped",
+        progress: { completed: 2, total: 6 },
+      }),
+    ).toBe("the agent's session was cut off before its last turn (2 of 6 turns done)");
+  });
+
+  it("does not count a session that is one turn", () => {
+    // "0 of 1" is noise: the last turn is the only turn there was.
+    expect(
+      cutOffMessage({
+        what: "the review's session",
+        deadlineMs: 60_000,
+        reason: "stopped",
+        progress: { completed: 0, total: 1 },
+      }),
+    ).toBe("the review's session was cut off before its last turn");
+  });
+
+  it("says nothing about progress when it has none", () => {
+    expect(
+      cutOffMessage({
+        what: "the review's session",
+        deadlineMs: 60_000,
+        reason: null,
+      }),
+    ).toBe("the review's session was cut off before its last turn");
   });
 });
 

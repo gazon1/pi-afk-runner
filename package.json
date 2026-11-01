@@ -43,7 +43,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "build": "npx --package=typescript@5.6.3 -y tsc -p tsconfig.json && node --eval \"require('fs').cpSync('src/prompts','dist/prompts',{recursive:true})\"",
+    "build": "npx --package=typescript@5.6.3 -y tsc -p tsconfig.json && node --eval \"require('fs').cpSync('src/prompts','dist/prompts',{recursive:true})\" && node scripts/build-info.mjs",
     "typecheck": "npx --package=typescript@5.6.3 -y tsc -p tsconfig.json --noEmit && npx --package=typescript@5.6.3 -y tsc -p tsconfig.test.json",
     "lint": "oxlint --deny-warnings src test",
     "test": "vitest run",
