@@ -458,8 +458,23 @@ const OWN_PACKAGE = basename(dirname(dirname(fileURLToPath(import.meta.url))));
  * the host activated is not necessarily the copy a work session discovers. A path
  * comparison would let the other copy in — and that copy's hooks would fire in
  * the session this package created.
+ *
+ * A synthetic path is not a package at all. It is the loader's name for an
+ * extension that has no file — `<inline:...>` for the factory this package
+ * registers, `builtin:...` for the SDK's own. `resolve()` turns one into a
+ * path under the working directory, and the package name is then read off the
+ * working directory's **parent**: on a CI runner the checkout sits at
+ * `<repo>/<repo>`, so the parent is named after the package and the runner's own
+ * inline factory was mistaken for a second copy of itself — and dropped, taking
+ * the tool-call log with it.
  */
-function isOwnExtension(path: string): boolean {
+export function isOwnExtension(path: string): boolean {
+  // A synthetic path names no file: `builtin:` for the SDK's own, `<...>` for
+  // the factory this package registers. The SDK's own rule, kept in step with
+  // it — the SDK does not export `isSyntheticPath`.
+  if (path.startsWith("builtin:") || path.startsWith("<")) {
+    return false;
+  }
   // `<package>/dist/extension.js` from an install, `<package>/src/extension.ts` from source.
   return basename(dirname(dirname(resolve(path)))) === OWN_PACKAGE;
 }
