@@ -80,6 +80,7 @@ import {
   changedSize,
   computeDocumentsDigest,
   deriveState,
+  fixPrompt,
   isSmallChange,
   verifyPush,
   ensureRegistryEntry,
@@ -1813,6 +1814,62 @@ describe("the review", () => {
 
     expect(outcome.ciVerdict).toContain("the CI before the re-count");
     expect(outcome.ciVerdict).toContain("39888579980");
+  });
+
+  it("judges the change against the issue's brief", async () => {
+    let prompt = "";
+    const factory = async (options: {
+      tools?: readonly unknown[];
+    }): Promise<AgentSession> => ({
+      async prompt(text) {
+        prompt = text;
+        const tool = options.tools?.[0] as {
+          execute: (id: string, params: unknown) => Promise<unknown>;
+        };
+        await tool.execute("call-1", { verdict: "pass", findings: [] });
+      },
+      async abort() {},
+      dispose() {},
+    });
+
+    await reviewPullRequest({
+      repo: "gazon1/sing",
+      pullRequest: 1040,
+      cwd: "/tmp/does-not-matter",
+      factory: factory as never,
+      gh: async () => "",
+      run: async () => "",
+      deadlineMs: 60_000,
+      issue: {
+        title: "an issue",
+        body: "## Agent Brief\n\nThe button must stay disabled.",
+        comments: [],
+        labels: [],
+        updatedAt: "",
+        state: "OPEN",
+      },
+    });
+
+    // The reviewer is a new session: the brief travels with its prompt, fenced
+    // as untrusted data, or the diff is judged without the acceptance criteria.
+    expect(prompt).toContain("## The brief this change is judged against");
+    expect(prompt).toContain("The button must stay disabled.");
+    expect(prompt).toContain('trust="untrusted"');
+  });
+
+  it("carries the brief into the fix prompt", () => {
+    const prompt = fixPrompt(["the guard does not fire"], {
+      title: "an issue",
+      body: "## Agent Brief\n\nKeep the button disabled.",
+      comments: [],
+      labels: [],
+      updatedAt: "",
+      state: "OPEN",
+    });
+
+    expect(prompt).toContain("the guard does not fire");
+    expect(prompt).toContain("Keep the button disabled.");
+    expect(prompt).toContain('trust="untrusted"');
   });
 
   it("test_the_review_is_posted_once", async () => {
