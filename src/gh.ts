@@ -398,8 +398,14 @@ export function newestReviewVerdict(
   return null;
 }
 
-/** The arguments that land a pull request: squash it, and remove its branch. */
-export function mergePullRequestArgs(repo: string, number: number): string[] {
+/**
+ * The arguments that land a pull request: squash it, and remove its branch.
+ *
+ * `head` is the commit the run checked. With it, GitHub refuses the merge if
+ * the branch moved in between — a work run pushing the same branch is not
+ * excluded by any lock, so the check and the landing have to be one step.
+ */
+export function mergePullRequestArgs(repo: string, number: number, head?: string): string[] {
   return [
     "pr",
     "merge",
@@ -408,16 +414,18 @@ export function mergePullRequestArgs(repo: string, number: number): string[] {
     repo,
     "--squash",
     "--delete-branch",
+    ...(head === undefined ? [] : ["--match-head-commit", head]),
   ];
 }
 
-/** Land a pull request. */
+/** Land a pull request, if its head is still the commit the run checked. */
 export async function mergePullRequest(
   repo: string,
   number: number,
+  head?: string,
   gh: GhRunner = runGh,
 ): Promise<void> {
-  await gh(mergePullRequestArgs(repo, number));
+  await gh(mergePullRequestArgs(repo, number, head));
 }
 
 /** The arguments that read one issue's body and its comments. */

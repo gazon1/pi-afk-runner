@@ -37,7 +37,7 @@ import { EnvHttpProxyAgent, fetch as undiciFetch, setGlobalDispatcher } from "un
 import { readClaimed, readQueue, runGh, type GhRunner } from "./gh.js";
 import { guardExtensionPath, installGuardPolicy } from "./guard.js";
 import { runCommand, runGit, type CommandRunner, type GitRunner } from "./git.js";
-import { LockHeld, LockUnusable, takeLock } from "./lock.js";
+import { LockHeld, LockUnusable, lockNameFor, takeLock, workLockName } from "./lock.js";
 import {
   mergeReviewedPullRequests,
   type MergeOptions,
@@ -549,6 +549,12 @@ export function runOptionsFrom(
     deadlineMs: options.deadlineMs,
     staleAfterMs: options.staleAfterMs,
     ...(options.verifyPushes === undefined ? {} : { verifyPushes: options.verifyPushes }),
+    // A named issue took its lock before the run read anything. A run that lets
+    // the queue choose does not know the issue until it has chosen it, so the
+    // lock is taken inside the run — one issue at a time, even in a sweep.
+    ...(options.issue === undefined
+      ? { lockIssue: (issue: number) => takeLock(options.lockDirectory, workLockName(issue)) }
+      : {}),
   };
 }
 
@@ -623,7 +629,9 @@ export interface CliDependencies {
  * One issue, or the whole queue with `--all`. The lock is taken for the whole
  * invocation and given back whatever happens — a runner that died holding it
  * would keep the next one out for ever, and a runner that gave it back too
- * early would let two of them work at once.
+ * early would let two of them work at once. Work on a named issue takes the
+ * issue's own lock, so two issues can be worked on one host at once; a merge
+ * takes its own and never waits for a work run.
  */
 export async function main(
   argv: readonly string[],
@@ -652,7 +660,7 @@ export async function main(
 
   let lock;
   try {
-    lock = await takeLock(resolved.lockDirectory);
+    lock = await takeLock(resolved.lockDirectory, lockNameFor(resolved));
   } catch (failure) {
     if (failure instanceof LockHeld) {
       process.stderr.write(`${failure.message}\n`);
@@ -825,6 +833,14 @@ async function work(runOptions: RunOptions, namedIssue: number | undefined): Pro
     }
     return EXIT_OK;
   } catch (failure) {
+    if (failure instanceof LockHeld) {
+      process.stderr.write(`${failure.message}\n`);
+      return EXIT_LOCKED;
+    }
+    if (failure instanceof LockUnusable) {
+      process.stderr.write(`${failure.message}\n`);
+      return EXIT_NO_LOCK;
+    }
     if (failure instanceof RunFailed) {
       process.stderr.write(`${failure.message}\n`);
       return STEP_EXIT_CODES[failure.step] ?? 1;

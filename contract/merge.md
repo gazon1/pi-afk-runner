@@ -10,7 +10,9 @@ said.
 
 `pi-afk-runner --merge` reads the open pull requests against the base (default `main`) and lands
 the ones the work pipeline opened. It is separate from `--all`: the work mode never merges, and
-this mode never works an issue. The host lock is the work runner's, so the two do not run at once.
+this mode never works an issue. The two modes take different host locks — work is per issue, merge
+is its own — so a merge runs beside the work runs. What keeps it from landing work in flight is
+its candidates: a pull request is landed only once its review and CI have judged it.
 
 It lands with `gh pr merge --squash --delete-branch`.
 
@@ -31,7 +33,9 @@ Anything else is named and left alone. A skipped pull request is not a failure.
 ## What the head that lands is
 
 A candidate lands only when this run does not move its branch. The commit that lands is the commit
-the review and the CI judged — not one produced while the run was checking.
+the review and the CI judged — not one produced while the run was checking. The landing names that
+commit (`gh pr merge --match-head-commit <sha>`), so a branch that moves in the window between the
+check and the merge is refused by GitHub rather than landed.
 
 A branch that has to move — the base moved under it, a conflict had to be resolved, or the gate
 failed — is synced, gated with the repository's own `./check.sh`, pushed and freshly reviewed, and

@@ -370,9 +370,11 @@ export async function readClaimBase(
  * retries the same refusal for ever.
  *
  * `git rev-list` answers the same question GitHub asks, so a branch whose work
- * is already on the base answers zero too. Both ends have to be fetched: an
- * explicit refspec updates `FETCH_HEAD` and not the remote-tracking ref, so the
- * commit is read straight after its own fetch rather than from `origin/<name>`.
+ * is already on the base answers zero too. Each commit is read from a ref this
+ * call fetches for itself, never from `FETCH_HEAD`: one file serves the whole
+ * repository, and two runs in one checkout share it, so another run's fetch can
+ * land between a fetch and the read and hand this one a commit it did not ask
+ * for.
  *
  * Null when there is no such branch on the remote.
  */
@@ -388,12 +390,43 @@ export async function remoteBranchAheadOfBase(
   if (exists === null) {
     return null;
   }
-  await fetchRef(git, cwd, { remote: options.remote, ref: headRef(options.base) });
-  const baseSha = (await git(["rev-parse", "FETCH_HEAD"], { cwd })).trim();
-  await fetchRef(git, cwd, { remote: options.remote, ref: headRef(options.branch) });
-  const branchSha = (await git(["rev-parse", "FETCH_HEAD"], { cwd })).trim();
+  const baseSha = await fetchCommit(git, cwd, {
+    remote: options.remote,
+    ref: headRef(options.base),
+  });
+  const branchSha = await fetchCommit(git, cwd, {
+    remote: options.remote,
+    ref: headRef(options.branch),
+  });
   const count = await git(["rev-list", "--count", `${baseSha}..${branchSha}`], { cwd });
   return Number(count.trim());
+}
+
+/** A counter that keeps the private fetch refs of one process apart. */
+let fetchCounter = 0;
+
+/**
+ * Fetch one ref, and hand back the commit it points at.
+ *
+ * The ref is fetched into a private ref of this call, named so that no other
+ * run in the checkout can be writing it, and removed again. That is what makes
+ * it safe to read: `FETCH_HEAD` is shared by every run of the repository, and a
+ * commit read from it may be a commit another run fetched.
+ */
+export async function fetchCommit(
+  git: GitRunner,
+  cwd: string,
+  options: { readonly remote: string; readonly ref: string },
+): Promise<string> {
+  // shortcut: a run killed mid-fetch leaves its private ref behind, and nothing
+  // sweeps those up — clean them out when their number starts to matter.
+  const name = `refs/afk/fetch-${process.pid}-${++fetchCounter}`;
+  try {
+    await git(["fetch", options.remote, `+${options.ref}:${name}`], { cwd });
+    return (await git(["rev-parse", name], { cwd })).trim();
+  } finally {
+    await git(["update-ref", "-d", name], { cwd }).catch(() => "");
+  }
 }
 
 /** Bring one ref's objects down from the remote. */

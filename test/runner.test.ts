@@ -27,6 +27,7 @@ import {
   addWorktree,
   allowedPushRefs,
   assertPushableRef,
+  fetchCommit,
   pushRef,
   pushWorkBranch,
   claimRef,
@@ -89,8 +90,15 @@ import {
   type RunOptions,
   type Step,
 } from "../src/runner.js";
-import { HOLDER_COMMAND, takeLock } from "../src/lock.js";
-import { EXIT_LOCKED, EXIT_NO_LOCK, EXIT_USAGE, STEP_EXIT_CODES, main } from "../src/cli.js";
+import { HOLDER_COMMAND, takeLock, workLockName } from "../src/lock.js";
+import {
+  EXIT_LOCKED,
+  EXIT_NO_LOCK,
+  EXIT_USAGE,
+  STEP_EXIT_CODES,
+  main,
+  type CliDependencies,
+} from "../src/cli.js";
 import {
   PINNED_PI_RANGE,
   PiVersionMismatch,
@@ -2839,6 +2847,198 @@ describe("the CLI's run", () => {
     }
   });
 
+  it("test_two_issues_do_not_wait_for_each_other_or_the_sweep", async () => {
+    const fixture = await fixtureWithSetupScript();
+    try {
+      const lockDirectory = join(fixture.root, "afk-runner");
+      // The sweep's lock and another worker's issue lock are both held: a run
+      // on issue 43 does not care about either, and it works the issue.
+      const sweep = await takeLock(lockDirectory);
+      const other = await takeLock(lockDirectory, workLockName(42));
+      try {
+        const { gh, calls } = stubGh([{ number: 43, title: "another issue" }]);
+        const code = await main(
+          [
+            "--repo",
+            "gazon1/sing",
+            "--checkout",
+            fixture.repo,
+            "--worktree-root",
+            join(fixture.root, "worktrees"),
+            "--lock-dir",
+            lockDirectory,
+            "--issue",
+            "43",
+          ],
+          {
+            gh,
+            session: workingSession(),
+            run: async () => JSON.stringify({ verdict: "ci.yml  run 1  success" }),
+          },
+        );
+
+        expect(code).toBe(0);
+        const claims = calls.filter((call) => call.includes("--add-label agent-in-progress"));
+        expect(claims.some((call) => call.includes(" 43 "))).toBe(true);
+      } finally {
+        await other.release();
+        await sweep.release();
+      }
+    } finally {
+      await fixture.dispose();
+    }
+  }, 60_000);
+
+  it("test_a_sweep_leaves_an_issue_another_run_is_working", async () => {
+    const fixture = await fixtureWithSetupScript();
+    try {
+      const lockDirectory = join(fixture.root, "afk-runner");
+      // Another run is working issue 43; the sweep takes issue 43's lock for
+      // each issue it works, so it reports 43 and works the rest.
+      const held = await takeLock(lockDirectory, workLockName(43));
+      try {
+        const { gh, calls } = stubGh([
+          { number: 42, title: "the first" },
+          { number: 43, title: "the second" },
+        ]);
+        const code = await main(
+          [
+            "--repo",
+            "gazon1/sing",
+            "--checkout",
+            fixture.repo,
+            "--worktree-root",
+            join(fixture.root, "worktrees"),
+            "--lock-dir",
+            lockDirectory,
+            "--all",
+          ],
+          {
+            gh,
+            session: workingSession(),
+            run: async () => JSON.stringify({ verdict: "ci.yml  run 1  success" }),
+          },
+        );
+
+        expect(code).toBe(EXIT_LOCKED);
+        const claims = calls.filter((call) => call.includes("--add-label agent-in-progress"));
+        expect(claims.some((call) => call.includes(" 42 "))).toBe(true);
+        expect(claims.some((call) => call.includes(" 43 "))).toBe(false);
+      } finally {
+        await held.release();
+      }
+    } finally {
+      await fixture.dispose();
+    }
+  }, 60_000);
+
+  it("test_two_runs_work_two_issues_at_once", async () => {
+    const fixture = await fixtureWithSetupScript();
+    try {
+      // The same checkout, the same worktree root, two issues: nothing two
+      // runs share may collide.
+      const lockDirectory = join(fixture.root, "afk-runner");
+      const args = (issue: number): string[] => [
+        "--repo",
+        "gazon1/sing",
+        "--checkout",
+        fixture.repo,
+        "--worktree-root",
+        join(fixture.root, "worktrees"),
+        "--lock-dir",
+        lockDirectory,
+        "--issue",
+        String(issue),
+      ];
+      const dependencies = (
+        gh: (args: readonly string[]) => Promise<string>,
+      ): CliDependencies => ({
+        gh,
+        session: workingSession(),
+        run: async () => JSON.stringify({ verdict: "ci.yml  run 1  success" }),
+      });
+      const first = stubGh([{ number: 42, title: "one" }]);
+      const second = stubGh([{ number: 43, title: "two" }]);
+
+      const codes = await Promise.all([
+        main(args(42), dependencies(first.gh)),
+        main(args(43), dependencies(second.gh)),
+      ]);
+
+      expect(codes).toEqual([0, 0]);
+      expect(
+        first.calls.some((call) => call.includes("--add-label agent-in-progress") && call.includes(" 42 ")),
+      ).toBe(true);
+      expect(
+        second.calls.some((call) => call.includes("--add-label agent-in-progress") && call.includes(" 43 ")),
+      ).toBe(true);
+    } finally {
+      await fixture.dispose();
+    }
+  }, 60_000);
+
+  it("test_two_runs_on_one_issue_do_not_work_it_at_once", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "afk-lock-"));
+    try {
+      // A run already working the issue holds its lock for the whole run.
+      const held = await takeLock(directory, workLockName(42));
+      try {
+        const { gh, calls } = stubGh([{ number: 42, title: "an issue" }]);
+        const code = await main(
+          [
+            "--repo",
+            "gazon1/sing",
+            "--checkout",
+            directory,
+            "--lock-dir",
+            directory,
+            "--issue",
+            "42",
+          ],
+          { gh },
+        );
+
+        expect(code).toBe(EXIT_LOCKED);
+        expect(calls).toHaveLength(0);
+      } finally {
+        await held.release();
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("test_a_merge_does_not_wait_for_the_work_lock", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "afk-lock-"));
+    try {
+      // The work lock is held: a merge reads the pull requests' readiness, not
+      // the work runner's lock, so it runs anyway.
+      const held = await takeLock(directory);
+      try {
+        const { gh, calls } = stubGh([]);
+        const code = await main(
+          [
+            "--repo",
+            "gazon1/sing",
+            "--checkout",
+            directory,
+            "--lock-dir",
+            directory,
+            "--merge",
+          ],
+          { gh },
+        );
+
+        expect(code).toBe(0);
+        expect(calls.length).toBeGreaterThan(0);
+      } finally {
+        await held.release();
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   it("test_the_lock_does_not_outlive_the_runner", async () => {
     const directory = await mkdtemp(join(tmpdir(), "afk-lock-"));
     try {
@@ -2932,6 +3132,28 @@ describe("the CLI's run", () => {
         return runGit(args, options);
       };
     }
+
+    it("test_a_remote_read_answers_its_own_ref_and_leaves_nothing_behind", async () => {
+      const fixture = await fixtureWithSetupScript();
+      try {
+        // Two runs share the checkout, so a read must not depend on `FETCH_HEAD`,
+        // which the other run's fetch overwrites.
+        const sha = await fetchCommit(runGit, fixture.repo, {
+          remote: fixture.remote,
+          ref: "refs/heads/main",
+        });
+        const head = (await runGit(["rev-parse", "HEAD"], { cwd: fixture.repo })).trim();
+        expect(sha).toBe(head);
+
+        // And the private ref the fetch used is gone again.
+        const left = await runGit(["for-each-ref", "--format=%(refname)", "refs/afk"], {
+          cwd: fixture.repo,
+        });
+        expect(left.trim()).toBe("");
+      } finally {
+        await fixture.dispose();
+      }
+    }, 60_000);
 
     it("test_a_stranded_claim_is_reclaimed", async () => {
       const fixture = await fixtureWithSetupScript();

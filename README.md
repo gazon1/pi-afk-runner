@@ -215,9 +215,12 @@ another runner holds the lock and `76` says the lock could not be taken. The uni
 in [systemd/](systemd/README.md).
 
 The lock is a real `flock`, held for the whole run: a lock file a killed runner leaves behind would
-block the next one for ever, and a marker is not a lock — adding a label is idempotent. It needs
-`flock(1)`, so the host is a Linux workstation; elsewhere the runner says the lock is unusable
-rather than running two of itself.
+block the next one for ever, and a marker is not a lock — adding a label is idempotent. It is **per
+issue**: `--issue <N>` takes `issue-<N>.lock`, so several runners may work different issues on one
+host at once, while `--all` (and a run that picks the queue's first issue) takes the one queue lock
+and then each issue's own lock as it works it.
+It needs `flock(1)`, so the host is a Linux workstation; elsewhere the runner says the lock is
+unusable rather than running two of itself.
 
 ### What a run leaves behind
 
@@ -258,8 +261,9 @@ fresh review of the new diff. That pull request is **not** merged in the same ru
 next one, once CI has judged the new commit. A merge never lands a commit CI has not seen.
 
 Each pull request's record goes under `build/diagnostics/merge/pr-<N>/`. A failed step is reported
-with its name and the pull request stays open; a skipped pull request is not a failure. The lock is
-the work pipeline's, so the two do not run at once.
+with its name and the pull request stays open; a skipped pull request is not a failure. A merge takes
+its own lock — `merge.lock` — and not the work lock, so a merge and the work runs do not wait for each
+other.
 
 The decision is recorded in
 [docs/decisions/2026-11-02-the-merge-pipeline-is-separate.md](docs/decisions/2026-11-02-the-merge-pipeline-is-separate.md).
