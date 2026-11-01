@@ -260,7 +260,8 @@ The work session is a graph, and two of its nodes decide whether the rest runs:
 - **Scope.** When the issue is being worked, the second turn decides whether it
   fits one run. `split` files two to eight smaller issues, chains each to the
   one before it (`**Depends on:** #N`), links them from the original and closes
-  it. A parent issue that is still open holds its children out of the queue.
+  it. A parent whose pull request has not been merged yet holds its children out
+  of the queue.
 
 A `skip` or a `split` is a finished run: no branch is pushed and no pull request
 is opened. The decisions are tools, `agent_issue_decision` and

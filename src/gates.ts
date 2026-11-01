@@ -245,7 +245,7 @@ export async function runGates(options: {
         // The gate's own budget, and no more than the run has left: a build
         // that runs long is still the gate's own answer, and a timeout the
         // gate never chose is not a verdict.
-        timeoutMs: Math.min(GATE_TIMEOUT_MS, left),
+        timeoutMs: Math.min(GATE_TIMEOUT_MS, options.budgetMs, left),
         // The tail of the output is the evidence; the rest is noise the
         // runner neither keeps nor records.
         maxOutputBytes: GATE_OUTPUT_LIMIT_BYTES,

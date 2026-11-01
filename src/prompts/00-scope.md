@@ -5,6 +5,11 @@ run**, or has to become smaller issues. Do not change any file yet.
 
 Read the brief's acceptance criteria and the code they touch.
 
+**The checkout may carry an earlier run's work.** The system prompt names the
+commits this branch has that the base does not. Judge the size of the brief,
+not of what the tree already contains: a piece already on the branch is not a
+second piece, and it is not a reason to split.
+
 1. **A task fits one run** when a single agent can finish it in one pass: the
    criteria are a handful, they touch one area, and none of them needs a
    decision from a human that the brief does not already make. Most issues fit.
@@ -44,7 +49,8 @@ Read the brief's acceptance criteria and the code they touch.
    The subtasks are listed **in the order they must run**. The runner files
    them as issues labelled `ready-for-agent`, records the dependency from each
    piece to the one before it, links them from this issue, and closes this
-   issue. A later piece does not start until the earlier one is closed.
+   issue. A later piece does not start until the earlier one's pull request
+   is merged.
 
 The brief you write is what the next run reads. Describe behaviour and
 acceptance criteria, not file paths and line numbers.

@@ -26,16 +26,22 @@ for the rule that the copies follow.
 | `2026-10-31-the-sweep-belongs-to-the-cli.md` | who drains the queue, and what the unit's timeout is sized for |
 | `2026-11-01-the-session-share-is-two-hours.md` | the work session's share of the budget, and the claim's staleness window that outlasts a run |
 | `2026-11-02-a-run-that-did-not-finish-leaves-its-work.md` | a failed run keeps its unfinished work on the branch, and the next run continues it |
+| `2026-11-02-the-work-is-the-tree-and-not-the-stash.md` | the work is the tree's, and a stash is not work the next run continues |
+| `2026-11-02-the-implement-turn-says-where-the-work-has-to-stay.md` | the turn that writes the work says where the work has to stay while it runs |
 | `2026-10-31-an-interrupted-run-releases-its-claim.md` | what a killed run does with its claim, and why the signal releases it |
 | `2026-10-30-the-brief-is-the-body-when-no-comment-carries-the-marker.md` | where the brief is, and what happens when there is none |
 | `2026-11-02-the-fourth-turn-asks-what-follows.md` | the fourth turn, and who files the leftovers |
 | `2026-11-02-a-prompt-may-only-name-a-skill-the-runner-carries.md` | the skills a prompt may name, and who carries them |
 | `2026-11-02-the-reclaim-deletes-the-branch-the-dead-run-left.md` | what the reclaim does with the branch the dead run left on the remote |
 | `2026-11-02-the-merge-pipeline-is-separate.md` | why landing is an opt-in mode, and when a pull request is a candidate |
+| `2026-11-02-the-branch-and-its-pattern-live-in-one-place.md` | the work branch's name and the pattern that recognises it, and who asks it |
 | `2026-11-02-the-session-is-a-workflow.md` | the session's states, the workflow that runs them, and whose rules they stay |
 | `2026-11-01-the-queue-is-read-in-one-call.md` | the cost of a run: the queue and the branches are read once, and every `gh` call is bounded |
 | `2026-11-01-the-work-is-a-conditional-graph.md` | triage, scope and split as a branch; `gate` for the review loop; dependencies; the small-change skip |
 | `2026-11-01-a-fix-that-changes-nothing-stops-the-loop.md` | a fix that leaves the head where it was stops the review loop, and the run says why |
+| `2026-11-01-the-work-is-a-conditional-graph.md` | triage, scope and split as a branch; `gate` for the review loop; dependencies; the small-change skip — **the dependency rule replaced** by `2026-11-03-a-dependency-is-settled-by-a-merge.md` |
+| `2026-11-03-a-dependency-is-settled-by-a-merge.md` | what settles a dependency: the parent's pull request is merged, and nothing else |
+| `2026-11-01-the-triage-judges-the-base-not-the-branch.md` | what "already done" is asked of, when the worktree is the issue's own branch |
 | `2026-11-02-the-runner-runs-the-repositorys-gates.md` | the gates the runner runs itself, before it pushes: the list, the budget, and the agent's report it supersedes |
 | `2026-10-30-the-afk-runner-is-a-pi-extension.md` | why the runner is a separate repository, and the three layers of exclusion |
 | `2026-09-25-git-hooks-worktree-isolation.md` | the worktree and the hooks that go with it |

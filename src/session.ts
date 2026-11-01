@@ -181,6 +181,52 @@ function briefRule(brief: Brief): string {
       "everything else as context.";
 }
 
+/** The name of the system prompt section that says what the checkout is. */
+export const WORKTREE_SECTION = "worktree";
+
+/**
+ * The rule that says what the checkout the session works in is.
+ *
+ * The worktree is the issue's **own** branch, not the base, and an earlier run
+ * may have left unfinished work on it
+ * (`2026-11-02-a-run-that-did-not-finish-leaves-its-work.md`). The triage reads
+ * that work as "the issue is already done" unless it is told otherwise: issue
+ * 1751 was closed that way, with its fix sitting on `agent/issue-1751` and
+ * nothing to land it. The base commit and the commits the branch already
+ * carries are named here, so that "already done" can be asked of the base rather
+ * than of what this branch added. The runner reads those commits itself, before
+ * the session: a fact the agent may skip discovering is not a fact it has.
+ */
+export function worktreeRule(options: {
+  readonly branch: string;
+  readonly baseBranch: string;
+  readonly baseSha: string;
+  /** The commits the branch carries that the base does not, as `git log` names them. */
+  readonly commits: readonly string[];
+}): string {
+  const lines = [
+    `The checkout is the issue's own branch, \`${options.branch}\`. The base this run claimed is ` +
+      `\`${options.baseBranch}\` at commit \`${options.baseSha}\`, and the branch may have started ` +
+      "from an older base. It is not the base.",
+  ];
+  if (options.commits.length === 0) {
+    lines.push("The branch carries no commits of its own yet: the tracked tree is the base's.");
+  } else {
+    lines.push(
+      `The branch already carries ${options.commits.length} commit(s) the base does not have. ` +
+        "That is an earlier run's work on this issue, and it has not landed:",
+      ...options.commits.map((commit) => `- ${commit}`),
+      "Reading it as finished would close the issue with the work still on the branch. It is the " +
+        "work this run continues.",
+    );
+  }
+  lines.push(
+    `Ask the base, not the tree: \`git show ${options.baseSha}:<path>\` shows the base's copy of ` +
+      "a file, and a file the branch changed is not a file the base has.",
+  );
+  return lines.join("\n");
+}
+
 /**
  * The prompt files, in the order they run when every branch is taken.
  *
@@ -831,8 +877,8 @@ export function createScopeDecisionTool(holder: { value?: ScopeDecision }) {
  *
  * The pieces are chained: each subtask's brief carries `**Depends on:** #N` for
  * the one before it, and the runner's own queue check refuses to start a piece
- * until its parent is closed. The original is closed because it is no longer
- * one piece of work — the queue takes the pieces instead.
+ * until its parent's pull request is merged. The original is closed because it
+ * is no longer one piece of work — the queue takes the pieces instead.
  */
 export async function splitIssue(options: {
   readonly repo: string;
@@ -936,9 +982,23 @@ export async function startAgent(options: {
   readonly issueNumber: number;
   /** The already-read issue, when available. */
   readonly issue?: IssueDetail;
+  /**
+   * The branch the session works on, the base the run claimed, and the commits
+   * the branch already carries.
+   *
+   * The triage decides whether the issue is still needed, and its evidence is
+   * the base. The checkout is the issue's own branch, which may carry an
+   * earlier run's unfinished work; the runner reads the commits before the
+   * session so that the agent is told them rather than left to find them.
+   */
+  readonly worktree: {
+    readonly branch: string;
+    readonly baseBranch: string;
+    readonly baseSha: string;
+    readonly commits: readonly string[];
+  };
   /** How the issue is read and written. */
   readonly gh?: GhRunner;
-  readonly systemPromptSections?: Record<string, string>;
   readonly promptsDirectory?: string;
   readonly deadlineMs: number;
   /** Whether somebody has stopped the run. */
@@ -966,10 +1026,9 @@ export async function startAgent(options: {
   const session = await options.factory({
     cwd: options.cwd,
     systemPromptSections: {
-      ...(options.systemPromptSections ?? {
-        [UNTRUSTED_INPUT_SECTION]: UNTRUSTED_INPUT_RULE,
-      }),
+      [UNTRUSTED_INPUT_SECTION]: UNTRUSTED_INPUT_RULE,
       [BRIEF_SECTION]: briefRule(brief),
+      [WORKTREE_SECTION]: worktreeRule(options.worktree),
     },
     // The three tools the work session carries: the triage's decision, the
     // scope's decision, and the leftover the fourth turn files. The runner

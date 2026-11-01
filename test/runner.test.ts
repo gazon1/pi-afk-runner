@@ -6,6 +6,7 @@ import {
   PROMPT_FILES,
   UNTRUSTED_INPUT_RULE,
   UNTRUSTED_INPUT_SECTION,
+  WORKTREE_SECTION,
   BRIEF_MARKER,
   BRIEF_SECTION,
   ISSUE_DECISION_TOOL_NAME,
@@ -75,6 +76,7 @@ import {
   createPullRequestArgs,
   dependencyNumbers,
   issueArgs,
+  mergedPullRequestArgs,
   postCommentArgs,
   reviewCommentBody,
   parseIssues,
@@ -87,6 +89,7 @@ import {
   readQueue,
   readPullRequest,
   runGhWithTimeout,
+  type GhRunner,
 } from "../src/gh.js";
 import {
   UNCLAIMED,
@@ -151,6 +154,19 @@ function namedStates(count: number): StateName[] {
     name: `state-${index + 1}`,
     phase: "Test",
   }));
+}
+
+/**
+ * The worktree facts a work session is given, for the tests that do not care
+ * which branch it is on. The tests that do care build their own.
+ */
+function testWorktree(issueNumber: number) {
+  return {
+    branch: workBranch(issueNumber),
+    baseBranch: "main",
+    baseSha: "0".repeat(40),
+    commits: [] as readonly string[],
+  };
 }
 
 /**
@@ -1218,6 +1234,7 @@ describe("the agent's session", () => {
           cwd: empty,
           repo: "gazon1/sing",
           issueNumber: 42,
+          worktree: testWorktree(42),
           gh: async () => "[]",
           promptsDirectory: empty,
           deadlineMs: 60_000,
@@ -1394,6 +1411,9 @@ describe("the agent's session", () => {
     const prompts = await readPrompts();
     expect(prompts).toHaveLength(6);
     expect(prompts[0]).toContain("agent_issue_decision");
+    // The triage judges whether the issue is still needed against the base, not
+    // against the issue's own branch.
+    expect(prompts[0]).toContain("not the base");
     expect(prompts[1]).toContain("agent_scope_decision");
     expect(promptsDirectory()).toContain("prompts");
   });
@@ -2457,6 +2477,7 @@ describe("the brief", () => {
       cwd: "/tmp/does-not-matter",
       repo: "gazon1/sing",
       issueNumber: 42,
+      worktree: testWorktree(42),
       gh,
       deadlineMs: 60_000,
     });
@@ -2482,6 +2503,7 @@ describe("the brief", () => {
         cwd: "/tmp/does-not-matter",
         repo: "gazon1/sing",
         issueNumber: 42,
+        worktree: testWorktree(42),
         gh,
         deadlineMs: 60_000,
       }),
@@ -3541,6 +3563,49 @@ describe("the CLI's run", () => {
     }
   });
 
+  it("test_the_runner_leaves_the_repository_s_stash_alone", async () => {
+    // A stash belongs to the repository, not to an issue: nothing says which
+    // one is whose. The runner keeps the tree, and it does not read the
+    // stash — so a stash that is there when the run starts is there when it
+    // ends, untouched.
+    const fixture = await fixtureWithSetupScript();
+    try {
+      const { gh } = stubGh([{ number: 42, title: "an issue" }]);
+
+      // A stash the runner did not make.
+      await writeFile(join(fixture.repo, "README.md"), "# changed\n", "utf8");
+      await gitOutput(["stash", "push", "-m", "someone else's work"], {
+        cwd: fixture.repo,
+        env: fixture.env,
+      });
+      const before = await gitOutput(["stash", "list"], {
+        cwd: fixture.repo,
+        env: fixture.env,
+      });
+      expect(before).toContain("someone else's work");
+
+      const gitCalls: string[] = [];
+      await runOnce({
+        ...runOptions(fixture, gh),
+        git: async (args, options) => {
+          gitCalls.push(`git ${args.join(" ")}`);
+          return runGit(args, options);
+        },
+      });
+
+      // The runner never went near the stash: it did not read it, and it did
+      // not move or drop it.
+      expect(gitCalls.filter((call) => call.includes("stash"))).toEqual([]);
+      const after = await gitOutput(["stash", "list"], {
+        cwd: fixture.repo,
+        env: fixture.env,
+      });
+      expect(after).toBe(before);
+    } finally {
+      await fixture.dispose();
+    }
+  }, 60_000);
+
   it("test_the_next_run_continues_the_work_the_failed_run_left", async () => {
     // The point of keeping the work: the next run starts from it.
     const fixture = await fixtureWithSetupScript();
@@ -3567,9 +3632,11 @@ describe("the CLI's run", () => {
 
       // The second run works the issue again, and its work goes on top of what
       // the first run left.
+      const sections: Record<string, string>[] = [];
       await runOnce({
         ...runOptions(fixture, gh),
-        session: async ({ cwd, tools }) => {
+        session: async ({ cwd, tools, systemPromptSections }) => {
+          sections.push(systemPromptSections);
           if (isReviewer(tools)) {
             return {
               async prompt() {
@@ -3617,6 +3684,14 @@ describe("the CLI's run", () => {
       });
       expect(files).toContain("half-done.txt");
       expect(files).toContain("finished.txt");
+
+      // And the second run was told about the first run's commit, so the triage
+      // cannot read it as work that has landed.
+      const worktree = sections.find((entry) => entry[WORKTREE_SECTION] !== undefined);
+      expect(worktree?.[WORKTREE_SECTION]).toContain(
+        "wip: the work a run that did not finish left behind",
+      );
+      expect(worktree?.[WORKTREE_SECTION]).toContain("commit(s) the base does not have");
     } finally {
       await fixture.dispose();
     }
@@ -3645,6 +3720,16 @@ describe("the CLI's run", () => {
 
       // And the agent was told that this issue's brief is its body.
       expect(sections[0]?.[BRIEF_SECTION]).toContain("the issue's body");
+
+      // And which branch it is on, and which base counts: the triage reads a
+      // tree that may carry an earlier run's work, and that work is not a
+      // reason to say the issue is already done.
+      expect(sections[0]?.[WORKTREE_SECTION]).toContain(workBranch(42));
+      expect(sections[0]?.[WORKTREE_SECTION]).toContain("It is not the base.");
+      // The base commit is pinned, so a wrong or empty one is caught here.
+      expect(sections[0]?.[WORKTREE_SECTION]).toMatch(/at commit `[0-9a-f]{40}`/);
+      // A fresh branch says so, rather than leaving the agent to guess.
+      expect(sections[0]?.[WORKTREE_SECTION]).toContain("no commits of its own");
     } finally {
       await fixture.dispose();
     }
@@ -5052,6 +5137,18 @@ describe("the CLI's run", () => {
   });
 });
 
+/**
+ * A prompt as one line of text.
+ *
+ * The prompts are wrapped for a reader, so a claim that spans two lines is
+ * one sentence to the agent and two to a string match. The tests that check
+ * what a prompt says match against the flattened text, so that re-wrapping a
+ * prompt cannot break them.
+ */
+function flatten(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
+}
+
 describe("the leftovers a run files", () => {
   /** A brief in the target repository's own format. */
   const BRIEF = [
@@ -5192,6 +5289,39 @@ describe("the leftovers a run files", () => {
     expect(implement).toContain("`./check.sh` only");
   });
 
+  it("test_the_verify_prompt_says_the_work_is_the_tree_s", async () => {
+    // The work the next run continues is the tree's. A stash is not part of
+    // it, so the verify turn says so where the agent reads it — and the rule
+    // about a long suite on a stashed tree stays.
+    const prompts = await readPrompts();
+    const verify = prompts[4] ?? "";
+
+    expect(verify).toContain("The work is the tree's");
+    expect(verify).toContain("not part of what the next run continues");
+    expect(verify).toContain("stashed tree");
+  });
+
+  it("test_the_implement_prompt_says_the_work_is_the_tree_s", async () => {
+    // The turn that writes the work is the turn where the rule matters most:
+    // the work stays in the tree while the turn runs, and a stash is not part
+    // of what the next run continues.
+    const prompts = await readPrompts();
+    const implement = prompts[3] ?? "";
+    const verify = prompts[4] ?? "";
+
+    // Both turns make the same claim about the same thing, so they cannot
+    // drift apart: the verify turn already says it, and it keeps saying it.
+    for (const turn of [implement, verify]) {
+      expect(flatten(turn)).toContain("The work is the tree's");
+      expect(flatten(turn)).toContain("not part of what the next run continues");
+    }
+
+    // The rules the implement turn already had stay: the runner commits the
+    // tree, and the agent does not commit or push itself.
+    expect(flatten(implement)).toContain("commits whatever is left in the worktree");
+    expect(flatten(implement)).toContain("Do not commit or push");
+  });
+
   it("test_the_work_session_is_given_the_tool_that_files_a_leftover", async () => {
     const turns: string[] = [];
     let tools: readonly { readonly name: string }[] = [];
@@ -5211,6 +5341,7 @@ describe("the leftovers a run files", () => {
       cwd: process.cwd(),
       repo: "gazon1/sing",
       issueNumber: 42,
+      worktree: testWorktree(42),
       gh: fakeTarget().gh,
       deadlineMs: 60_000,
     });
@@ -5345,42 +5476,98 @@ describe("the dependencies an issue declares", () => {
     expect(blockedReason(undefined)).toBeNull();
   });
 
-  it("is blocked while a parent is open, and free when it closes", async () => {
-    const gh = async (args: readonly string[]): Promise<string> => {
-      const number = Number(args[2]);
-      if (number === 1) {
+  it("is blocked while the parent's work has not landed, and free once it has", async () => {
+    const child = { number: 1, title: "the child", updatedAt: "", labels: [] };
+
+    /**
+     * The fake `gh`: the child's text, and the pull request of the parent it
+     * names. The parent is #2, and what it has is what the test says.
+     */
+    const fakeGh = (
+      parent: "no pull request" | "open" | "closed unmerged" | "merged",
+    ): GhRunner =>
+      async (args: readonly string[]): Promise<string> => {
+        if (args[0] === "issue") {
+          return JSON.stringify({
+            body: "**Depends on:** #2",
+            comments: [],
+            state: "OPEN",
+          });
+        }
+        if (args[0] === "pr") {
+          // The runner asks for the parent's merged pull request, on the
+          // parent's own work branch. An open or closed one is not there: the
+          // work has not landed.
+          const head = args[args.indexOf("--head") + 1];
+          return head === "agent/issue-2" && parent === "merged"
+            ? JSON.stringify([{ number: 7 }])
+            : "[]";
+        }
+        return "";
+      };
+
+    // A parent that is still open, one that was closed as won't-fix without a
+    // pull request, one whose pull request is open, and one whose pull request
+    // was closed unmerged: none of them has landed.
+    expect(
+      await openDependencies({ repo: "gazon1/sing", gh: fakeGh("no pull request") }, child),
+    ).toEqual([2]);
+    expect(
+      await openDependencies({ repo: "gazon1/sing", gh: fakeGh("open") }, child),
+    ).toEqual([2]);
+    expect(
+      await openDependencies({ repo: "gazon1/sing", gh: fakeGh("closed unmerged") }, child),
+    ).toEqual([2]);
+
+    // A merged pull request is the work landing: the child is free.
+    expect(
+      await openDependencies({ repo: "gazon1/sing", gh: fakeGh("merged") }, child),
+    ).toEqual([]);
+  });
+
+  it("holds the child when the parent's pull request cannot be read", async () => {
+    const child = { number: 1, title: "the child", updatedAt: "", labels: [] };
+    const failing: GhRunner = async (args: readonly string[]): Promise<string> => {
+      if (args[0] === "issue") {
         return JSON.stringify({
           body: "**Depends on:** #2",
           comments: [],
           state: "OPEN",
         });
       }
-      if (number === 2) {
-        return JSON.stringify({ body: "", comments: [], state: "OPEN" });
-      }
-      return "";
+      throw new Error("gh pr list failed");
     };
+
+    // A read that fails is not a landing: the parent keeps the child waiting.
+    expect(await openDependencies({ repo: "gazon1/sing", gh: failing }, child)).toEqual([2]);
+  });
+
+  it("does not hold the child when its own text cannot be read", async () => {
     const child = { number: 1, title: "the child", updatedAt: "", labels: [] };
-
-    expect(await openDependencies({ repo: "gazon1/sing", gh }, child)).toEqual([2]);
-
-    const closedParent = async (args: readonly string[]): Promise<string> => {
-      const number = Number(args[2]);
-      if (number === 1) {
-        return JSON.stringify({
-          body: "Parent: #2",
-          comments: [],
-          state: "OPEN",
-        });
-      }
-      if (number === 2) {
-        return JSON.stringify({ body: "", comments: [], state: "CLOSED" });
-      }
-      return "";
+    const failing: GhRunner = async (): Promise<string> => {
+      throw new Error("gh issue view failed");
     };
-    expect(
-      await openDependencies({ repo: "gazon1/sing", gh: closedParent }, child),
-    ).toEqual([]);
+
+    // The child's own text is read best-effort: the run cannot go on without
+    // the brief either, and it stops there.
+    expect(await openDependencies({ repo: "gazon1/sing", gh: failing }, child)).toEqual([]);
+  });
+
+  it("asks for the parent's merged pull request", () => {
+    expect(mergedPullRequestArgs("gazon1/sing", "agent/issue-2")).toEqual([
+      "pr",
+      "list",
+      "--repo",
+      "gazon1/sing",
+      "--head",
+      "agent/issue-2",
+      "--state",
+      "merged",
+      "--limit",
+      "1",
+      "--json",
+      "number",
+    ]);
   });
 });
 
@@ -5475,6 +5662,7 @@ describe("the work session's decisions", () => {
       cwd: "/tmp/does-not-matter",
       repo: "gazon1/sing",
       issueNumber: 42,
+      worktree: testWorktree(42),
       gh,
       deadlineMs: 60_000,
     });
@@ -5546,6 +5734,7 @@ describe("the work session's decisions", () => {
       cwd: "/tmp/does-not-matter",
       repo: "gazon1/sing",
       issueNumber: 42,
+      worktree: testWorktree(42),
       gh,
       deadlineMs: 60_000,
     });

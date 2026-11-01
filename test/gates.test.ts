@@ -75,11 +75,21 @@ describe("the gates the runner runs", () => {
       return "";
     };
 
-    await runGates({ run, cwd: "/the/worktree", budgetMs: 90_000 });
+    // More of the run left than any gate may take: every gate gets its own
+    // budget, whatever the clock did between them.
+    await runGates({ run, cwd: "/the/worktree", budgetMs: GATE_TIMEOUT_MS + 60_000 });
+    expect(budgets).toEqual([GATE_TIMEOUT_MS, GATE_TIMEOUT_MS, GATE_TIMEOUT_MS]);
 
-    expect(budgets).toEqual([90_000, 90_000, 90_000]);
+    // Less than a gate's own budget: no gate gets more than the run has left.
+    // The left-over shrinks by the milliseconds that pass, so the share is
+    // bounded and not fixed — an exact figure here asserts the clock, not the
+    // gate.
+    budgets.length = 0;
+    await runGates({ run, cwd: "/the/worktree", budgetMs: 90_000 });
+    expect(budgets).toHaveLength(GATES.length);
     for (const budget of budgets) {
-      expect(budget).toBeLessThanOrEqual(GATE_TIMEOUT_MS);
+      expect(budget).toBeGreaterThan(0);
+      expect(budget).toBeLessThanOrEqual(90_000);
     }
   });
 
