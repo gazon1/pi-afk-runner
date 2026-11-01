@@ -583,7 +583,7 @@ export function liveFrontDoor(
             } else if (restored.unprepared !== null) {
               talk(
                 ctx,
-                `afk-runner: the worktree this chat is in came back unprepared — ${SETUP_SCRIPT} did not run in it (${restored.unprepared}). Run it in the worktree before the gates.`,
+                unpreparedMessage("the worktree this chat is in", restored.unprepared),
                 "warning",
               );
             }
@@ -675,6 +675,17 @@ export function liveFrontDoor(
       void targetSession.abort().catch(() => {});
     }
   };
+
+  /**
+   * What the door says about a worktree that came back unprepared.
+   *
+   * One wording for the two places the door says it, so the two copies cannot
+   * drift apart. It says what happened rather than what was meant: the setup
+   * script may not have been there at all, and it may have run and failed —
+   * the reason in the brackets says which.
+   */
+  const unpreparedMessage = (subject: string, reason: string): string =>
+    `afk-runner: ${subject} came back unprepared — ${SETUP_SCRIPT} did not prepare it (${reason}). Run it in the worktree before the gates.`;
 
   /**
    * Put the worktree back where the run had it, so a session whose working
@@ -819,11 +830,7 @@ export function liveFrontDoor(
       return;
     }
     if (restored.unprepared !== null) {
-      talk(
-        ctx,
-        `afk-runner: the worktree came back unprepared — ${SETUP_SCRIPT} did not run in it (${restored.unprepared}). Run it in the worktree before the gates.`,
-        "warning",
-      );
+      talk(ctx, unpreparedMessage("the worktree", restored.unprepared), "warning");
     }
     try {
       const switched = await ctx.switchSession(target.transcript as string);
