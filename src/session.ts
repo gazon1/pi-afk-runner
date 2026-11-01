@@ -104,6 +104,25 @@ export function fenceIssueComments(comments: readonly string[]): string {
 /** The marker a brief comment opens with. */
 export { BRIEF_MARKER };
 
+/**
+ * The brief, fenced as untrusted data.
+ *
+ * A fix or review session is a **new** session: it has not seen the issue's
+ * body or comments, so the rule that says "the brief is there" is not enough.
+ * The brief travels with the prompt, in the same fence the work session uses,
+ * so the untrusted-input rule covers it and the caller cannot paste it as an
+ * instruction by accident.
+ */
+export function briefFence(issue: IssueDetail): string {
+  const brief = findBrief(issue);
+  if (brief === null) {
+    return "";
+  }
+  return brief.comment === null
+    ? fenceIssueBody(brief.text)
+    : fenceIssueComments([brief.text]);
+}
+
 /** The brief of an issue, and where it was found. */
 export interface Brief {
   /** The brief's text. */
@@ -851,6 +870,13 @@ export interface WorkSessionResult extends PromptArrayResult {
   readonly decision: "work" | "skip" | "split";
   /** The reason the triage or scope turn gave. */
   readonly reason: string;
+  /**
+   * The issue as the session read it.
+   *
+   * The fix and review sessions run after this one and need the same brief;
+   * handing it back saves a second read and keeps the two looking at one copy.
+   */
+  readonly issue: IssueDetail;
 }
 
 /**
@@ -983,7 +1009,7 @@ export async function startAgent(options: {
       : scope.value?.decision === "split"
         ? scope.value.reason
         : "";
-  return { ...result, decision, reason };
+  return { ...result, decision, reason, issue };
 }
 
 /** The name of the tool the reviewer ends its turn with. */

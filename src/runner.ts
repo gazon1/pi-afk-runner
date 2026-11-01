@@ -35,6 +35,7 @@ import { GUARD_POLICY } from "./guard.js";
 import {
   UNTRUSTED_INPUT_RULE,
   UNTRUSTED_INPUT_SECTION,
+  briefFence,
   createVerdictTool,
   runPromptArray,
   startAgent,
@@ -599,6 +600,14 @@ export async function reviewPullRequest(options: {
   /** Whether somebody has stopped the run. */
   readonly stopped?: () => boolean;
   readonly schedule?: Scheduler;
+  /**
+   * The issue whose brief the review judges the change against.
+   *
+   * The reviewer is a new session: it has not seen the issue, and a diff alone
+   * cannot say whether the change meets the acceptance criteria. The brief
+   * travels with the prompt, fenced as untrusted data.
+   */
+  readonly issue?: IssueDetail;
 }): Promise<ReviewOutcome> {
   const holder: { value?: ReviewVerdict } = {};
   const session = await options.factory({
@@ -609,12 +618,24 @@ export async function reviewPullRequest(options: {
     tools: [createVerdictTool(holder)],
   });
 
+  const fence = options.issue === undefined ? "" : briefFence(options.issue);
+  const prompt =
+    fence === ""
+      ? REVIEW_PROMPT
+      : [
+          REVIEW_PROMPT,
+          "",
+          "## The brief this change is judged against",
+          "",
+          fence,
+        ].join("\n");
+
   // The session belongs to `runPromptArray` once it is given one: it disposes
   // of it when the run is over. A second owner would make the session's life
   // the business of two places that do not agree on who is responsible.
   const result = await runPromptArray({
     session,
-    prompts: [REVIEW_PROMPT],
+    prompts: [prompt],
     // The review is one state: the verdict, in one turn.
     states: [{ name: "review", phase: "Review" }],
     deadlineMs: options.deadlineMs,
@@ -708,7 +729,8 @@ export async function addRecountLabel(options: {
  * found, and a summary of them is a second reading of the diff by somebody who
  * did not review it. The gates are the same the implementing turn ran.
  */
-export function fixPrompt(findings: readonly string[]): string {
+export function fixPrompt(findings: readonly string[], issue?: IssueDetail): string {
+  const fence = issue === undefined ? "" : briefFence(issue);
   return [
     "The reviewer of this pull request did not pass it. Fix what it found.",
     "",
@@ -717,6 +739,14 @@ export function fixPrompt(findings: readonly string[]): string {
     ...(findings.length === 0
       ? ["- The review said fail without naming a finding. Read the review comment on the pull request."]
       : findings.map((finding) => `- ${finding}`)),
+    ...(fence === ""
+      ? []
+      : [
+          "",
+          "## The brief this change must still satisfy",
+          "",
+          fence,
+        ]),
     "",
     "1. Address every finding. Where a finding is wrong, make the code say why it is wrong.",
     "",
@@ -749,6 +779,8 @@ export async function fixWorktree(options: {
   readonly deadlineMs: number;
   readonly stopped?: () => boolean;
   readonly schedule?: Scheduler;
+  /** The issue whose brief the fix must not break. */
+  readonly issue?: IssueDetail;
 }): Promise<void> {
   const session = await options.factory({
     cwd: options.cwd,
@@ -756,7 +788,7 @@ export async function fixWorktree(options: {
   });
   const result = await runPromptArray({
     session,
-    prompts: [fixPrompt(options.findings)],
+    prompts: [fixPrompt(options.findings, options.issue)],
     // The fix is one state: the findings, addressed in one turn.
     states: [{ name: "fix", phase: "Fix" }],
     deadlineMs: options.deadlineMs,
@@ -1821,6 +1853,8 @@ async function runPlan(
     reviewedSha: "",
     slug: null as string | null,
     verdict: "pass" as "pass" | "fail",
+    /** The issue, once the work session read it; a resume reads it itself. */
+    issue: plan.issueDetail ?? (null as IssueDetail | null),
     /** What the work session decided to do with the issue. */
     decision: "work" as "work" | "skip" | "split",
     /** Why it decided that. */
@@ -1906,6 +1940,7 @@ async function runPlan(
         }
         state.decision = result.decision;
         state.reason = result.reason;
+        state.issue = result.issue;
         if (result.decision !== "work") {
           // The branch closed the issue (skip) or replaced it with smaller ones
           // (split). There is no work to commit, push or review: the run ends
@@ -2012,6 +2047,12 @@ async function runPlan(
         if (state.decision !== "work" || !reviews) {
           return "skipped";
         }
+        // The work session handed back the issue it read. A resume has no work
+        // session, so the review reads it once; the fix and every re-review see
+        // the same brief.
+        const detail =
+          state.issue ?? (await readIssue(options.repo, issue.number, options.gh));
+        state.issue = detail;
         const startedAt = workSessionStartedAt ?? Date.now();
         const remaining = (): number => options.deadlineMs - (Date.now() - startedAt);
         let exhausted = false;
@@ -2036,6 +2077,7 @@ async function runPlan(
               run: options.run,
               deadlineMs: budget,
               ...(options.stopped === undefined ? {} : { stopped: options.stopped }),
+              issue: detail,
             });
             state.verdict = reviewed.verdict;
             state.findings = reviewed.findings;
@@ -2056,6 +2098,7 @@ async function runPlan(
               findings: state.findings,
               deadlineMs: budget,
               ...(options.stopped === undefined ? {} : { stopped: options.stopped }),
+              issue: detail,
             });
             await commitAll(
               options.git,
@@ -2113,8 +2156,11 @@ async function runPlan(
         return "skipped — the issue was not worked";
       }
       // The label is what makes the gate count the review. The review step
-      // applies it when it posts; here it is the only thing left to do.
-      if (!reviews && state.pullRequest !== 0) {
+      // applies it when it posts; here it is the only thing left to do — and
+      // only when there is a review to count. A run whose deadline left no
+      // room for the review must not mark the pull request as reviewed.
+      const reviewed = state.reviewCount > 0 || plan.kind === "re-count";
+      if (!reviews && reviewed && state.pullRequest !== 0) {
         await addRecountLabel({
           repo: options.repo,
           pullRequest: state.pullRequest,
