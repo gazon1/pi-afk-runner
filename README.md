@@ -4,7 +4,9 @@ An AFK queue runner for [Pi](https://github.com/earendil-works/pi-coding-agent):
 issue labelled `ready-for-agent`, gives it an isolated git worktree, runs an agent on it, opens a
 pull request, and has a second agent review that pull request.
 
-**It never merges.** A human merges.
+**The work pipeline never merges.** A human merges — or the separate, opt-in merge pipeline does,
+when it is asked to: `--merge` lands reviewed pull requests, and nothing lands before its review
+and its CI say so.
 
 ## Status
 
@@ -22,6 +24,9 @@ when that repository changes. The binding is written down there:
 **[the AFK runner contract](https://github.com/gazon1/sing/blob/main/docs/architecture/afk-runner.md)** —
 the queue selector, the brief's marker, the review's marker and verdict, the re-count label, the
 registry entries a landed change carries, and the worktree recipe.
+
+The **merge** mode is not part of that contract — the work pipeline never merges — so its binding is
+this repository's own: [contract/merge.md](contract/merge.md).
 
 ## The components
 
@@ -230,6 +235,36 @@ put back first, because a chat whose working directory is gone can read nothing.
 on the issue until it closes — an issue without it is back in the
 queue — so the target repository's own workflow removes it on close
 (`.github/workflows/afk-label-cleanup.yml` in the repository this runner was written for).
+
+## Merging — the separate pipeline
+
+The work pipeline stops at a reviewed pull request. Landing it is a **separate, opt-in mode**:
+
+```bash
+pi-afk-runner --checkout ~/work/singularity --merge
+```
+
+It reads the open pull requests against `--base` (default `main`) and considers only the ones whose
+branch is `agent/issue-<N>` — the work pipeline's own. A pull request is a candidate when its
+**newest** marked review comment says `**Verdict:** pass`, it carries `agent-reviewed`, it is not a
+draft, and the repository's own CI tool (`scripts/ci-verdict.py`) says the run was a success. Anything
+else is reported and left alone; the next run reads it again.
+
+For each candidate it makes a worktree on the branch, merges the current base into it, and lands it
+**only when the branch does not move** — the commit CI judged is the commit that lands. When the
+branch has to move — the base moved under it, a conflict had to be resolved, or the gate failed — an
+agent resolves the worktree, the runner runs the repository's gate (`./check.sh`), pushes, and posts a
+fresh review of the new diff. That pull request is **not** merged in the same run: it lands on the
+next one, once CI has judged the new commit. A merge never lands a commit CI has not seen.
+
+Each pull request's record goes under `build/diagnostics/merge/pr-<N>/`. A failed step is reported
+with its name and the pull request stays open; a skipped pull request is not a failure. The lock is
+the work pipeline's, so the two do not run at once.
+
+The decision is recorded in
+[docs/decisions/2026-11-02-the-merge-pipeline-is-separate.md](docs/decisions/2026-11-02-the-merge-pipeline-is-separate.md).
+The contract's "never merges" is the **work** pipeline's rule; this mode is the explicit exception,
+and it only lands what that pipeline opened and reviewed.
 
 ## What is in this repository
 
