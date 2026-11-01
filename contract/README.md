@@ -45,6 +45,24 @@ The one place where the drift would bite hardest is
 `scripts/ci/check-agent-review.py`: the runner's comment format is asserted against its reader,
 so a copy that has fallen behind turns a passing test into a lie.
 
+## Where the runner goes past the copy
+
+The copy's pipeline is `select → claim → worktree → session → push → pull request → review →
+re-count`. The runner's has one step more: a **`gates`** step between the session and the push, in
+which the runner runs the target's own gates — the three the copy's "The gates the agent runs"
+section names — in the worktree, on the tree the agent left. A gate that does not pass ends the
+run there: the claim is released, nothing is pushed, and the record says which gate failed.
+
+The copy is **not** edited to match. It is the target's document, and the target owns it: the
+pipeline it describes is the target's, and a runner that rewrote the copy to agree with itself
+would be editing a copy and calling it a contract. The deviation is recorded here, in the
+documents this repository owns, and in
+[the decision that made it](../docs/decisions/2026-11-02-the-runner-runs-the-repositorys-gates.md).
+When the target's contract names the gates step, the copy is copied again and this section goes.
+
+The gate list itself is the copy's: `src/gates.ts` holds it, and a test holds that list against the
+copy's own block — one list, in two places, and a test that says the two are the same.
+
 ## The merge mode's contract
 
 [`merge.md`](merge.md) is **not a copy**. The target's contract describes the work pipeline, and

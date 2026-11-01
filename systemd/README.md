@@ -33,6 +33,15 @@ The unit needs two things from the environment that systemd does not have:
 - `PI_AGENT_DIR` must point at Pi's agent directory, so that the session the
   runner creates has its settings and its credentials.
 
+**The host needs the target repository's own tools.** The runner runs the
+repository's gates — `./check.sh`, `just tcheck-evals`, `just docs-audit` — in
+the worktree, so `just` and whatever those gates call have to be on the machine
+the timer runs on, and on the PATH the unit gives it. A gate that could not run
+says so and ends the run (`45`); it does not look like a gate that refused the
+change. The gates share the run's one-hour budget with the session and the
+review, so a sweep that works several issues takes several hours — the timer
+fires hourly, and the lock keeps the ticks from overlapping.
+
 ## What the exit code says
 
 The unit's status is the exit code, and the code names the step:
@@ -45,6 +54,7 @@ The unit's status is the exit code, and the code names the step:
 | 20 | the claim failed |
 | 30 | the worktree failed |
 | 40 | the agent's session failed, or was cut off by the deadline |
+| 45 | the repository's gates did not pass — the run pushed nothing |
 | 50 | the push failed |
 | 60 | the pull request failed |
 | 70 | the review failed |

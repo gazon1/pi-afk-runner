@@ -32,6 +32,7 @@ import { join } from "node:path";
 import { claimIssue, reclaimClaim, releaseClaim } from "./claim.js";
 import { errorMessage } from "./cli.js";
 import { GUARD_POLICY } from "./guard.js";
+import { GATE_TIMEOUT_MS, GateFailed, runGates } from "./gates.js";
 import {
   UNTRUSTED_INPUT_RULE,
   UNTRUSTED_INPUT_SECTION,
@@ -310,126 +311,6 @@ export async function prepareWorktree(
   });
 
   return { path: options.worktreePath, branch };
-}
-
-/**
- * How long one gate may run before the run gives up on it.
- *
- * The merge pipeline gives the same repository gate an hour, and the two doors
- * must not disagree about how long a build may take: the work pipeline runs the
- * gate first, and a stricter budget there would kill a build the merge
- * pipeline would have let finish.
- */
-export const GATE_TIMEOUT_MS = 60 * 60 * 1000;
-
-/**
- * One of the target repository's own gates.
- */
-export interface GateCommand {
-  /** The gate as the repository's contract writes it — what the record names. */
-  readonly label: string;
-  /** The program to run. */
-  readonly command: string;
-  /** Its arguments. */
-  readonly args: readonly string[];
-}
-
-/**
- * The gates the target repository runs, in the order its contract names them.
- *
- * These are the **repository's** gates, not the runner's: `contract/afk-runner.md`
- * copies the list out of the target repository's own review skill, and a runner
- * that judged a change by a gate of its own invention would be judging it by a
- * rule the repository does not have.
- *
- * The list is the whole of it. `just gate` is not it: it runs the Maestro flows
- * on a device, and it does not run `docs-audit`.
- */
-export const GATE_COMMANDS: readonly GateCommand[] = [
-  { label: "./check.sh", command: "bash", args: ["./check.sh"] },
-  { label: "just tcheck-evals", command: "just", args: ["tcheck-evals"] },
-  { label: "just docs-audit", command: "just", args: ["docs-audit"] },
-];
-
-/** A gate that failed, with what it printed. */
-export class GateFailed extends Error {
-  /** The gate that failed, as the repository's contract writes it. */
-  readonly gate: string;
-  /**
-   * The exit code the gate returned — absent when it never returned one.
-   *
-   * A gate that was killed, or that never started, has no exit code, and the
-   * record must not claim one: "exit 1" would say the gate refused the change
-   * when it never got to answer.
-   */
-  readonly exitCode: number | undefined;
-  /** What the gate printed — its standard output and its standard error. */
-  readonly output: string;
-
-  constructor(options: {
-    readonly gate: string;
-    readonly exitCode?: number;
-    readonly output: string;
-  }) {
-    const said = firstLine(options.output);
-    const how =
-      options.exitCode === undefined ? "failed" : `failed (exit ${options.exitCode})`;
-    super(
-      said === ""
-        ? `the gate ${options.gate} ${how}`
-        : `the gate ${options.gate} ${how}: ${said}`,
-    );
-    this.name = "GateFailed";
-    this.gate = options.gate;
-    this.exitCode = options.exitCode;
-    this.output = options.output;
-  }
-}
-
-/**
- * Run the repository's own gates in the worktree.
- *
- * Each gate is the repository's command, run where the repository runs it: in
- * the worktree, on the tree the agent left. A gate that exits non-zero ends
- * the run — the work is not finished, and a run that pushes it anyway hands the
- * review a diff the repository's own gate has already refused.
- *
- * The gates run in order, and the first one that fails ends the run: the gates
- * after it would judge a tree that is already refused.
- */
-export async function runGates(options: {
-  readonly run: CommandRunner;
-  readonly cwd: string;
-}): Promise<string> {
-  const passed: string[] = [];
-  for (const gate of GATE_COMMANDS) {
-    try {
-      await options.run({
-        command: gate.command,
-        args: gate.args,
-        cwd: options.cwd,
-        // The gate's own budget, not the command runner's default: a build
-        // that runs long is still the gate's own answer, and a timeout the
-        // gate never chose is not a verdict.
-        timeoutMs: GATE_TIMEOUT_MS,
-      });
-    } catch (failure) {
-      throw new GateFailed({
-        gate: gate.label,
-        ...(failure instanceof CommandFailed
-          ? { exitCode: failure.exitCode }
-          : {}),
-        output:
-          failure instanceof CommandFailed
-            ? [failure.stdout, failure.stderr].join("\n")
-            : failure instanceof Error
-              ? failure.message
-              : String(failure),
-      });
-    }
-    passed.push(`${gate.label} — ok`);
-  }
-  return passed.join(", ");
 }
 
 /** The tool that computes a change's contract digest — the repository's own. */
@@ -1064,9 +945,9 @@ export interface StepRecord {
   /**
    * What the step's command printed, when it failed and said something.
    *
-   * The detail names the failure; this is the evidence behind it. A gate that
-   * fails says why in its output, and a record that carries only "a gate
-   * failed" says nothing a reader can act on.
+   * The detail names the failure; this is the evidence behind it. Only the
+   * gates step carries it: a gate says why it refused the change, and a
+   * record that says only "a gate failed" says nothing a reader can act on.
    */
   readonly output?: string;
 }
@@ -1237,23 +1118,6 @@ export async function releaseRun(options: {
 }
 
 /**
- * What a failed step's command printed.
- *
- * A command that fails says why in its output, and the record is where a
- * reader looks for it: the step's detail names the failure, and the output is
- * the evidence behind it.
- */
-function stepOutput(error: Error): string {
-  if (error instanceof GateFailed) {
-    return error.output;
-  }
-  if (error instanceof CommandFailed) {
-    return [error.stdout, error.stderr].join("\n");
-  }
-  return "";
-}
-
-/**
  * Run the steps in order, and release the claim when one of them fails.
  *
  * The record is written **whatever** happens: a run that died is exactly the
@@ -1292,7 +1156,11 @@ export async function runSteps(options: {
       record = { step: step.name, outcome: "ok", detail: redact(firstLine(output)) };
     } catch (error) {
       const cause = error instanceof Error ? error : new Error(String(error));
-      const output = stepOutput(cause);
+      // Only the gates step carries its output into the record. A gate says
+      // why it refused the change; the other steps say what they said in
+      // their detail, and a record of every failed command's output would be
+      // a record of megabytes.
+      const output = cause instanceof GateFailed ? cause.output : "";
       record = {
         step: step.name,
         outcome: "failed",
@@ -1674,6 +1542,78 @@ export async function commitAll(
 }
 
 /**
+ * The share of the run's budget the gates keep.
+ *
+ * The gates are the runner's own work and they run after the session: a
+ * session that may spend the whole budget leaves the gates nothing to run
+ * with, and a run whose gates never ran pushes nothing. The session is
+ * therefore given the budget minus this share, and the gates are given what
+ * the session leaves behind.
+ *
+ * A third of the budget, capped at the merge pipeline's own gate budget: the
+ * two doors must not disagree about how long a build may take.
+ */
+export function gatesBudget(deadlineMs: number): number {
+  return Math.min(GATE_TIMEOUT_MS, Math.floor(deadlineMs / 3));
+}
+
+/**
+ * Run the gates on the worktree, and put the worktree back afterwards.
+ *
+ * The gates build in the worktree, and the runner's own commits are made with
+ * `git add -A`: the artifacts would go to the remote with the work. The tree
+ * the gates judged is the tree that is pushed, so the worktree goes back to it
+ * — whether the gates passed or not.
+ *
+ * A worktree that could not be put back is a run that stops: a tree with a
+ * gate's build in it is not a tree to push. The gate's own failure is the one
+ * the record carries, though: a failed gate is what the reader needs to see.
+ */
+async function gateTheTree(options: {
+  readonly git: GitRunner;
+  readonly run: CommandRunner;
+  readonly cwd: string;
+  readonly budgetMs: number;
+}): Promise<string> {
+  const outcome = await runGates({
+    run: options.run,
+    cwd: options.cwd,
+    budgetMs: options.budgetMs,
+  }).then(
+    (summary) => ({ summary, failure: undefined as unknown }),
+    (error: unknown) => ({ summary: "", failure: error }),
+  );
+  try {
+    await restoreWorktree(options.git, options.cwd);
+  } catch (restoreError) {
+    if (outcome.failure === undefined) {
+      throw restoreError;
+    }
+  }
+  if (outcome.failure !== undefined) {
+    throw outcome.failure;
+  }
+  return outcome.summary;
+}
+
+/**
+ * Put the worktree back to the tree the gates judged.
+ *
+ * A gate that builds leaves its build in the worktree, and the runner's own
+ * commits are made with `git add -A`: the artifacts would go to the remote
+ * with the work. The tree the gates judged is the tree that is pushed, so the
+ * worktree goes back to it — the files the gates changed and the files they
+ * left behind.
+ *
+ * The ignored files stay: the worktree's own Gradle home, its `.env` copy
+ * and its build outputs are the repository's, not the runner's to delete.
+ */
+export async function restoreWorktree(git: GitRunner, cwd: string): Promise<void> {
+  await git(["reset", "--hard"], { cwd });
+  await git(["clean", "-fd"], { cwd });
+}
+
+/**
  * The change the work landed, if it landed one.
  *
  * A change is a directory under `openspec/changes/`, and its name is the
@@ -1705,10 +1645,8 @@ export async function changedChangeSlug(
  * selection yields — and because an empty queue is not a run: there is nothing
  * to record and nothing to release.
  *
- * The steps are: claim → worktree → session → gates → push → pull request →
- * review → re-count. The gates are the repository's own, run in the worktree
- * on the work the agent left: a gate that fails ends the run before anything
- * is pushed. The re-count is the label that re-triggers the pull request's CI,
+ * The steps are: claim → worktree → session → push → pull request → review →
+ * re-count. The re-count is the label that re-triggers the pull request's CI,
  * and it is applied by the review step, because the order between the comment
  * and the label is fixed there; the re-count step writes the change's verdict
  * file, which is the record that re-count is counted against.
@@ -2026,6 +1964,22 @@ async function runPlan(
   let reviews = works || plan.kind === "pull request" || plan.kind === "review";
   let workSessionStartedAt: number | undefined;
 
+  // The run's budget is one wall-clock for everything it does: the session,
+  // the gates and the review. The gates keep a share of it out of the
+  // session's, because they run after the session and a session that may
+  // spend everything leaves them nothing to run with.
+  const gateReserveMs = gatesBudget(options.deadlineMs);
+  const sessionBudgetMs = Math.max(0, options.deadlineMs - gateReserveMs);
+  const runStartedAt = Date.now();
+  /**
+   * What is left of the run's budget.
+   *
+   * One clock for the whole run: the session, the gates and the review share
+   * it, and each of them asks what is left when its turn comes.
+   */
+  const remaining = (): number =>
+    options.deadlineMs - (Date.now() - (workSessionStartedAt ?? runStartedAt));
+
   const steps: Step[] = [];
 
   if (works) {
@@ -2083,11 +2037,14 @@ async function runPlan(
           issueNumber: issue.number,
           ...(plan.issueDetail === undefined ? {} : { issue: plan.issueDetail }),
           gh: options.gh,
-          deadlineMs: options.deadlineMs,
+          // The session does not get the whole budget: the gates run after
+          // it, and a session that may spend everything leaves them nothing
+          // to run with.
+          deadlineMs: sessionBudgetMs,
           ...(options.stopped === undefined ? {} : { stopped: options.stopped }),
         });
         const workElapsedMs = workSessionStartedAt === undefined ? 0 : Date.now() - workSessionStartedAt;
-        if (workElapsedMs >= options.deadlineMs) {
+        if (workElapsedMs >= sessionBudgetMs) {
           reviews = false;
         }
         if (result.aborted) {
@@ -2115,10 +2072,14 @@ async function runPlan(
         if (count === "0") {
           throw new Error("the agent made no commits — no changes to push or open a pull request");
         }
-        // A change the work landed needs its registry entry. It is created here
-        // and not in the push step, because the gates run between the two: a
-        // gate that judged the tree without the entry would judge a tree the
-        // pull request never carries.
+        // The work is committed, and the gates run on it: the tree they judge
+        // is the tree that is pushed.
+        //
+        // A change the work landed needs its registry entry, and the entry
+        // belongs to the pull request. It is created here and not in the push
+        // step, because the gates run between the two: a gate that judged the
+        // tree without the entry would judge a tree the pull request never
+        // carries.
         state.slug = await changedChangeSlug(options.git, state.worktreePath, {
           base: state.base,
           head: await headSha(options.git, state.worktreePath),
@@ -2141,15 +2102,21 @@ async function runPlan(
           return "skipped — the issue was not worked";
         }
         // The repository's own gates, in the worktree, on the tree the agent
-        // left. The agent was told to run them too; the runner runs them
-        // because an agent that skipped them is not a gate, and a broken diff
-        // that reaches the review costs a whole review cycle.
+        // left. The agent was told to run them too — it has to, to fix what
+        // they report — but the runner runs them because an agent that
+        // skipped them is not a gate, and a broken diff that reaches the
+        // review costs a whole review cycle.
         //
-        // A gate that fails ends the run here: the claim is released and
-        // nothing is pushed.
-        return await runGates({
+        // A gate that does not pass ends the run here: the claim is released
+        // and nothing is pushed.
+        return await gateTheTree({
+          git: options.git,
           run: options.run,
           cwd: state.worktreePath,
+          // What is left of the run's budget: the gates share it with the
+          // session and the review, so a run cannot outlive its ceiling by
+          // three gate-hours.
+          budgetMs: remaining(),
         });
       },
     });
@@ -2231,8 +2198,6 @@ async function runPlan(
         const detail =
           state.issue ?? (await readIssue(options.repo, issue.number, options.gh));
         state.issue = detail;
-        const startedAt = workSessionStartedAt ?? Date.now();
-        const remaining = (): number => options.deadlineMs - (Date.now() - startedAt);
         let exhausted = false;
 
         // `gate` is the engine's retry-until-pass block: review, and when the
@@ -2283,6 +2248,16 @@ async function runPlan(
               state.worktreePath,
               "fix: the review's findings",
             );
+            // The fix changed the tree, so the tree the gates judged is not
+            // the tree that would be pushed: the gates run again, and a fix
+            // that does not pass them is not pushed. The tree on the remote
+            // is the tree the gates judged.
+            await gateTheTree({
+              git: options.git,
+              run: options.run,
+              cwd: state.worktreePath,
+              budgetMs: remaining(),
+            });
             const sha = await headSha(options.git, state.worktreePath);
             const size = await changedSize(options.git, state.worktreePath, {
               base: state.base,

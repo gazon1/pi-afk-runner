@@ -78,12 +78,13 @@ import {
 } from "../src/gh.js";
 import {
   UNCLAIMED,
-  GATE_TIMEOUT_MS,
+  RunFailed,
   blockedReason,
   changedSize,
   computeDocumentsDigest,
   deriveState,
   fixPrompt,
+  gatesBudget,
   isSmallChange,
   verifyPush,
   ensureRegistryEntry,
@@ -96,7 +97,6 @@ import {
   reviewPullRequest,
   runOnce,
   runSteps,
-  RunFailed,
   verdictFile,
   prepareWorktree,
   isStale,
@@ -107,6 +107,7 @@ import {
   type RunOptions,
   type Step,
 } from "../src/runner.js";
+import { GATE_TIMEOUT_MS } from "../src/gates.js";
 import { HOLDER_COMMAND, takeLock, workLockName } from "../src/lock.js";
 import {
   EXIT_LOCKED,
@@ -425,6 +426,24 @@ function isReviewer(tools: readonly unknown[] | undefined): boolean {
   return (tools ?? []).some(
     (tool) => (tool as { readonly name?: string }).name === VERDICT_TOOL_NAME,
   );
+}
+
+/**
+ * Whether a command is one of the repository's gates.
+ *
+ * The setup script is run with `bash` too, and it is not a gate.
+ */
+function isGate(spec: {
+  readonly command: string;
+  readonly args: readonly string[];
+}): boolean {
+  if (spec.command === "bash") {
+    return spec.args[0] === "./check.sh";
+  }
+  if (spec.command === "just") {
+    return spec.args[0] === "tcheck-evals" || spec.args[0] === "docs-audit";
+  }
+  return false;
 }
 
 const execFileAsync = promisify(execFile);
@@ -2389,24 +2408,23 @@ describe("the CLI's run", () => {
         return {
           async prompt() {
             turn += 1;
-            if (turn > 1) {
-              return;
+            if (turn === 1) {
+              await writeFile(join(cwd, "work.txt"), "the work\n", "utf8");
+              await runGit(["add", "-A"], { cwd });
+              await runGit(
+                [
+                  "-c",
+                  "user.name=Fixture",
+                  "-c",
+                  "user.email=fixture@example.com",
+                  "commit",
+                  "-q",
+                  "-m",
+                  "the work",
+                ],
+                { cwd },
+              );
             }
-            await writeFile(join(cwd, "work.txt"), "the work\n", "utf8");
-            await runGit(["add", "-A"], { cwd });
-            await runGit(
-              [
-                "-c",
-                "user.name=Fixture",
-                "-c",
-                "user.email=fixture@example.com",
-                "commit",
-                "-q",
-                "-m",
-                "the work",
-              ],
-              { cwd },
-            );
           },
           async abort() {},
           dispose() {},
@@ -2487,7 +2505,7 @@ describe("the CLI's run", () => {
       const gates: string[] = [];
       const budgets: (number | undefined)[] = [];
       const run: CommandRunner = async (spec) => {
-        if (spec.command === "bash" || spec.command === "just") {
+        if (isGate(spec)) {
           gates.push(`${spec.command} ${spec.args.join(" ")} in ${spec.cwd}`);
           budgets.push(spec.timeoutMs);
         }
@@ -2504,20 +2522,47 @@ describe("the CLI's run", () => {
         `just tcheck-evals in ${worktree}`,
         `just docs-audit in ${worktree}`,
       ]);
-      // And each gate had the gate budget, not the command runner's default:
-      // a build that runs long is still the gate's own answer.
-      expect(budgets).toEqual([GATE_TIMEOUT_MS, GATE_TIMEOUT_MS, GATE_TIMEOUT_MS]);
+      // And each gate had the gate's own budget, and no more than the run had
+      // left: a run cannot outlive its ceiling by three gate-hours.
+      expect(budgets).toHaveLength(3);
+      for (const budget of budgets) {
+        expect(budget).toBeGreaterThan(0);
+        expect(budget).toBeLessThanOrEqual(GATE_TIMEOUT_MS);
+      }
     } finally {
       await fixture.dispose();
     }
   });
 
-  it("test_a_gate_that_fails_stops_the_run_and_pushes_nothing", async () => {
+  it("test_the_gates_run_between_the_session_and_the_push", async () => {
+    // The order is the contract: the gates judge the tree, and the push
+    // sends it. A gate that ran after the push would be a gate about the
+    // remote.
+    const fixture = await fixtureWithSetupScript();
+    try {
+      const { gh } = stubGh([{ number: 42, title: "an issue" }]);
+      const result = await runOnce(runOptions(fixture, gh));
+
+      const record = await readFile(result.record, "utf8");
+      const steps = [...record.matchAll(/^- ([a-z ]+) — (ok|failed)/gm)].map(
+        (match) => match[1] ?? "",
+      );
+      expect(steps.indexOf("session")).toBeGreaterThanOrEqual(0);
+      expect(steps.indexOf("gates")).toBeGreaterThan(steps.indexOf("session"));
+      expect(steps.indexOf("gates")).toBeLessThan(steps.indexOf("push"));
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("test_a_gate_that_failed_stops_the_run_before_the_push", async () => {
+    // The gate is the target repository's own, and the run stops on it — here,
+    // not in CI.
     const fixture = await fixtureWithSetupScript();
     try {
       const { gh, calls } = stubGh([{ number: 42, title: "an issue" }]);
       const run: CommandRunner = async (spec) => {
-        if (spec.command === "bash" && spec.args.includes("./check.sh")) {
+        if (spec.command === "bash" && spec.args[0] === "./check.sh") {
           throw new CommandFailed(
             1,
             "bash",
@@ -2562,60 +2607,178 @@ describe("the CLI's run", () => {
     }
   });
 
-  it("test_gates_that_pass_carry_the_run_on_to_the_push", async () => {
+  it("test_a_gate_that_failed_in_the_second_or_the_third_place_stops_the_run", async () => {
+    // The gates run in order, and the one that failed is the one the record
+    // names: a run that stops on the second gate says the second gate, and
+    // the gates after it never ran.
+    for (const gate of ["tcheck-evals", "docs-audit"]) {
+      const fixture = await fixtureWithSetupScript();
+      try {
+        const { gh } = stubGh([{ number: 42, title: "an issue" }]);
+        const called: string[] = [];
+        const run: CommandRunner = async (spec) => {
+          if (spec.command === "just") {
+            called.push(spec.args.join(" "));
+            if (spec.args[0] === gate) {
+              throw new CommandFailed(2, "just", [...spec.args], "", "the evals are red");
+            }
+          }
+          return JSON.stringify({ verdict: "ci.yml  run 1  success" });
+        };
+
+        const failure = await runOnce({ ...runOptions(fixture, gh), run }).then(
+          () => null,
+          (error: unknown) => error,
+        );
+
+        expect(failure).toBeInstanceOf(RunFailed);
+        expect((failure as RunFailed).step).toBe("gates");
+
+        // The failing gate is the last one that ran: the gates after it would
+        // judge a tree that is already refused.
+        expect(called[called.length - 1]).toBe(gate);
+
+        const record = await readFile((failure as RunFailed).record, "utf8");
+        expect(record).toContain(`just ${gate}`);
+        expect(record).toContain("the evals are red");
+      } finally {
+        await fixture.dispose();
+      }
+    }
+  });
+
+  it("test_the_gates_leave_no_artifacts_in_the_pushed_tree", async () => {
+    // A gate that builds leaves its build in the worktree, and the runner's
+    // own commits are made with `git add -A`: the artifacts would go to the
+    // remote with the work.
     const fixture = await fixtureWithSetupScript();
     try {
       const { gh } = stubGh([{ number: 42, title: "an issue" }]);
-      const run: CommandRunner = async () =>
-        JSON.stringify({ verdict: "ci.yml  run 1  success" });
+      const run: CommandRunner = async (spec) => {
+        if (spec.command === "bash" && spec.args[0] === "./check.sh") {
+          await writeFile(join(spec.cwd, "build-output.txt"), "the build\n", "utf8");
+        }
+        return JSON.stringify({ verdict: "ci.yml  run 1  success" });
+      };
 
-      const result = await runOnce({ ...runOptions(fixture, gh), run });
+      await runOnce({ ...runOptions(fixture, gh), run });
 
-      // The work was pushed, and the record says the gates passed.
       const pushed = (
         await gitOutput(["ls-remote", fixture.remote, workBranch(42)], {
           cwd: fixture.repo,
           env: fixture.env,
         })
       ).trim();
-      expect(pushed).not.toBe("");
-
-      const record = await readFile(result.record, "utf8");
-      expect(record).toContain("gates — ok");
-      expect(record).toContain("push — ok");
+      const sha = pushed.split(/\s+/)[0] ?? "";
+      const files = (
+        await gitOutput(["ls-tree", "-r", "--name-only", sha], {
+          cwd: fixture.repo,
+          env: fixture.env,
+        })
+      ).split("\n");
+      // The work is there, and the build the gate left is not.
+      expect(files).toContain("work.txt");
+      expect(files).not.toContain("build-output.txt");
     } finally {
       await fixture.dispose();
     }
   });
 
-  it("test_a_gate_that_never_returned_an_exit_code_is_not_reported_as_one", async () => {
-    // A gate that was killed, or that never started, has no exit code. The
-    // record must not claim one: "exit 1" would say the gate refused the
-    // change when it never got to answer.
+  it("test_a_fix_whose_gates_fail_is_not_pushed", async () => {
+    // The fix changed the tree, so the tree the gates judged is not the tree
+    // that would be pushed: the gates run again, and a fix that does not pass
+    // them is not pushed. The tree on the remote is the tree the gates
+    // judged.
     const fixture = await fixtureWithSetupScript();
     try {
       const { gh } = stubGh([{ number: 42, title: "an issue" }]);
+      let gateRuns = 0;
       const run: CommandRunner = async (spec) => {
-        if (spec.command === "bash" && spec.args.includes("./check.sh")) {
-          throw new Error(
-            `command timed out after ${GATE_TIMEOUT_MS}ms: bash ./check.sh`,
-          );
+        if (spec.command === "bash" && spec.args[0] === "./check.sh") {
+          gateRuns += 1;
+          if (gateRuns > 1) {
+            throw new CommandFailed(1, "bash", [...spec.args], "", "the fix broke the build");
+          }
         }
         return JSON.stringify({ verdict: "ci.yml  run 1  success" });
       };
 
-      const failure = await runOnce({ ...runOptions(fixture, gh), run }).then(
+      const failure = await runOnce({
+        ...runOptions(fixture, gh),
+        run,
+        session: async ({ cwd, tools }) => {
+          if (isReviewer(tools)) {
+            // The reviewer finds something, so the fix runs.
+            return {
+              async prompt() {
+                const tool = tools?.[0] as unknown as {
+                  execute: (id: string, params: unknown) => Promise<unknown>;
+                };
+                await tool.execute("call-1", {
+                  verdict: "fail",
+                  findings: ["the fix is missing"],
+                });
+              },
+              async abort() {},
+              dispose() {},
+            };
+          }
+          // The fix session is the one without tools.
+          if (tools === undefined) {
+            return {
+              async prompt() {
+                await writeFile(join(cwd, "fix.txt"), "the fix\n", "utf8");
+              },
+              async abort() {},
+              dispose() {},
+            };
+          }
+          return {
+            async prompt() {
+              await writeFile(join(cwd, "work.txt"), "the work\n", "utf8");
+            },
+            async abort() {},
+            dispose() {},
+          };
+        },
+      }).then(
         () => null,
         (error: unknown) => error,
       );
 
       expect(failure).toBeInstanceOf(RunFailed);
-      const record = await readFile((failure as RunFailed).record, "utf8");
-      expect(record).toContain("the gate ./check.sh failed");
-      expect(record).not.toContain("exit 1");
+      expect((failure as RunFailed).step).toBe("review");
+
+      // The fix was never pushed: the branch on the remote carries the work
+      // the gates judged, and not the fix that did not pass them.
+      const pushed = (
+        await gitOutput(["ls-remote", fixture.remote, workBranch(42)], {
+          cwd: fixture.repo,
+          env: fixture.env,
+        })
+      ).trim();
+      const sha = pushed.split(/\s+/)[0] ?? "";
+      const files = (
+        await gitOutput(["ls-tree", "-r", "--name-only", sha], {
+          cwd: fixture.repo,
+          env: fixture.env,
+        })
+      ).split("\n");
+      expect(files).toContain("work.txt");
+      expect(files).not.toContain("fix.txt");
     } finally {
       await fixture.dispose();
     }
+  });
+
+  it("test_the_gates_keep_a_share_of_the_runs_budget", () => {
+    // The gates run after the session, so the session may not spend the whole
+    // budget: a run whose gates never ran pushes nothing.
+    expect(gatesBudget(60 * 60 * 1000)).toBe(20 * 60 * 1000);
+    expect(gatesBudget(60_000)).toBe(20_000);
+    // And never more than the merge pipeline's own gate budget: the two doors
+    // must not disagree about how long a build may take.
+    expect(gatesBudget(10 * 60 * 60 * 1000)).toBe(GATE_TIMEOUT_MS);
   });
 
   it("test_one_invocation_acts_on_one_issue", async () => {
@@ -2664,25 +2827,24 @@ describe("the CLI's run", () => {
       }
       return {
         async prompt() {
-          if (worked.has(cwd)) {
-            return;
+          if (!worked.has(cwd)) {
+            worked.add(cwd);
+            await writeFile(join(cwd, "work.txt"), "the work\n", "utf8");
+            await runGit(["add", "-A"], { cwd });
+            await runGit(
+              [
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.com",
+                "commit",
+                "-q",
+                "-m",
+                "the work",
+              ],
+              { cwd },
+            );
           }
-          worked.add(cwd);
-          await writeFile(join(cwd, "work.txt"), "the work\n", "utf8");
-          await runGit(["add", "-A"], { cwd });
-          await runGit(
-            [
-              "-c",
-              "user.name=Fixture",
-              "-c",
-              "user.email=fixture@example.com",
-              "commit",
-              "-q",
-              "-m",
-              "the work",
-            ],
-            { cwd },
-          );
         },
         async abort() {},
         dispose() {},
@@ -2918,6 +3080,54 @@ describe("the CLI's run", () => {
       expect(calls.some((call) => call.includes("--remove-label agent-in-progress"))).toBe(false);
       // The worktree is still scratch, and was removed.
       expect(existsSync(join(fixture.root, "worktrees", "issue-42"))).toBe(false);
+    } finally {
+      await fixture.dispose();
+    }
+  }, 60_000);
+
+  it("test_a_run_that_fails_at_the_gates_exits_with_the_gates_code", async () => {
+    // The exit code says which step the run reached, and a red gate is not
+    // the same as an issue that could not be worked: a scheduler that reads
+    // the code has to be able to tell them apart.
+    const fixture = await fixtureWithSetupScript();
+    const lockDirectory = join(fixture.root, "afk-runner");
+    try {
+      const { gh } = stubGh([{ number: 42, title: "an issue" }]);
+
+      const code = await main(
+        [
+          "--repo",
+          "gazon1/sing",
+          "--checkout",
+          fixture.repo,
+          "--worktree-root",
+          join(fixture.root, "worktrees"),
+          "--lock-dir",
+          lockDirectory,
+          "--issue",
+          "42",
+        ],
+        {
+          gh,
+          session: async ({ cwd }) => ({
+            async prompt() {
+              await writeFile(join(cwd, "work.txt"), "the work\n", "utf8");
+            },
+            async abort() {},
+            dispose() {},
+          }),
+          run: async (spec) => {
+            if (spec.command === "bash" && spec.args[0] === "./check.sh") {
+              throw new CommandFailed(1, "bash", [...spec.args], "", "the build is broken");
+            }
+            return JSON.stringify({ verdict: "ci.yml  run 1  success" });
+          },
+        },
+      );
+
+      expect(code).toBe(STEP_EXIT_CODES.gates);
+      // And it is not the code that says the issue could not be worked.
+      expect(code).not.toBe(1);
     } finally {
       await fixture.dispose();
     }
@@ -4060,6 +4270,18 @@ describe("the leftovers a run files", () => {
     expect(last).toContain("gates again");
     // And the bound is in the prompt, not only in the tool.
     expect(last).toContain("three");
+  });
+
+  it("test_the_prompt_says_that_the_runner_runs_the_gates_too", async () => {
+    // The prompt and the runner must not disagree. The runner runs the whole
+    // list before it pushes, whatever the size of the change; the
+    // small-change rule is the repository's pre-push hook's, and the prompt
+    // says so where the agent reads it.
+    const prompts = await readPrompts();
+    const implement = prompts[3] ?? "";
+
+    expect(implement).toContain("The runner runs the whole list again");
+    expect(implement).toContain("`./check.sh` only");
   });
 
   it("test_the_work_session_is_given_the_tool_that_files_a_leftover", async () => {

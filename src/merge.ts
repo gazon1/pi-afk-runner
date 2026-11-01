@@ -27,6 +27,7 @@ import {
   type GhRunner,
   type OpenPullRequest,
 } from "./gh.js";
+import { GATE_OUTPUT_LIMIT_BYTES, GATE_TIMEOUT_MS } from "./gates.js";
 import {
   CommandFailed,
   fetchCommit,
@@ -38,7 +39,6 @@ import {
   type GitRunner,
 } from "./git.js";
 import {
-  GATE_TIMEOUT_MS,
   RunFailed,
   checkoutPullRequestBranch,
   commitAll,
@@ -435,6 +435,9 @@ async function verifyGate(options: MergeOptions, worktreePath: string): Promise<
       args: [GATE_SCRIPT],
       cwd: worktreePath,
       timeoutMs: options.gateTimeoutMs ?? GATE_TIMEOUT_MS,
+      // The tail of the output is the evidence; the rest is noise neither the
+      // runner nor the record has to hold.
+      maxOutputBytes: GATE_OUTPUT_LIMIT_BYTES,
     });
   };
   try {

@@ -69,6 +69,7 @@ export const STEP_EXIT_CODES: Readonly<Record<string, number>> = {
   claim: 20,
   worktree: 30,
   session: 40,
+  gates: 45,
   push: 50,
   "pull request": 60,
   review: 70,
@@ -81,9 +82,9 @@ export const DEFAULT_STALE_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
 /**
  * One hour — the wall-clock ceiling on the run.
  *
- * The budget is shared by the work session and the review session; neither
- * may exceed the remainder, and a run that spends it all does not start the
- * second session.
+ * The budget is shared by the work session, the gates and the review session;
+ * none of them may exceed the remainder, and a run that spends it all does
+ * not start the next one.
  */
 export const DEFAULT_DEADLINE_MS = 60 * 60 * 1000;
 
