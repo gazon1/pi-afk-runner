@@ -4994,7 +4994,7 @@ describe("the leftovers a run files", () => {
     const verify = prompts[4] ?? "";
 
     expect(verify).toContain("The work is the tree's");
-    expect(verify).toContain("stash");
+    expect(verify).toContain("not part of what the next run continues");
     expect(verify).toContain("stashed tree");
   });
 
