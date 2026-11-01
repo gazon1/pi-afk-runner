@@ -2496,6 +2496,160 @@ describe("the CLI's run", () => {
     }
   });
 
+  it("test_a_gate_that_failed_stops_the_run_before_the_push", async () => {
+    // The self-review fixed something and broke a gate. The gate is the
+    // target repository's own, and the run stops on it — here, not in CI.
+    const fixture = await fixtureWithSetupScript();
+    try {
+      const { gh } = stubGh([{ number: 42, title: "an issue" }]);
+
+      await expect(
+        runOnce({
+          ...runOptions(fixture, gh),
+          session: async ({ cwd, tools }) => {
+            if (isReviewer(tools)) {
+              return {
+                async prompt() {
+                  const tool = tools?.[0] as unknown as {
+                    execute: (id: string, params: unknown) => Promise<unknown>;
+                  };
+                  await tool.execute("call-1", { verdict: "pass", findings: [] });
+                },
+                async abort() {},
+                dispose() {},
+              };
+            }
+            return {
+              async prompt() {
+                await writeFile(join(cwd, "work.txt"), "the work\n", "utf8");
+                await toolNamed(tools, GATES_TOOL_NAME)?.execute("call-1", {
+                  gates: [
+                    { gate: "./check.sh", outcome: "fail", detail: "the JVM tests are red" },
+                    { gate: "just tcheck-evals", outcome: "pass", detail: "ok" },
+                    { gate: "just docs-audit", outcome: "pass", detail: "ok" },
+                  ],
+                });
+              },
+              async abort() {},
+              dispose() {},
+            };
+          },
+        }),
+      ).rejects.toThrow(/the gates failed: \.\/check\.sh/);
+
+      // And nothing reached the remote: the branch is not on it.
+      const pushed = (
+        await gitOutput(["ls-remote", fixture.remote, workBranch(42)], {
+          cwd: fixture.repo,
+          env: fixture.env,
+        })
+      ).trim();
+      expect(pushed).toBe("");
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("test_a_fix_made_after_the_gates_stops_the_run_before_the_push", async () => {
+    // The agent reported the gates and then changed the tree: the work that
+    // would be pushed is not the work the gates saw.
+    const fixture = await fixtureWithSetupScript();
+    try {
+      const { gh } = stubGh([{ number: 42, title: "an issue" }]);
+      let turn = 0;
+
+      await expect(
+        runOnce({
+          ...runOptions(fixture, gh),
+          session: async ({ cwd, tools }) => {
+            if (isReviewer(tools)) {
+              return {
+                async prompt() {
+                  const tool = tools?.[0] as unknown as {
+                    execute: (id: string, params: unknown) => Promise<unknown>;
+                  };
+                  await tool.execute("call-1", { verdict: "pass", findings: [] });
+                },
+                async abort() {},
+                dispose: () => {},
+              };
+            }
+            return {
+              async prompt() {
+                turn += 1;
+                if (turn === 1) {
+                  await writeFile(join(cwd, "work.txt"), "the work\n", "utf8");
+                  await toolNamed(tools, GATES_TOOL_NAME)?.execute("call-1", GREEN_GATES);
+                  return;
+                }
+                // A fix made after the gates were reported.
+                await writeFile(join(cwd, "late.txt"), "the late fix\n", "utf8");
+              },
+              async abort() {},
+              dispose: () => {},
+            };
+          },
+        }),
+      ).rejects.toThrow(/changed after the gates were reported/);
+
+      const pushed = (
+        await gitOutput(["ls-remote", fixture.remote, workBranch(42)], {
+          cwd: fixture.repo,
+          env: fixture.env,
+        })
+      ).trim();
+      expect(pushed).toBe("");
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("test_an_agent_that_reports_no_gates_stops_the_run_before_the_push", async () => {
+    // No report is not a pass: a run whose work has not been through the
+    // gates does not push it.
+    const fixture = await fixtureWithSetupScript();
+    try {
+      const { gh } = stubGh([{ number: 42, title: "an issue" }]);
+
+      await expect(
+        runOnce({
+          ...runOptions(fixture, gh),
+          session: async ({ cwd, tools }) => {
+            if (isReviewer(tools)) {
+              return {
+                async prompt() {
+                  const tool = tools?.[0] as unknown as {
+                    execute: (id: string, params: unknown) => Promise<unknown>;
+                  };
+                  await tool.execute("call-1", { verdict: "pass", findings: [] });
+                },
+                async abort() {},
+                dispose: () => {},
+              };
+            }
+            return {
+              async prompt() {
+                await writeFile(join(cwd, "work.txt"), "the work\n", "utf8");
+              },
+              async abort() {},
+              dispose: () => {},
+            };
+          },
+        }),
+      ).rejects.toThrow(/reported no gates/);
+
+      const pushed = (
+        await gitOutput(["ls-remote", fixture.remote, workBranch(42)], {
+          cwd: fixture.repo,
+          env: fixture.env,
+        })
+      ).trim();
+      expect(pushed).toBe("");
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
   it("test_one_invocation_acts_on_one_issue", async () => {
     const fixture = await fixtureWithSetupScript();
     try {
