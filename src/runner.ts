@@ -85,7 +85,7 @@ import {
   type IssueSummary,
   type PullRequestSummary,
 } from "./gh.js";
-import { FixChangedNothing, cutOffError, runReviewGate } from "./workflow.js";
+import { FixChangedNothing, ReviewStatedNoVerdict, cutOffError, runReviewGate } from "./workflow.js";
 import type { Lock } from "./lock.js";
 
 /** The states that can be derived from the observables. */
@@ -671,7 +671,7 @@ export async function reviewPullRequest(options: {
   if (verdict === undefined) {
     // The reviewer did not reach a verdict. That is not a pass: a review that
     // says nothing decides nothing.
-    throw new Error(
+    throw new ReviewStatedNoVerdict(
       `the review of pull request ${options.pullRequest} stated no verdict`,
     );
   }
@@ -838,6 +838,8 @@ export function continuationComment(options: {
   readonly exhausted: boolean;
   /** Whether the loop stopped because the fix changed nothing. */
   readonly noChange: boolean;
+  /** Whether the loop stopped because a review stated no verdict. */
+  readonly noVerdict?: boolean;
 }): string {
   const lines = [
     `The review of pull request #${options.pullRequest} did not pass after ${options.reviews} review(s).`,
@@ -848,6 +850,11 @@ export function continuationComment(options: {
   if (options.noChange) {
     lines.push(
       "The fix that followed the review changed nothing — the branch's head did not move, so there was nothing to push and nothing to review again.",
+    );
+  }
+  if (options.noVerdict) {
+    lines.push(
+      "The review stated no verdict — the reviewer answered, but never called the verdict tool.",
     );
   }
   lines.push(
@@ -2585,6 +2592,7 @@ async function runPlan(
               reviews: state.reviewCount,
               exhausted,
               noChange: outcome.noChange,
+              noVerdict: outcome.statedNoVerdict,
             }),
           },
           options.gh,
@@ -2592,11 +2600,13 @@ async function runPlan(
         // The reason the loop stopped is in the message: the finding, and —
         // when the fix changed nothing — that the fix did not answer it.
         throw new Error(
-          `the review did not pass after ${state.reviewCount} review(s)` +
-            (state.findings.length === 0
-              ? ""
-              : `: ${state.findings.join("; ")}`) +
-            (outcome.noChange ? " — the fix changed nothing" : ""),
+          outcome.statedNoVerdict
+            ? `the review of pull request ${state.pullRequest} stated no verdict`
+            : `the review did not pass after ${state.reviewCount} review(s)` +
+                (state.findings.length === 0
+                  ? ""
+                  : `: ${state.findings.join("; ")}`) +
+                (outcome.noChange ? " — the fix changed nothing" : ""),
         );
       },
     });
