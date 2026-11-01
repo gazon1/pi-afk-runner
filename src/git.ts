@@ -107,6 +107,14 @@ export class CommandFailed extends Error {
 }
 
 /**
+ * The bound a command gets.
+ *
+ * Fifteen minutes: long enough for a slow gate, short enough that a command
+ * that hangs on a black-holed network does not hold the run for ever.
+ */
+export const COMMAND_TIMEOUT_MS = 15 * 60 * 1000;
+
+/**
  * A command that was killed before it finished.
  *
  * It is a failure of its own, not a failure of the command: the command never
@@ -209,7 +217,7 @@ function killTree(child: ChildProcess, group: boolean): void {
  */
 export const runCommand: CommandRunner = (spec) =>
   new Promise<string>((resolve, reject) => {
-    const timeoutMs = spec.timeoutMs ?? 15 * 60 * 1000;
+    const timeoutMs = spec.timeoutMs ?? COMMAND_TIMEOUT_MS;
     const child = spawn(spec.command, [...spec.args], {
       cwd: spec.cwd,
       stdio: ["pipe", "pipe", "pipe"],
@@ -488,7 +496,46 @@ export async function readClaimBase(
 }
 
 /**
- * How many commits a remote branch carries that the base does not.
+ * The pattern that names every work branch on the remote.
+ *
+ * The runner's branches are `agent/issue-<N>` (see `workBranch`), and this is
+ * what one `ls-remote` and one `fetch` ask for.
+ */
+const WORK_BRANCH_PATTERN = "refs/heads/agent/*";
+
+/** The prefix every work branch carries. */
+const WORK_BRANCH_PREFIX = "agent/";
+
+/** A counter that keeps the private refs of one bulk read apart. */
+let bulkCounter = 0;
+
+/**
+ * Every work branch on the remote.
+ *
+ * One `ls-remote` for all of them: the branches grow with the issues the
+ * runner has worked, and a call per branch made the cost of a run grow with
+ * the queue's history.
+ */
+async function readRemoteWorkBranches(
+  git: GitRunner,
+  cwd: string,
+  options: { readonly remote: string },
+): Promise<ReadonlySet<string>> {
+  const output = await git(["ls-remote", "--heads", options.remote, WORK_BRANCH_PATTERN], {
+    cwd,
+  });
+  const branches = new Set<string>();
+  for (const line of output.split("\n")) {
+    const match = /^[0-9a-f]+\s+refs\/heads\/(agent\/.*)$/.exec(line.trim());
+    if (match !== null) {
+      branches.add(match[1] ?? "");
+    }
+  }
+  return branches;
+}
+
+/**
+ * The branches that carry work the base does not have.
  *
  * A branch that points at the base carries nothing: it is what a run pushed
  * before the session step refused an empty tree, or the leftover of work the
@@ -496,37 +543,103 @@ export async function readClaimBase(
  * <base> and <branch>* — so a run that reads the branch's **existence** as work
  * retries the same refusal for ever.
  *
- * `git rev-list` answers the same question GitHub asks, so a branch whose work
- * is already on the base answers zero too. Each commit is read from a ref this
- * call fetches for itself, never from `FETCH_HEAD`: one file serves the whole
- * repository, and two runs in one checkout share it, so another run's fetch can
- * land between a fetch and the read and hand this one a commit it did not ask
- * for.
- *
- * Null when there is no such branch on the remote.
+ * The question is asked of every branch at once: the answer is the same one
+ * `git rev-list --count <base>..<branch>` gives, and a run that asked it per
+ * branch paid for it once per issue it had ever worked.
  */
-export async function remoteBranchAheadOfBase(
+export async function branchesWithWork(
   git: GitRunner,
   cwd: string,
-  options: { readonly remote: string; readonly branch: string; readonly base: string },
-): Promise<number | null> {
-  const exists = await readRemoteSha(git, cwd, {
-    remote: options.remote,
-    ref: headRef(options.branch),
-  });
-  if (exists === null) {
-    return null;
+  options: {
+    readonly remote: string;
+    readonly base: string;
+    readonly branches: readonly string[];
+  },
+): Promise<Set<string>> {
+  const work = new Set<string>();
+  const wanted = [...new Set(options.branches)].filter((branch) =>
+    branch.startsWith(WORK_BRANCH_PREFIX),
+  );
+  if (wanted.length === 0) {
+    return work;
   }
-  const baseSha = await fetchCommit(git, cwd, {
-    remote: options.remote,
-    ref: headRef(options.base),
+  const tips = await readRemoteWorkBranches(git, cwd, { remote: options.remote });
+  const present = wanted.filter((branch) => tips.has(branch));
+  if (present.length === 0) {
+    // No branch on the remote carries anything: there is nothing to fetch and
+    // nothing to compare.
+    return work;
+  }
+  const namespace = `refs/afk/work-${process.pid}-${++bulkCounter}`;
+  try {
+    // The fetch is a wildcard over the runner's own branches: one call, a
+    // command line that does not grow with the queue, and a branch that was
+    // deleted between the two calls is simply not fetched — a fetch that named
+    // it would fail on it.
+    await git(
+      [
+        "fetch",
+        options.remote,
+        `+${headRef(options.base)}:${namespace}/base`,
+        `+${WORK_BRANCH_PATTERN}:${namespace}/branch/*`,
+      ],
+      { cwd },
+    );
+    // The branches the base does not have are the branches that carry work:
+    // their commits are not on the base, and GitHub would refuse a pull
+    // request for the ones that are. The base is named, not resolved:
+    // `for-each-ref` reads the ref, and a `rev-parse` to learn its commit
+    // would be one call more.
+    const carrying = new Set(
+      (
+        await git(
+          [
+            "for-each-ref",
+            "--no-merged",
+            `${namespace}/base`,
+            "--format=%(refname)",
+            `${namespace}/branch/`,
+          ],
+          { cwd },
+        )
+      )
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line !== ""),
+    );
+    for (const branch of present) {
+      const ref = `${namespace}/branch/${branch.slice(WORK_BRANCH_PREFIX.length)}`;
+      // A branch that is not in the list was not fetched — it was deleted
+      // between the two calls — and a branch that is not there carries nothing.
+      if (carrying.has(ref)) {
+        work.add(branch);
+      }
+    }
+  } finally {
+    await removeRefs(git, cwd, namespace).catch(() => "");
+  }
+  return work;
+}
+
+/** Remove the refs of one bulk read, so the checkout is left as it was. */
+async function removeRefs(
+  git: GitRunner,
+  cwd: string,
+  namespace: string,
+): Promise<void> {
+  const refs = (
+    await git(["for-each-ref", "--format=%(refname)", namespace], { cwd })
+  )
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line !== "");
+  if (refs.length === 0) {
+    return;
+  }
+  await git(["update-ref", "--stdin"], {
+    cwd,
+    input: refs.map((ref) => `delete ${ref}\n`).join(""),
   });
-  const branchSha = await fetchCommit(git, cwd, {
-    remote: options.remote,
-    ref: headRef(options.branch),
-  });
-  const count = await git(["rev-list", "--count", `${baseSha}..${branchSha}`], { cwd });
-  return Number(count.trim());
 }
 
 /** A counter that keeps the private fetch refs of one process apart. */

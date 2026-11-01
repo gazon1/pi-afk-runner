@@ -36,10 +36,12 @@ Ask the branch what it carries, not whether it is there.
 
 ## Decision
 
-**`workBranch` is true only when `git rev-list --count <base>..<branch>` is non-zero.** A branch that
+**`workBranch` is true only when the branch carries commits the base does not have.** A branch that
 points at the base — or whose commits the base already has — carries no work, and the issue derives
-as `Claimed` or `Orphaned` instead of `Pushed`. The count is `git rev-list`, the same question
-`gh pr create` asks, and both ends are fetched first.
+as `Claimed` or `Orphaned` instead of `Pushed`. The question is the one `gh pr create` asks, and
+both ends are fetched first.
+(The question was first asked with `git rev-list --count <base>..<branch>`, per branch; it is now
+asked of every branch at once — see `2026-11-01-the-queue-is-read-in-one-call.md`.)
 
 ## Rationale
 
@@ -62,6 +64,8 @@ ref that may be an hour old.
   and a stale one is reclaimed and worked again, which fast-forwards the leftover branch on its push.
 - Each claimed issue costs two fetches per run, one of the base and one of the branch. A branch that
   is not on the remote costs the `ls-remote` the runner already made.
+  (The cost has since changed: the branches are read for all the issues at once — see
+  `2026-11-01-the-queue-is-read-in-one-call.md`.)
 - A branch whose work is already on the base is likewise not work; the issue is reclaimed rather
   than sent to a pull request GitHub would refuse.
 - The session step still refuses to push an empty tree, so the state this record fixes cannot be
@@ -69,7 +73,7 @@ ref that may be an hour old.
 
 ## Links
 
-- `src/git.ts` — `remoteBranchAheadOfBase`.
+- `src/git.ts` — `branchesWithWork`.
 - `src/runner.ts` — `observeIssue`, and the `R` row of the derivation table.
 - `test/runner.test.ts` — `test_a_branch_with_no_commits_is_not_work`.
 - `docs/decisions/2026-10-30-a-failed-runs-branch-is-continued.md` — the local-branch half of the

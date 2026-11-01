@@ -84,7 +84,9 @@ takes that issue's lock while it is being worked, so a hand-started `--issue
 value is a kill in the middle of one. Each issue's turn is still bounded by the
 runner's own one-hour deadline. The cost of the backstop being gone: a genuinely
 hung `gh` or `git` call is not stopped by systemd, and the timer will not start
-a second instance while this one runs.
+a second instance while this one runs. The runner's own bounds are what stop it:
+a command is killed after fifteen minutes, and the run stops waiting for it
+whether the command obeys the kill signal or not.
 
 ## Merging
 

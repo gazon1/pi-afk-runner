@@ -37,6 +37,8 @@ import {
   addWorktree,
   allowedPushRefs,
   assertPushableRef,
+  branchesWithWork,
+  COMMAND_TIMEOUT_MS,
   fetchCommit,
   pushRef,
   pushWorkBranch,
@@ -60,6 +62,8 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import {
   GH_DEFAULT_PAGE_SIZE,
+  GH_TIMEOUT_MS,
+  GhCommandTimedOut,
   QUEUE_LABEL,
   CLAIM_LABEL,
   RECOUNT_LABEL,
@@ -76,11 +80,13 @@ import {
   parseIssues,
   pullRequestBody,
   parsePullRequest,
+  parsePullRequests,
   queueArgs,
   readClaimed,
   readIssue,
   readQueue,
   readPullRequest,
+  runGhWithTimeout,
 } from "../src/gh.js";
 import {
   UNCLAIMED,
@@ -106,6 +112,7 @@ import {
   prepareWorktree,
   isStale,
   observePullRequest,
+  pullRequestsByBranch,
   selectIssue,
   unworkableReason,
   type Observables,
@@ -459,6 +466,208 @@ describe("the pull request lookup", () => {
     // would review a closed pull request and call the issue done.
     expect(pullRequestArgs("gazon1/sing", "agent/issue-42")).toContain("open");
     expect(pullRequestArgs("gazon1/sing", "agent/issue-42")).not.toContain("all");
+  });
+});
+
+/**
+ * The open pull requests, read once.
+ *
+ * The runner finds its own pull requests by their branch, and a branch can
+ * carry more than one open pull request — one opened against another base.
+ */
+describe("the open pull requests", () => {
+  it("test_the_newest_pull_request_of_a_branch_is_the_one_the_runner_uses", () => {
+    const byBranch = pullRequestsByBranch([
+      {
+        number: 1,
+        headRefName: "agent/issue-42",
+        labels: [],
+        comments: [],
+        createdAt: "2026-10-30T08:00:00Z",
+      },
+      {
+        number: 2,
+        headRefName: "agent/issue-42",
+        labels: [],
+        comments: [],
+        createdAt: "2026-11-01T09:00:00Z",
+      },
+      {
+        number: 3,
+        headRefName: "agent/issue-43",
+        labels: [],
+        comments: [],
+      },
+    ]);
+
+    // The newer one is the runner's own work; the older one is somebody's
+    // pull request against another base.
+    expect(byBranch.get("agent/issue-42")?.number).toBe(2);
+    expect(byBranch.get("agent/issue-43")?.number).toBe(3);
+  });
+
+  it("test_the_pull_requests_are_parsed_out_of_one_read", () => {
+    const pullRequests = parsePullRequests(
+      JSON.stringify([
+        {
+          number: 77,
+          headRefName: "agent/issue-42",
+          labels: [{ name: "agent-reviewed" }],
+          comments: [{ body: "<!-- agent-review -->" }],
+          createdAt: "2026-11-01T09:00:00Z",
+        },
+      ]),
+    );
+
+    expect(pullRequests).toHaveLength(1);
+    expect(pullRequests[0]?.headRefName).toBe("agent/issue-42");
+    expect(pullRequests[0]?.labels).toEqual(["agent-reviewed"]);
+    expect(pullRequests[0]?.comments).toEqual(["<!-- agent-review -->"]);
+    expect(pullRequests[0]?.createdAt).toBe("2026-11-01T09:00:00Z");
+    // A read that answered with something else is answered with nothing.
+    expect(parsePullRequests("{}")).toEqual([]);
+  });
+});
+
+/**
+ * What one run costs.
+ *
+ * The claim stays on an issue until the issue closes, so the list the runner
+ * reads is every issue it has ever worked. A call per claimed issue made every
+ * run pay for the whole history, and the `gh` call that made them had no
+ * bound at all.
+ */
+describe("the cost of a run", () => {
+  it("test_a_gh_that_never_exits_is_killed_at_its_timeout", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "afk-gh-"));
+    try {
+      const fake = join(directory, "gh");
+      await writeFile(fake, "#!/usr/bin/env bash\nexec sleep 30\n", "utf8");
+      await chmod(fake, 0o755);
+      const path = process.env.PATH ?? "";
+      process.env.PATH = `${directory}:${path}`;
+      try {
+        const failure = await runGhWithTimeout(["pr", "list"], 500).catch(
+          (error: unknown) => error,
+        );
+
+        // The call is killed, and the failure names the command that hung: a
+        // run that stops in `select` has to say which call stopped it.
+        expect(failure).toBeInstanceOf(GhCommandTimedOut);
+        expect((failure as Error).message).toContain("gh pr list");
+        expect((failure as Error).message).toContain("500ms");
+      } finally {
+        process.env.PATH = path;
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("test_the_gh_call_has_the_bound_the_git_runner_gives_its_commands", () => {
+    expect(GH_TIMEOUT_MS).toBe(COMMAND_TIMEOUT_MS);
+  });
+
+  it("test_a_gh_that_ignores_the_kill_signal_does_not_hold_the_run", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "afk-gh-"));
+    try {
+      const fake = join(directory, "gh");
+      // A `gh` that ignores the signal it is asked to stop with: the bound
+      // has to be the runner's, not the child's.
+      await writeFile(fake, "#!/usr/bin/env bash\ntrap '' TERM\nsleep 5 &\nwait\n", "utf8");
+      await chmod(fake, 0o755);
+      const path = process.env.PATH ?? "";
+      process.env.PATH = `${directory}:${path}`;
+      try {
+        const started = Date.now();
+        const failure = await runGhWithTimeout(["pr", "list"], 500, 100).catch(
+          (error: unknown) => error,
+        );
+
+        expect(failure).toBeInstanceOf(GhCommandTimedOut);
+        expect((failure as Error).message).toContain("gh pr list");
+        // The run stopped waiting at the bound, and not a moment later.
+        expect(Date.now() - started).toBeLessThan(5_000);
+      } finally {
+        process.env.PATH = path;
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("test_the_calls_do_not_grow_with_the_issues_the_runner_has_ever_worked", async () => {
+    // The claimed issues, and the calls one run makes about them.
+    async function select(claimed: number): Promise<{
+      readonly gh: readonly string[];
+      readonly git: readonly string[];
+    }> {
+      const ghCalls: string[] = [];
+      const gitCalls: string[] = [];
+      const gh = async (args: readonly string[]): Promise<string> => {
+        ghCalls.push(args.join(" "));
+        if (args[0] === "issue" && args[1] === "list") {
+          // The claimed read and the queue read are two different queries.
+          if (args.includes(CLAIM_LABEL)) {
+            return JSON.stringify(
+              Array.from({ length: claimed }, (_unused, index) => ({
+                number: index + 1,
+                title: "an issue",
+                updatedAt: "2026-10-30T08:59:30Z",
+                labels: [QUEUE_LABEL, CLAIM_LABEL],
+              })),
+            );
+          }
+          return "[]";
+        }
+        if (args[0] === "pr" && args[1] === "list") {
+          return "[]";
+        }
+        return "";
+      };
+      const git = async (
+        args: readonly string[],
+        _options: { readonly cwd: string; readonly input?: string },
+      ): Promise<string> => {
+        gitCalls.push(args.join(" "));
+        return "";
+      };
+
+      const result = await runOnce({
+        repo: "gazon1/sing",
+        checkout: "/tmp/does-not-matter",
+        remote: "origin",
+        baseBranch: "main",
+        worktreeRoot: "/tmp/does-not-matter",
+        git,
+        gh,
+        run: async () => "",
+        session: async () => {
+          throw new Error("the run should not have reached a session");
+        },
+        deadlineMs: 60_000,
+        staleAfterMs: 60_000,
+        now: new Date("2026-10-30T09:00:00Z"),
+      });
+
+      // Every claim is fresh, so none of them is the run's business, and the
+      // queue is empty: the run ends at the selection.
+      expect(result.outcome).toBe("empty");
+      return { gh: ghCalls, git: gitCalls };
+    }
+
+    const few = await select(5);
+    const many = await select(50);
+
+    // The pull requests are read once, not once per claimed issue.
+    expect(many.gh.filter((call) => call.startsWith("pr list"))).toHaveLength(1);
+    expect(many.gh.some((call) => call.includes("--head"))).toBe(false);
+    // And the branches are read once, not once per claimed issue.
+    expect(many.git.filter((call) => call.startsWith("ls-remote"))).toHaveLength(1);
+
+    // Ten times the history, the same number of calls.
+    expect(many.gh).toHaveLength(few.gh.length);
+    expect(many.git).toHaveLength(few.git.length);
   });
 });
 
@@ -4263,6 +4472,73 @@ describe("the CLI's run", () => {
       }
     }, 60_000);
 
+    it("test_the_pull_request_of_a_claimed_issue_is_found_by_its_branch", async () => {
+      const fixture = await fixtureWithSetupScript();
+      try {
+        // The claim is the runner's own, and it is fresh: a live run may still
+        // be working on it. The pull request is what says otherwise.
+        const claimed = {
+          number: 42,
+          title: "an issue",
+          labels: ["agent-in-progress"],
+          updatedAt: "2026-10-30T08:59:30Z",
+        };
+        const calls: string[] = [];
+        const gh = async (args: readonly string[]): Promise<string> => {
+          calls.push(args.join(" "));
+          if (args[0] === "issue" && args[1] === "list") {
+            return JSON.stringify([
+              {
+                number: claimed.number,
+                title: claimed.title,
+                updatedAt: claimed.updatedAt,
+                labels: claimed.labels,
+              },
+            ]);
+          }
+          if (args[0] === "pr" && args[1] === "list") {
+            // Every open pull request, read once — and the issue's own is
+            // found by the branch it comes from.
+            return JSON.stringify([
+              { number: 77, headRefName: "agent/issue-42", labels: [], comments: [] },
+            ]);
+          }
+          if (args[0] === "issue" && args[1] === "view") {
+            return JSON.stringify({
+              body: "**What this is:** the work",
+              comments: [],
+              title: claimed.title,
+              labels: claimed.labels,
+              updatedAt: claimed.updatedAt,
+              state: "OPEN",
+            });
+          }
+          return "";
+        };
+
+        // The work is on the remote, on the branch the pull request comes from.
+        const base = (await runGit(["rev-parse", "HEAD"], { cwd: fixture.repo })).trim();
+        await runGit(["push", fixture.remote, `${base}:refs/heads/agent/issue-42`], {
+          cwd: fixture.repo,
+        });
+
+        const result = await runOnce({
+          ...runOptions(fixture, gh),
+          staleAfterMs: 60_000,
+          now: new Date("2026-10-30T09:00:00Z"),
+        });
+
+        // The pull request was reviewed, and the issue was not worked again.
+        expect(result.steps.map((step) => step.step)).toContain("review");
+        expect(result.steps.map((step) => step.step)).not.toContain("session");
+        expect(calls.some((call) => call.startsWith("pr comment"))).toBe(true);
+        // And the pull requests were read once, not once per claimed issue.
+        expect(calls.filter((call) => call.startsWith("pr list"))).toHaveLength(1);
+      } finally {
+        await fixture.dispose();
+      }
+    }, 60_000);
+
     it("test_a_stale_claim_with_an_empty_branch_is_reclaimed", async () => {
       const fixture = await fixtureWithSetupScript();
       try {
@@ -4888,4 +5164,77 @@ describe("the work session's decisions", () => {
     ).toBe(true);
     expect(calls.some((call) => call.startsWith("issue close 42"))).toBe(true);
   });
+});
+
+/**
+ * The branches that carry work.
+ *
+ * The question is the one `gh pr create` asks — *no commits between* — and it
+ * is asked of every branch at once, so the cost of a run does not grow with the
+ * number of issues the runner has ever worked.
+ */
+describe("the branches that carry work", () => {
+  it("test_the_work_of_every_branch_is_read_in_one_go", async () => {
+    const fixture = await createFixtureRepository({});
+    try {
+      const base = (
+        await gitOutput(["rev-parse", "HEAD"], { cwd: fixture.repo, env: fixture.env })
+      ).trim();
+
+      // One branch carries a commit of its own...
+      await writeFile(join(fixture.repo, "work.txt"), "the work\n", "utf8");
+      await gitOutput(["add", "-A"], { cwd: fixture.repo, env: fixture.env });
+      await gitOutput(
+        [
+          "-c",
+          "user.name=Fixture",
+          "-c",
+          "user.email=fixture@example.com",
+          "commit",
+          "-q",
+          "-m",
+          "the work",
+        ],
+        { cwd: fixture.repo, env: fixture.env },
+      );
+      const sha = (
+        await gitOutput(["rev-parse", "HEAD"], { cwd: fixture.repo, env: fixture.env })
+      ).trim();
+      await gitOutput(["push", fixture.remote, `${sha}:refs/heads/agent/issue-42`], {
+        cwd: fixture.repo,
+        env: fixture.env,
+      });
+      // ...and one points at the base, which is what a run that pushed before
+      // the session step refused an empty tree leaves behind.
+      await gitOutput(["push", fixture.remote, `${base}:refs/heads/agent/issue-43`], {
+        cwd: fixture.repo,
+        env: fixture.env,
+      });
+
+      const work = await branchesWithWork(
+        (args, options) => runGit(args, options),
+        fixture.repo,
+        {
+          remote: fixture.remote,
+          base: "main",
+          branches: ["agent/issue-42", "agent/issue-43", "agent/issue-44"],
+        },
+      );
+
+      // The branch with a commit of its own carries work; the one that points
+      // at the base does not, and the one that is not there carries nothing.
+      expect([...work].sort()).toEqual(["agent/issue-42"]);
+
+      // And the checkout is left as it was: the private refs are gone.
+      const left = (
+        await gitOutput(["for-each-ref", "--format=%(refname)", "refs/afk"], {
+          cwd: fixture.repo,
+          env: fixture.env,
+        })
+      ).trim();
+      expect(left).toBe("");
+    } finally {
+      await fixture.dispose();
+    }
+  }, 60_000);
 });

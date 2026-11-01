@@ -48,13 +48,13 @@ import {
 import {
   CommandFailed,
   addWorktree,
+  branchesWithWork,
   fetchCommit,
   fetchRef,
   headRef,
   issueWorktreePath,
   pushWorkBranch,
   readRemoteSha,
-  remoteBranchAheadOfBase,
   removeWorktree,
   runCommand,
   workBranch,
@@ -69,6 +69,7 @@ import {
   dependencyNumbers,
   postCommentArgs,
   pullRequestBody,
+  readAllOpenPullRequests,
   readClaimed,
   readIssue,
   readPullRequest,
@@ -846,41 +847,57 @@ export interface IssueObservation {
 /**
  * Observe one issue: what state is it in, and what is behind it.
  *
- * The pull request is read from GitHub, the work the branch carries from the
- * remote (a branch that points at the base carries none), and the staleness from
- * the issue's last update — which any comment moves.
+ * What is behind it is read by the caller, and read once for all the issues:
+ * the pull requests are read in one `gh` call and matched by their branch, and
+ * the branches are read from the remote in one `git` call. The observation
+ * itself is a derivation over what was read, and it asks nothing of the
+ * network.
+ *
+ * The staleness comes from the issue's last update — which any comment moves.
  */
-export async function observeIssue(options: {
+export function observeIssue(options: {
   readonly issue: IssueSummary;
-  readonly repo: string;
-  readonly remote: string;
-  readonly baseBranch: string;
-  readonly cwd: string;
-  readonly git: GitRunner;
-  readonly gh: GhRunner;
+  /** The pull request behind the issue's branch, when there is one. */
+  readonly pullRequest: PullRequestSummary | null;
+  /** Whether the issue's branch carries work the base does not have. */
+  readonly workBranch: boolean;
   readonly now: Date;
   readonly staleAfterMs: number;
-}): Promise<IssueObservation> {
-  const branch = workBranch(options.issue.number);
-  const pullRequest = await readPullRequest(options.repo, branch, options.gh);
-  const ahead = await remoteBranchAheadOfBase(options.git, options.cwd, {
-    remote: options.remote,
-    branch,
-    base: options.baseBranch,
-  });
-  const observed = observePullRequest(pullRequest);
+}): IssueObservation {
+  const observed = observePullRequest(options.pullRequest);
   return {
     issue: options.issue,
-    pullRequest,
+    pullRequest: options.pullRequest,
     state: deriveState({
       claimLabel: options.issue.labels.includes(CLAIM_LABEL),
-      pullRequest: pullRequest !== null,
+      pullRequest: options.pullRequest !== null,
       reviewComment: observed.reviewComment,
       recountLabel: observed.recountLabel,
-      workBranch: ahead !== null && ahead > 0,
+      workBranch: options.workBranch,
       stale: isStale(options.issue.updatedAt, options.now, options.staleAfterMs),
     }),
   };
+}
+
+/**
+ * The open pull requests, by the branch they come from.
+ *
+ * The branch is the runner's own name for the work — `agent/issue-<N>` — so it
+ * is what an issue's pull request is found by. A branch can have more than one
+ * open pull request — one against another base — and the newest is the one the
+ * runner's own work belongs to.
+ */
+export function pullRequestsByBranch(
+  pullRequests: readonly PullRequestSummary[],
+): Map<string, PullRequestSummary> {
+  const byBranch = new Map<string, PullRequestSummary>();
+  for (const pullRequest of pullRequests) {
+    const known = byBranch.get(pullRequest.headRefName);
+    if (known === undefined || (pullRequest.createdAt ?? "") > (known.createdAt ?? "")) {
+      byBranch.set(pullRequest.headRefName, pullRequest);
+    }
+  }
+  return byBranch;
 }
 
 /** What a run has to do about an issue. */
@@ -1738,8 +1755,26 @@ async function chooseIssue(
     }
   | null
 > {
+  /** The failure of the selection, in the words the front doors show. */
+  const selectFailed = (failure: unknown): RunFailed => {
+    const reason = failure instanceof Error ? failure.message : String(failure);
+    return new RunFailed({
+      step: "select",
+      // A named issue is one of many a sweep works, so its failure names the
+      // issue and not the step: a sweep that skipped three issues is not
+      // three runs that stopped. The queue path has no issue to name.
+      message:
+        options.issueNumber !== undefined
+          ? `issue ${options.issueNumber} could not be selected: ${reason}`
+          : `the run stopped at the select step: ${reason}`,
+      cause: failure,
+      record: "",
+    });
+  };
+
   let namedDetail: IssueDetail | undefined;
   let candidates: IssueSummary[];
+  let pullRequests: readonly PullRequestSummary[];
   try {
     if (options.issueNumber !== undefined) {
       // The operator named the issue. It is taken as given: the claim is what
@@ -1760,33 +1795,45 @@ async function chooseIssue(
     } else {
       candidates = await readClaimed(options.repo, options.gh);
     }
+    // Every open pull request, in one read. The claimed issues are matched
+    // against it by their branch, so the cost of the selection does not grow
+    // with the number of issues the runner has ever worked: the claim stays on
+    // an issue until the issue closes, and one call per claimed issue made
+    // every run pay for the whole history. A run with nothing claimed reads
+    // nothing: there is no issue to match a pull request against.
+    pullRequests =
+      candidates.length === 0
+        ? []
+        : await readAllOpenPullRequests(options.repo, options.gh);
   } catch (failure) {
-    const reason = failure instanceof Error ? failure.message : String(failure);
-    throw new RunFailed({
-      step: "select",
-      // A named issue is one of many a sweep works, so its failure names the
-      // issue and not the step: a sweep that skipped three issues is not
-      // three runs that stopped. The queue path has no issue to name.
-      message:
-        options.issueNumber !== undefined
-          ? `issue ${options.issueNumber} could not be selected: ${reason}`
-          : `the run stopped at the select step: ${reason}`,
-      cause: failure,
-      record: "",
+    throw selectFailed(failure);
+  }
+
+  const byBranch = pullRequestsByBranch(pullRequests);
+  // The branches that carry work, read for all the candidates at once. An
+  // issue with a pull request does not need it: the pull request is the work,
+  // and the derivation stops at the pull request.
+  let work: ReadonlySet<string>;
+  try {
+    work = await branchesWithWork(options.git, options.checkout, {
+      remote: options.remote,
+      base: options.baseBranch,
+      branches: candidates
+        .filter((candidate) => !byBranch.has(workBranch(candidate.number)))
+        .map((candidate) => workBranch(candidate.number)),
     });
+  } catch (failure) {
+    throw selectFailed(failure);
   }
 
   let namedUnworkableState: DerivedState | undefined;
   let namedBlockedBy: readonly number[] | undefined;
   for (const candidate of candidates) {
-    const observation = await observeIssue({
+    const branch = workBranch(candidate.number);
+    const observation = observeIssue({
       issue: candidate,
-      repo: options.repo,
-      remote: options.remote,
-      baseBranch: options.baseBranch,
-      cwd: options.checkout,
-      git: options.git,
-      gh: options.gh,
+      pullRequest: byBranch.get(branch) ?? null,
+      workBranch: work.has(branch),
       now,
       staleAfterMs: options.staleAfterMs,
     });
@@ -1834,14 +1881,7 @@ async function chooseIssue(
   try {
     queue = await readQueue(options.repo, options.gh);
   } catch (failure) {
-    throw new RunFailed({
-      step: "select",
-      message: `the run stopped at the select step: ${
-        failure instanceof Error ? failure.message : String(failure)
-      }`,
-      cause: failure,
-      record: "",
-    });
+    throw selectFailed(failure);
   }
   // The queue is worked in order, and an issue whose parent is still open is
   // passed over — not worked, and not removed: it is the next run's turn once
