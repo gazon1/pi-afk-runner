@@ -274,6 +274,24 @@ describe("the gates the runner runs", () => {
     }
   });
 
+  it("names the last non-empty line of the gate's output", async () => {
+    // The detail carries the last non-empty line, not the first: a build's
+    // summary (or the bottom of a stack trace), never an arbitrary warning.
+    const run: CommandRunner = async (spec) => {
+      throw new CommandFailed(1, spec.command, [...spec.args], "w: Foo.kt:12:5 Unused import\nFAIL: test failed\n\n", "");
+    };
+
+    const failure = await runGates({ run, cwd: "/the/worktree", budgetMs: 60_000 }).then(
+      () => null,
+      (error: unknown) => error,
+    );
+
+    expect(failure).toBeInstanceOf(GateFailed);
+    const gate = failure as GateFailed;
+    expect(gate.message).toContain("FAIL: test failed");
+    expect(gate.message).not.toContain("Unused import");
+  });
+
   it("names the gate that failed, when it printed nothing", async () => {
     // A gate that says nothing has still refused the change, and the record
     // has to say which gate it was.
