@@ -287,6 +287,31 @@ export async function deleteLocalBranch(
 }
 
 /**
+ * Delete a branch on the remote, if it is there.
+ *
+ * The ref may not be there: a run that died before its push leaves nothing to
+ * delete, and a delete of a ref that is not there fails.
+ *
+ * No hook: a delete pushes no tree, and the repository's pre-push hook gates
+ * the tree that is being pushed. A hook that has nothing to gate must not
+ * stand between the runner and a branch it has to remove.
+ */
+export async function deleteRemoteBranch(
+  git: GitRunner,
+  cwd: string,
+  options: { readonly remote: string; readonly branch: string },
+): Promise<void> {
+  const existing = await readRemoteSha(git, cwd, {
+    remote: options.remote,
+    ref: headRef(options.branch),
+  });
+  if (existing === null) {
+    return;
+  }
+  await git(["push", "--no-verify", options.remote, "--delete", options.branch], { cwd });
+}
+
+/**
  * The full ref of a branch.
  *
  * `git ls-remote` matches the **tail** of a ref, so `main` would also match
