@@ -7,7 +7,8 @@ carry the detail.
 
 A **Pi extension**: a package Pi loads, written in TypeScript, that takes an issue labelled
 `ready-for-agent`, works it in an isolated worktree, opens a pull request and has a second agent
-review it. It never merges.
+review it. **The work pipeline never merges**; landing is the separate, opt-in `--merge` mode, and
+it only lands what the work pipeline opened and reviewed.
 
 It is a **separate repository** from the one it operates on, on purpose — the target is a Kotlin
 Multiplatform application with its own gates, and a JavaScript toolchain inside it would put the
@@ -43,6 +44,10 @@ repository owns, and the target's copy is the one that counts.
 
 When the target's contract changes, copy it again. See
 [contract/README.md](contract/README.md) for the rule.
+
+Anything in the **merge** mode binds to [contract/merge.md](contract/merge.md) instead. That
+contract is this repository's own, not a copy: the target's contract describes a pipeline that
+never merges, and landing is the opt-in exception.
 
 ## The practices
 

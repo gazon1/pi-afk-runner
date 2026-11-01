@@ -449,6 +449,67 @@ export function parseCiVerdict(json: string): string | null {
   }
 }
 
+/** What the CI tool concluded, and whether it was a success. */
+export interface CiOutcome {
+  /** The workflow, run and conclusion, as the tool states them. */
+  readonly verdict: string;
+  /** Whether the tool's own exit code was zero. */
+  readonly success: boolean;
+}
+
+/**
+ * The tool's conclusion and its exit code, out of its JSON.
+ *
+ * The verdict line alone cannot say whether CI succeeded — a failure and a
+ * success are both lines — so the merge gate needs the exit the tool states.
+ * The tool writes `exit` on every path that reached a verdict.
+ */
+export function parseCiOutcome(json: string): CiOutcome | null {
+  try {
+    const parsed: unknown = JSON.parse(json);
+    if (typeof parsed !== "object" || parsed === null) {
+      return null;
+    }
+    const record = parsed as Record<string, unknown>;
+    const verdict = record.verdict;
+    const exit = record.exit;
+    if (typeof verdict !== "string" || typeof exit !== "number") {
+      return null;
+    }
+    const line = verdict.trim();
+    return line === "" ? null : { verdict: line, success: exit === 0 };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The CI outcome of a commit, as the repository's own tool states it.
+ *
+ * The same read as {@link readCiVerdict}, but the answer keeps the exit code,
+ * because the merge gate has to tell a green CI from a red one.
+ */
+export async function readCiOutcome(
+  run: CommandRunner,
+  cwd: string,
+  options: { readonly ref: string; readonly repo: string },
+): Promise<CiOutcome | null> {
+  const spec = {
+    command: "python3",
+    args: [CI_VERDICT_TOOL, options.ref, "--repo", options.repo, "--json"],
+    cwd,
+  };
+  try {
+    return parseCiOutcome(await run(spec));
+  } catch (failure) {
+    if (failure instanceof CommandFailed) {
+      // The verdict it printed before it exited is on the error.
+      return parseCiOutcome(failure.stdout);
+    }
+    return null;
+  }
+}
+
 /**
  * The CI verdict of a commit, as the repository's own tool states it.
  *
@@ -813,11 +874,15 @@ function renderRecord(options: {
   readonly runId: string;
   readonly outcome: "completed" | "failed";
   readonly steps: readonly StepRecord[];
+  /** The record's first line, when it is not an issue's. */
+  readonly heading?: string;
+  /** What the number names — `issue` by default, `pull request` for a merge. */
+  readonly subject?: string;
 }): string {
   const lines = [
-    `# Run issue-${options.issue}`,
+    options.heading ?? `# Run issue-${options.issue}`,
     "",
-    `- issue: ${options.issue}`,
+    `- ${options.subject ?? "issue"}: ${options.issue}`,
     `- run: ${options.runId}`,
     `- outcome: ${options.outcome}`,
     "",
@@ -844,11 +909,26 @@ export async function writeRunRecord(options: {
   readonly runId: string;
   readonly outcome: "completed" | "failed";
   readonly steps: readonly StepRecord[];
+  /** Where the record goes, when it is not under the issue's own directory. */
+  readonly directory?: string;
+  readonly heading?: string;
+  readonly subject?: string;
 }): Promise<string> {
-  const directory = recordDirectory(options.root, options.issue);
+  const directory = options.directory ?? recordDirectory(options.root, options.issue);
   await mkdir(directory, { recursive: true });
   const path = join(directory, `${options.runId}.md`);
-  await writeFile(path, renderRecord(options), "utf8");
+  await writeFile(
+    path,
+    renderRecord({
+      issue: options.issue,
+      runId: options.runId,
+      outcome: options.outcome,
+      steps: options.steps,
+      ...(options.heading === undefined ? {} : { heading: options.heading }),
+      ...(options.subject === undefined ? {} : { subject: options.subject }),
+    }),
+    "utf8",
+  );
   return path;
 }
 
@@ -903,6 +983,10 @@ export async function runSteps(options: {
   /** The checkout the record goes under. */
   readonly root: string;
   readonly steps: readonly Step[];
+  /** Where the record goes, when it is not under the issue's own directory. */
+  readonly directory?: string;
+  readonly heading?: string;
+  readonly subject?: string;
   /** What a failure releases: the claim, the worktree, the ref. */
   readonly release?: () => Promise<void>;
   /** Told about every step, as it finishes. */
@@ -959,6 +1043,9 @@ export async function runSteps(options: {
       runId: options.runId,
       outcome,
       steps,
+      ...(options.directory === undefined ? {} : { directory: options.directory }),
+      ...(options.heading === undefined ? {} : { heading: options.heading }),
+      ...(options.subject === undefined ? {} : { subject: options.subject }),
     });
   } catch (recordError) {
     if (failure === null) {
@@ -1085,7 +1172,7 @@ export interface RunResult {
 }
 
 /** The commit the worktree is at. */
-async function headSha(git: GitRunner, cwd: string): Promise<string> {
+export async function headSha(git: GitRunner, cwd: string): Promise<string> {
   return (await git(["rev-parse", "HEAD"], { cwd })).trim();
 }
 
@@ -1113,7 +1200,7 @@ function isProtectedPath(path: string): boolean {
  * The identity is passed on the command line: the repository the runner works
  * in is not the runner's own, and a commit with no author is not a commit.
  */
-async function commitAll(
+export async function commitAll(
   git: GitRunner,
   cwd: string,
   message: string,
@@ -1318,38 +1405,59 @@ async function chooseIssue(
 }
 
 /**
- * The worktree of a branch that is already pushed.
+ * Put a worktree on a branch that is already on the remote, and prepare it.
  *
- * The branch carries the work a previous run did, and the worktree is where
- * that work is read — the reviewer needs the code. The branch is not pushed
- * again: the commits are durable, and a second push of different commits over
- * a branch a human may be reading is a force-push in all but name.
+ * Detached, at the pushed commit: the branch is checked out nowhere, and a
+ * worktree that checked it out would leave it checked out — and the next run
+ * could not check it out again. The repository's own setup script runs before
+ * anything else does, the same as in a fresh worktree.
+ *
+ * The merge pipeline uses this too: it reads a pull request's branch the same
+ * way the review does.
  */
-async function prepareExistingWorktree(
-  options: RunOptions,
-  worktreePath: string,
-  issueNumber: number,
-): Promise<void> {
-  const branch = workBranch(issueNumber);
-  await fetchRef(options.git, options.checkout, { remote: options.remote, ref: branch });
+export async function checkoutPullRequestBranch(options: {
+  readonly checkout: string;
+  readonly remote: string;
+  readonly branch: string;
+  readonly worktreePath: string;
+  readonly git: GitRunner;
+  readonly run: CommandRunner;
+}): Promise<string> {
+  await fetchRef(options.git, options.checkout, {
+    remote: options.remote,
+    ref: options.branch,
+  });
   const sha = await readRemoteSha(options.git, options.checkout, {
     remote: options.remote,
-    ref: headRef(branch),
+    ref: headRef(options.branch),
   });
   if (sha === null) {
-    throw new Error(`the branch ${branch} is not on ${options.remote}`);
+    throw new Error(`the branch ${options.branch} is not on ${options.remote}`);
   }
-  // Detached, at the pushed commit: the branch is checked out nowhere, and a
-  // worktree that checked it out would leave it checked out — and the next
-  // run could not check it out again.
-  await removeWorktree(options.git, options.checkout, worktreePath);
-  await options.git(["worktree", "add", "--detach", worktreePath, sha], {
+  await removeWorktree(options.git, options.checkout, options.worktreePath);
+  await options.git(["worktree", "add", "--detach", options.worktreePath, sha], {
     cwd: options.checkout,
   });
   await options.run({
     command: "bash",
     args: [SETUP_SCRIPT],
-    cwd: worktreePath,
+    cwd: options.worktreePath,
+  });
+  return sha;
+}
+
+async function prepareExistingWorktree(
+  options: RunOptions,
+  worktreePath: string,
+  issueNumber: number,
+): Promise<void> {
+  await checkoutPullRequestBranch({
+    checkout: options.checkout,
+    remote: options.remote,
+    branch: workBranch(issueNumber),
+    worktreePath,
+    git: options.git,
+    run: options.run,
   });
 }
 

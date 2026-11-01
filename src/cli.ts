@@ -17,8 +17,9 @@
  * | 76 | the lock could not be taken |
  * | 2 | the command line was wrong |
  *
- * The runner never merges. A pull request it opens stays open, and a human
- * closes it.
+ * The work pipeline never merges. A pull request it opens stays open, and a
+ * human closes it. `--merge` is the explicit exception: a separate, opt-in
+ * mode that lands the reviewed, green pull requests the work pipeline opened.
  */
 
 import { homedir } from "node:os";
@@ -37,6 +38,11 @@ import { readClaimed, readQueue, runGh, type GhRunner } from "./gh.js";
 import { guardExtensionPath, installGuardPolicy } from "./guard.js";
 import { runCommand, runGit, type CommandRunner, type GitRunner } from "./git.js";
 import { LockHeld, LockUnusable, takeLock } from "./lock.js";
+import {
+  mergeReviewedPullRequests,
+  type MergeOptions,
+  type MergeResult,
+} from "./merge.js";
 import { RunFailed, runOnce, type RunOptions } from "./runner.js";
 import { skillsDirectory, type AgentSession, type SessionFactory } from "./session.js";
 
@@ -94,6 +100,8 @@ export interface CliOptions {
   readonly issue?: number;
   /** Work every eligible issue, one after another. Not with `--issue`. */
   readonly all?: boolean;
+  /** Land the reviewed, green pull requests the work pipeline opened. */
+  readonly merge?: boolean;
   /** The checkout the worktree is made from. */
   readonly checkout: string;
   /** The remote the base comes from. */
@@ -125,6 +133,7 @@ export const USAGE = [
   "  --repo <owner/name>    the repository the issue lives in (default: the checkout's origin)",
   "  --issue <number>        the issue to work (default: the queue's first eligible one)",
   "  --all                   work every eligible issue, one after another",
+  "  --merge                 land the reviewed, green pull requests the runner opened",
   "  --checkout <path>       the checkout the worktree is made from (default: the cwd)",
   "  --remote <name>         the remote the base comes from (default: origin)",
   "  --base <branch>         the branch the base is read from (default: main)",
@@ -163,7 +172,7 @@ export function parseArgs(argv: readonly string[]): CliOptions {
     if (name === "help") {
       throw new Error("help");
     }
-    if (name === "no-verify" || name === "all") {
+    if (name === "no-verify" || name === "all" || name === "merge") {
       // A flag, not an option with a value.
       values.set(name, "true");
       continue;
@@ -183,8 +192,12 @@ export function parseArgs(argv: readonly string[]): CliOptions {
 
   const issue = values.get("issue");
   const all = values.has("all");
+  const merge = values.has("merge");
   if (all && issue !== undefined) {
     throw new Error("--all works every issue, so it cannot be combined with --issue");
+  }
+  if (merge && (all || issue !== undefined)) {
+    throw new Error("--merge is its own mode; it cannot be combined with --all or --issue");
   }
   const checkout = resolve(values.get("checkout") ?? process.cwd());
   const remote = values.get("remote") ?? "origin";
@@ -209,6 +222,7 @@ export function parseArgs(argv: readonly string[]): CliOptions {
     ...(repo === undefined ? {} : { repo }),
     ...(issue === undefined ? {} : { issue: positiveNumber(issue, "--issue") }),
     ...(all ? { all: true } : {}),
+    ...(merge ? { merge: true } : {}),
     checkout,
     remote,
     baseBranch,
@@ -693,6 +707,36 @@ export async function main(
   };
 
   try {
+    if (resolved.merge === true) {
+      return await mergeAll({
+        repo: resolved.repo,
+        checkout: resolved.checkout,
+        remote: resolved.remote,
+        baseBranch: resolved.baseBranch,
+        worktreeRoot: resolved.worktreeRoot,
+        git: dependencies.git ?? runGit,
+        gh: dependencies.gh ?? runGh,
+        run: dependencies.run ?? runCommand,
+        session,
+        deadlineMs: resolved.deadlineMs,
+        ...(resolved.verifyPushes === undefined
+          ? {}
+          : { verifyPushes: resolved.verifyPushes }),
+        stopped: () => stopped,
+        onStepStart: (step) => {
+          process.stdout.write(`[${step}] start\n`);
+        },
+        onStep: (record) => {
+          const detail = record.detail === "" ? "" : ` — ${record.detail}`;
+          process.stdout.write(`[${record.step}] ${record.outcome}${detail}\n`);
+        },
+        onSubject: (subject) => {
+          process.stdout.write(
+            `pull request #${subject.pullRequest} · ${subject.title}\n`,
+          );
+        },
+      });
+    }
     if (resolved.all === true) {
       return await sweep(run, resolved.repo);
     }
@@ -798,6 +842,36 @@ async function work(runOptions: RunOptions, namedIssue: number | undefined): Pro
     process.stderr.write(`${errorMessage(failure)}\n`);
     return 1;
   }
+}
+
+/**
+ * Land the reviewed pull requests, and say what happened.
+ *
+ * A skipped pull request is not a failure: it is one the review or the CI has
+ * not cleared yet, and the next run reads it again. A step that stopped is a
+ * failure, and the name of the step is where a reader starts.
+ */
+async function mergeAll(options: MergeOptions): Promise<number> {
+  let result: MergeResult;
+  try {
+    result = await mergeReviewedPullRequests(options);
+  } catch (failure) {
+    process.stderr.write(`the merge could not start: ${errorMessage(failure)}\n`);
+    return 1;
+  }
+
+  for (const number of result.merged) {
+    process.stdout.write(`merged #${number}\n`);
+  }
+  for (const entry of result.skipped) {
+    process.stdout.write(`left #${entry.pullRequest} alone — ${entry.reason}\n`);
+  }
+  for (const entry of result.failed) {
+    process.stderr.write(
+      `pull request ${entry.pullRequest} stopped at the ${entry.step} step: ${entry.message}\n`,
+    );
+  }
+  return result.failed.length === 0 ? EXIT_OK : 1;
 }
 
 /** Run the command, when this file is the program that was started. */

@@ -4,7 +4,9 @@ This runner is written against contracts that **another repository owns** — th
 operates on. Those contracts change when that repository changes, and the runner breaks when they
 do.
 
-This directory is a **copy** of that contract, so that:
+This directory holds the **copies** of that contract — and one contract this repository owns, the
+merge mode's (see [the merge mode's contract](#the-merge-modes-contract) below). The copies are here
+so that:
 
 - the runner's own tests can use the gate's **real** reader rather than a transcription of it
   (two implementations of a rule drift apart, and nobody notices until a verdict stops matching);
@@ -42,3 +44,9 @@ implementation of the thing it copies.
 The one place where the drift would bite hardest is
 `scripts/ci/check-agent-review.py`: the runner's comment format is asserted against its reader,
 so a copy that has fallen behind turns a passing test into a lie.
+
+## The merge mode's contract
+
+[`merge.md`](merge.md) is **not a copy**. The target's contract describes the work pipeline, and
+that pipeline never merges; landing is this repository's own opt-in mode, so its binding is written
+here. It changes when this repository's merge mode changes, not when `gazon1/sing` changes.
