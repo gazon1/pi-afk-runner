@@ -36,6 +36,7 @@ import {
   pushWorkBranch,
   claimRef,
   claimRefName,
+  issueWorktreePath,
   readClaimBase,
   removeWorktree,
   runCommand,
@@ -2544,6 +2545,72 @@ describe("the CLI's run", () => {
       };
     };
   }
+
+  it("the run works in the worktree the path function names", async () => {
+    // The runner's worktree is at the path the one function says. The live
+    // door looks for that same path when it puts the worktree back, so the two
+    // cannot drift apart.
+    const fixture = await fixtureWithSetupScript();
+    try {
+      const { gh } = stubGh([{ number: 42, title: "an issue" }]);
+      let workedIn = "";
+      const session = workingSession();
+      await runOnce({
+        ...runOptions(fixture, gh),
+        session: async (options) => {
+          if (workedIn === "") {
+            workedIn = options.cwd;
+          }
+          return session(options);
+        },
+      });
+
+      const worktreeRoot = join(fixture.root, "worktrees");
+      expect(workedIn).toBe(issueWorktreePath(worktreeRoot, 42));
+      expect(workedIn).toBe(join(worktreeRoot, "issue-42"));
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("the reclaim removes the worktree the path function names", async () => {
+    // A dead run left its worktree behind, with the branch checked out in it —
+    // and a branch that is checked out somewhere cannot be deleted.
+    const fixture = await fixtureWithSetupScript();
+    try {
+      const worktreeRoot = join(fixture.root, "worktrees");
+      const worktreePath = issueWorktreePath(worktreeRoot, 42);
+      await mkdir(worktreeRoot, { recursive: true });
+      await runGit(["worktree", "add", "-b", "agent/issue-42", worktreePath, "main"], {
+        cwd: fixture.repo,
+      });
+      expect(existsSync(worktreePath)).toBe(true);
+
+      const outcome = await reclaimClaim({
+        issue: { number: 42, title: "an issue", updatedAt: "", labels: [] },
+        repo: "gazon1/sing",
+        remote: fixture.remote,
+        baseBranch: "main",
+        cwd: fixture.repo,
+        git: (args, options) => runGit(args, options),
+        gh: async () => "",
+        nonce: "a-nonce",
+        now: new Date("2026-10-30T09:00:00Z"),
+        worktreeRoot,
+      });
+      expect(outcome.claimed).toBe(true);
+
+      // The dead run's worktree is gone, and so is the branch that was in it.
+      expect(existsSync(worktreePath)).toBe(false);
+      expect(
+        await runGit(["rev-parse", "--verify", "--quiet", "refs/heads/agent/issue-42"], {
+          cwd: fixture.repo,
+        }).catch(() => ""),
+      ).toBe("");
+    } finally {
+      await fixture.dispose();
+    }
+  }, 60_000);
 
   it("test_all_works_every_issue_once_and_gives_the_lock_back", async () => {
     const fixture = await fixtureWithSetupScript();

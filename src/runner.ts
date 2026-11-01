@@ -49,6 +49,7 @@ import {
   fetchCommit,
   fetchRef,
   headRef,
+  issueWorktreePath,
   pushWorkBranch,
   readRemoteSha,
   remoteBranchAheadOfBase,
@@ -1901,7 +1902,7 @@ async function runPlan(
     steps.push({
       name: "worktree",
       run: async () => {
-        state.worktreePath = join(options.worktreeRoot, `issue-${issue.number}`);
+        state.worktreePath = issueWorktreePath(options.worktreeRoot, issue.number);
         const prepared = await prepareWorktree({
           repo: options.checkout,
           remote: options.remote,
@@ -2001,7 +2002,7 @@ async function runPlan(
   } else {
     // The work is already pushed. The worktree is where that work is read —
     // the reviewer needs the code, and the branch is not pushed again.
-    state.worktreePath = join(options.worktreeRoot, `issue-${issue.number}`);
+    state.worktreePath = issueWorktreePath(options.worktreeRoot, issue.number);
     await prepareExistingWorktree(options, state.worktreePath, issue.number);
     // A resume has no claim to record the base, and the size of a fix's diff
     // is read from the base the pull request is against.

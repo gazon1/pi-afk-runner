@@ -28,6 +28,7 @@
 
 import { spawn } from "node:child_process";
 import { rm } from "node:fs/promises";
+import { join } from "node:path";
 
 /** Who the claim is attributed to. Part of the tag object's identity. */
 export const CLAIM_TAGGER = {
@@ -160,6 +161,23 @@ export function claimRef(issueNumber: number): string {
 /** The branch the work goes on. */
 export function workBranch(issueNumber: number): string {
   return `agent/issue-${issueNumber}`;
+}
+
+/**
+ * Where an issue's worktree lives.
+ *
+ * One function, because four places need the answer — the runner's worktree
+ * step, its review path, the reclaim that removes the worktree a dead run left,
+ * and the live door that puts the worktree back after a run's cleanup — and a
+ * name spelled out in four places is four chances to disagree.
+ *
+ * The door is the sharp edge of that. It restores the worktree the runner
+ * made, so a name that changed on one side alone leaves the door restoring a
+ * directory the run never used, and the chat it switched into stands in an
+ * empty place.
+ */
+export function issueWorktreePath(worktreeRoot: string, issueNumber: number): string {
+  return join(worktreeRoot, `issue-${issueNumber}`);
 }
 
 /**

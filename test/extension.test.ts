@@ -31,6 +31,7 @@ import {
   guardExtensionPath,
   installGuardPolicy,
 } from "../src/guard.js";
+import { issueWorktreePath } from "../src/git.js";
 import { RUN_STATUS_ENTRY, statusFromEntries, statusLine } from "../src/live.js";
 import { takeLock } from "../src/lock.js";
 import { unworkableReason, type RunOptions, type RunResult } from "../src/runner.js";
@@ -491,7 +492,9 @@ describe("the run the front door owns", () => {
       files: { "scripts/setup-worktree.sh": SETUP_SCRIPT_BODY },
     });
     const worktreeRoot = join(fixture.root, "worktrees");
-    const worktreePath = join(worktreeRoot, "issue-42");
+    // The worktree the runner made: the door works the path out for itself, so
+    // its restore has to find the very directory the run used.
+    const worktreePath = issueWorktreePath(worktreeRoot, 42);
     try {
       const git = (args: readonly string[]) =>
         gitOutput(args, { cwd: fixture.repo, env: fixture.env });
@@ -534,9 +537,17 @@ describe("the run the front door owns", () => {
 
       // The chat is standing in that directory, so the run puts it back.
       await vi.waitFor(() => expect(existsSync(worktreePath)).toBe(true));
-      expect(await git(["worktree", "list", "--porcelain"])).toContain(
+      const worktrees = await git(["worktree", "list", "--porcelain"]);
+      expect(worktrees).toContain(worktreePath);
+      expect(worktrees).toContain(
         `branch refs/heads/agent/issue-42`,
       );
+      // And it is the very directory the run used: the door did not put a
+      // second, empty worktree somewhere else.
+      const under = worktrees
+        .split("\n")
+        .filter((line) => line.startsWith("worktree ") && line.includes(worktreeRoot));
+      expect(under).toEqual([`worktree ${worktreePath}`]);
 
       // The worktree that comes back is prepared: the repository's own script
       // ran in it, so the gates work in it the way they work in a worktree the
