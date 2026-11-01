@@ -219,6 +219,9 @@ rather than running two of itself.
 - a branch `agent/issue-<N>` and a pull request on it, carrying a review that opens with
   `<!-- agent-review -->`;
 - the `agent-reviewed` label on that pull request, which is what makes the review gate count it;
+- the issues the run filed for the work that follows from its own: each labelled `ready-for-agent`,
+  each with a brief opening with `## Agent Brief`, so the next run picks them up. At most three a
+  run, and never a second copy of something that is already open;
 - a record under `build/diagnostics/issue-<N>/` in the checkout.
 
 The worktree itself is scratch and is removed when the run finishes, successful or not: the branch

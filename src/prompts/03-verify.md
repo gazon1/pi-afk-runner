@@ -23,4 +23,5 @@ own diff.
 5. **Say why.** If you changed your approach, or left something out, say so
    in the commit message, in one sentence a reader can check.
 
-The next turn reviews your change as if it were someone else's.
+The next turn is about what follows from this change: the improvements it leaves
+behind, and the ones that belong to the next run.
