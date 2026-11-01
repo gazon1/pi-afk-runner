@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { claimIssue, releaseClaim } from "../src/claim.js";
+import { claimIssue, reclaimClaim, releaseClaim } from "../src/claim.js";
 import { headRef } from "../src/git.js";
 import {
   PROMPT_FILES,
@@ -24,6 +24,7 @@ import { createLeftoverTool, LEFTOVER_TOOL_NAME, MAX_LEFTOVERS_PER_RUN } from ".
 import { pullRequestArgs } from "../src/gh.js";
 import {
   CommandFailed,
+  addWorktree,
   allowedPushRefs,
   assertPushableRef,
   pushRef,
@@ -2955,6 +2956,190 @@ describe("the CLI's run", () => {
         expect(
           calls.some((call) => call.includes("issue edit 42") && call.includes("--add-label agent-in-progress")),
         ).toBe(true);
+      } finally {
+        await fixture.dispose();
+      }
+    }, 60_000);
+
+    it("test_the_reclaim_deletes_the_branch_the_dead_run_left_on_the_remote", async () => {
+      const fixture = await fixtureWithSetupScript();
+      try {
+        // The dead run's claim, and the branch it left behind.
+        const base = (await runGit(["rev-parse", "HEAD"], { cwd: fixture.repo })).trim();
+        await runGit(["push", fixture.remote, `${base}:refs/tags/afk-claim-issue-42`], {
+          cwd: fixture.repo,
+        });
+        await runGit(["push", fixture.remote, `${base}:refs/heads/agent/issue-42`], {
+          cwd: fixture.repo,
+        });
+
+        // The base is rewritten: the branch points at a commit the new base no
+        // longer contains, so a push over it is refused as a non-fast-forward.
+        await writeFile(join(fixture.repo, "README.md"), "# the fixture, rewritten\n", "utf8");
+        await runGit(
+          [
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.com",
+            "commit",
+            "-q",
+            "--amend",
+            "-m",
+            "the fixture, rewritten",
+          ],
+          { cwd: fixture.repo },
+        );
+        const rewritten = (await runGit(["rev-parse", "HEAD"], { cwd: fixture.repo })).trim();
+        await runGit(["push", "--force", fixture.remote, `${rewritten}:refs/heads/main`], {
+          cwd: fixture.repo,
+        });
+
+        const outcome = await reclaimClaim({
+          issue: { number: 42, title: "an issue", updatedAt: "", labels: [] },
+          repo: "gazon1/sing",
+          remote: fixture.remote,
+          baseBranch: "main",
+          cwd: fixture.repo,
+          git: (args, options) => runGit(args, options),
+          gh: async () => "",
+          nonce: "a-nonce",
+          now: new Date("2026-10-30T09:00:00Z"),
+        });
+        expect(outcome.claimed).toBe(true);
+        if (!outcome.claimed) {
+          throw new Error(`the reclaim did not take the claim: ${outcome.reason}`);
+        }
+
+        // The leftover branch is gone: the rework pushes over it, and a push
+        // over a branch the new base does not contain is refused.
+        const left = await gitOutput(
+          ["ls-remote", "--heads", fixture.remote, "agent/issue-42"],
+          { cwd: fixture.repo, env: fixture.env },
+        );
+        expect(left).toBe("");
+
+        // The rework: the work is on the new base, and the push creates the
+        // branch instead of failing on the leftover.
+        const worktree = join(fixture.root, "worktrees", "issue-42");
+        await addWorktree((args, options) => runGit(args, options), fixture.repo, {
+          path: worktree,
+          branch: workBranch(42),
+          baseSha: outcome.base,
+        });
+        await writeFile(join(worktree, "work.txt"), "the work\n", "utf8");
+        await runGit(["add", "-A"], { cwd: worktree });
+        await runGit(
+          [
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.com",
+            "commit",
+            "-q",
+            "-m",
+            "the work",
+          ],
+          { cwd: worktree },
+        );
+        const sha = (await runGit(["rev-parse", "HEAD"], { cwd: worktree })).trim();
+        await pushWorkBranch((args, options) => runGit(args, options), worktree, {
+          remote: fixture.remote,
+          issueNumber: 42,
+          sha,
+        });
+
+        // The branch is on the remote, and it carries the work.
+        const pushed = await gitOutput(["rev-parse", "agent/issue-42"], {
+          cwd: fixture.remote,
+          env: fixture.env,
+        });
+        expect(pushed).toBe(sha);
+      } finally {
+        await fixture.dispose();
+      }
+    }, 60_000);
+
+    it("test_a_reclaim_pushes_over_a_branch_the_new_base_no_longer_contains", async () => {
+      const fixture = await fixtureWithSetupScript();
+      try {
+        // A claim that is old, with a branch behind it that carries nothing.
+        const stale = {
+          number: 42,
+          title: "an issue",
+          labels: ["agent-in-progress"],
+          updatedAt: "2026-01-01T00:00:00Z",
+        };
+        const { gh } = stubGh([stale]);
+
+        // The dead run's claim, and the branch it left behind.
+        const base = (await runGit(["rev-parse", "HEAD"], { cwd: fixture.repo })).trim();
+        await runGit(["push", fixture.remote, `${base}:refs/tags/afk-claim-issue-42`], {
+          cwd: fixture.repo,
+        });
+        await runGit(["push", fixture.remote, `${base}:refs/heads/agent/issue-42`], {
+          cwd: fixture.repo,
+        });
+
+        // The base is rewritten between the run's observation and its claim:
+        // the claim is taken from the new base, and the branch the dead run
+        // left behind is not on it any more. The rewrite happens on the claim's
+        // own read of the base, which is the first time the run asks the
+        // remote for it.
+        let rewritten = false;
+        const git = async (
+          args: readonly string[],
+          options: { cwd: string; input?: string },
+        ): Promise<string> => {
+          if (!rewritten && args[0] === "ls-remote" && args.includes("refs/heads/main")) {
+            rewritten = true;
+            await writeFile(
+              join(fixture.repo, "README.md"),
+              "# the fixture, rewritten\n",
+              "utf8",
+            );
+            await runGit(
+              [
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.com",
+                "commit",
+                "-q",
+                "--amend",
+                "-m",
+                "the fixture, rewritten",
+              ],
+              { cwd: fixture.repo },
+            );
+            const head = (await runGit(["rev-parse", "HEAD"], { cwd: fixture.repo })).trim();
+            await runGit(["push", "--force", fixture.remote, `${head}:refs/heads/main`], {
+              cwd: fixture.repo,
+            });
+          }
+          return runGit(args, options);
+        };
+
+        const result = await runOnce({
+          ...runOptions(fixture, gh),
+          git,
+          staleAfterMs: 60_000,
+          now: new Date("2026-10-30T09:00:00Z"),
+        });
+
+        // The issue was taken over and worked — not skipped.
+        expect(result.issue).toBe(42);
+        expect(result.steps.map((step) => step.step)).toContain("session");
+        expect(result.steps.map((step) => step.step)).toContain("pull request");
+        // And nothing failed: the push created the branch rather than being
+        // refused over the leftover.
+        expect(result.steps.filter((step) => step.outcome === "failed")).toEqual([]);
+        // The branch on the remote is the run's own: the leftover is gone.
+        const pushed = await gitOutput(["rev-parse", "agent/issue-42"], {
+          cwd: fixture.remote,
+          env: fixture.env,
+        });
+        expect(pushed).not.toBe(base);
       } finally {
         await fixture.dispose();
       }

@@ -33,6 +33,7 @@ import {
   createClaimObject,
   deleteClaim,
   deleteLocalBranch,
+  deleteRemoteBranch,
   fetchRef,
   headRef,
   pushClaim,
@@ -195,6 +196,15 @@ export async function removeClaimLabel(
  * than resumed, because the session that made it is gone with the process that
  * died. The branch is the runner's own — `agent/issue-<N>` — and its commits
  * are the dead run's, not anybody's.
+ *
+ * The branch goes on the remote as well as in the checkout. The rework pushes
+ * over the branch, and a push over a branch whose commits the new base no
+ * longer contains is refused as a non-fast-forward: the base was rewritten
+ * while the dead run's branch was on the remote, and the rework would fail on
+ * every attempt for ever. A reclaim is reached only when the branch carries
+ * no work — its commits are already on the base — so deleting it loses
+ * nothing, and the rework's push creates the branch instead of failing on the
+ * leftover.
  */
 export async function reclaimClaim(
   options: ClaimOptions & { readonly worktreeRoot?: string },
@@ -213,6 +223,10 @@ export async function reclaimClaim(
     );
   }
   await deleteLocalBranch(options.git, options.cwd, {
+    branch: workBranch(options.issue.number),
+  });
+  await deleteRemoteBranch(options.git, options.cwd, {
+    remote: options.remote,
     branch: workBranch(options.issue.number),
   });
   return claimIssue(options);
