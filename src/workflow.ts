@@ -156,6 +156,10 @@ if (args.nodes['issue-comments']) {
   await run('issue-comments')
 }
 
+if (args.nodes['related']) {
+  await run('related')
+}
+
 const triage = await run('triage')
 if (triage === 'skip') {
   await run('close-skip')

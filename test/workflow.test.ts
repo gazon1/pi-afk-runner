@@ -5,6 +5,7 @@ import {
   PROMPT_FILES,
   readPrompts,
   runPromptArray,
+  workSessionNodes,
   type AgentSession,
 } from "../src/session.js";
 import {
@@ -299,6 +300,28 @@ describe("the cut-off message", () => {
         reason: null,
       }),
     ).toBe("the review's session was cut off before its last turn");
+  });
+});
+
+describe("the optional related-issues turn", () => {
+  it("is absent by default", () => {
+    const nodes = workSessionNodes({
+      prompts: new Map(WORKFLOW_STATES.map((s) => [s.name, s.name])),
+      issueBody: "body",
+    });
+    expect(nodes.map((n) => n.name)).not.toContain("related");
+  });
+
+  it("runs before triage when enabled", () => {
+    const nodes = workSessionNodes({
+      prompts: new Map(WORKFLOW_STATES.map((s) => [s.name, s.name])),
+      issueBody: "body",
+      includeRelated: true,
+      relatedPrompt: "related prompt",
+    });
+    const names = nodes.map((n) => n.name);
+    expect(names).toContain("related");
+    expect(names.indexOf("related")).toBeLessThan(names.indexOf("triage"));
   });
 });
 
