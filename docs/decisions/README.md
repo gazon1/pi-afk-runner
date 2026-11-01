@@ -19,6 +19,7 @@ for the rule that the copies follow.
 | `2026-11-01-the-lock-is-per-issue.md` | the lock's unit: one per issue, one for the sweep, one for merge |
 | `2026-10-30-the-work-session-is-the-runners-minus-the-runner.md` | what a work session loads, and where the guard's policy lives |
 | `2026-10-31-the-auto-attached-chat-keeps-its-worktree.md` | why the worktree is put back when the chat was switched into it |
+| `2026-11-02-a-restored-worktree-is-prepared.md` | why the worktree the door puts back is prepared |
 | `2026-10-30-a-failed-runs-branch-is-continued.md` | what the next attempt does with the branch a failed run left |
 | `2026-10-31-a-branch-with-no-commits-is-not-work.md` | when a branch on the remote counts as work |
 | `2026-10-31-the-sweep-belongs-to-the-cli.md` | who drains the queue, and what the unit's timeout is sized for |

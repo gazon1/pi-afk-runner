@@ -264,7 +264,9 @@ still gates landing in the merge mode.
 
 The worktree itself is scratch and is removed when the run finishes, successful or not: the branch
 holds the work — unless this chat was switched into the run's session, in which case the worktree is
-put back first, because a chat whose working directory is gone can read nothing. The claim label stays
+put back first, because a chat whose working directory is gone can read nothing. A worktree that is
+put back is **prepared** as well: the repository's own `scripts/setup-worktree.sh` runs in it, so the
+gates work in it the way they work in a worktree the runner made. The claim label stays
 on the issue until it closes — an issue without it is back in the
 queue — so the target repository's own workflow removes it on close
 (`.github/workflows/afk-label-cleanup.yml` in the repository this runner was written for).
