@@ -26,6 +26,8 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
+import { COMMAND_TIMEOUT_MS } from "./git.js";
+
 const execFileAsync = promisify(execFile);
 
 /** The label a human applies to say "this issue is specified and may be taken". */
@@ -72,6 +74,13 @@ export interface PullRequestSummary {
   readonly headRefName: string;
   readonly labels: readonly string[];
   readonly comments: readonly string[];
+  /**
+   * When the pull request was opened — which one of a branch's is the newest.
+   *
+   * Absent when the read did not ask for it: the per-branch read does not need
+   * to tell two pull requests of one branch apart.
+   */
+  readonly createdAt?: string;
 }
 
 /**
@@ -178,6 +187,16 @@ export function pullRequestArgs(repo: string, branch: string): string[] {
 /** Runs `gh` and returns its standard output. */
 export type GhRunner = (args: readonly string[]) => Promise<string>;
 
+/**
+ * The bound a `gh` call gets.
+ *
+ * The same bound the git runner gives its commands: a `gh` that hangs on a
+ * black-holed network must not leave the run in `select` with the host's lock
+ * held. The child is killed at the bound, and the run stops waiting there
+ * whether the child obeys the kill or not.
+ */
+export const GH_TIMEOUT_MS = COMMAND_TIMEOUT_MS;
+
 /** A `gh` command that failed, with the reason gh gave in the message. */
 export class GhCommandFailed extends Error {
   readonly exitCode: number;
@@ -196,20 +215,101 @@ export class GhCommandFailed extends Error {
   }
 }
 
-/** Runs the real `gh`. */
-export const runGh: GhRunner = async (args) => {
-  try {
-    const { stdout } = await execFileAsync("gh", [...args], { encoding: "utf8", maxBuffer: 32 * 1024 * 1024 });
-    return stdout;
-  } catch (failure) {
-    const error = failure as { code?: number; stderr?: string };
-    throw new GhCommandFailed(
-      typeof error.code === "number" ? error.code : 1,
-      args,
-      error.stderr ?? "",
-    );
+/**
+ * A `gh` command that was killed for taking too long.
+ *
+ * The command is named, and so is the bound: a run that stops in `select` has
+ * to say which call hung, because the person looking at it has to know what to
+ * look at.
+ */
+export class GhCommandTimedOut extends Error {
+  readonly args: readonly string[];
+  readonly timeoutMs: number;
+
+  constructor(args: readonly string[], timeoutMs: number) {
+    super(`gh ${args.join(" ")} timed out after ${timeoutMs}ms`);
+    this.name = "GhCommandTimedOut";
+    this.args = args;
+    this.timeoutMs = timeoutMs;
   }
-};
+}
+
+/** Runs the real `gh`, with the bound every command gets. */
+export const runGh: GhRunner = (args) => runGhWithTimeout(args, GH_TIMEOUT_MS);
+
+/**
+ * The grace a killed `gh` gets before the run stops waiting for it.
+ *
+ * The child is asked to stop at the bound, and a child that obeys is gone
+ * within a moment. A child that ignores the request would keep the call open
+ * for as long as it likes — and a call that never settles is the wedge the
+ * bound exists to prevent.
+ */
+export const GH_KILL_GRACE_MS = 5_000;
+
+/**
+ * The failure a `gh` call raises.
+ *
+ * A child that was killed is a timeout — the bound is the only thing here that
+ * kills it — and a command that failed on its own terms says so in its exit
+ * code and its stderr.
+ */
+function ghFailure(
+  failure: unknown,
+  args: readonly string[],
+  timeoutMs: number,
+): Error {
+  const error = failure as { code?: number; stderr?: string; killed?: boolean };
+  if (error.killed === true) {
+    return new GhCommandTimedOut(args, timeoutMs);
+  }
+  return new GhCommandFailed(
+    typeof error.code === "number" ? error.code : 1,
+    args,
+    error.stderr ?? "",
+  );
+}
+
+/**
+ * Runs the real `gh`, and kills it when it takes too long.
+ *
+ * The output cap stays at 32 MiB: a read that answers with more than that is
+ * a read that went wrong, and a runner that died of it would say nothing.
+ */
+export async function runGhWithTimeout(
+  args: readonly string[],
+  timeoutMs: number,
+  killGraceMs: number = GH_KILL_GRACE_MS,
+): Promise<string> {
+  const call = execFileAsync("gh", [...args], {
+    encoding: "utf8",
+    maxBuffer: 32 * 1024 * 1024,
+    timeout: timeoutMs,
+  })
+    .then((result) => result.stdout)
+    .catch((failure: unknown) => {
+      throw ghFailure(failure, args, timeoutMs);
+    });
+  // The bound is ours as well as the child's: `execFile` asks the child to
+  // stop and waits for it, and a child that ignores the request would keep
+  // the call open — and the run waiting on it — for as long as it likes. The
+  // run stops waiting whether the child does or not.
+  let hardStop: NodeJS.Timeout | undefined;
+  const stop = new Promise<never>((_resolve, reject) => {
+    hardStop = setTimeout(
+      () => reject(new GhCommandTimedOut(args, timeoutMs)),
+      timeoutMs + killGraceMs,
+    );
+    hardStop.unref();
+  });
+  try {
+    return await Promise.race([call, stop]);
+  } finally {
+    if (hardStop !== undefined) {
+      clearTimeout(hardStop);
+    }
+  }
+}
 
 function labelNames(value: unknown): string[] {
   if (!Array.isArray(value)) {
@@ -262,17 +362,70 @@ export function parseIssues(json: string): IssueSummary[] {
 
 /** Parse the JSON `gh pr view --json` produces. */
 export function parsePullRequest(json: string): PullRequestSummary | null {
-  const parsed: unknown = JSON.parse(json);
-  if (typeof parsed !== "object" || parsed === null) {
+  return toPullRequestSummary(JSON.parse(json));
+}
+
+/** The runner's own shape of one pull request, or null when it is not one. */
+function toPullRequestSummary(value: unknown): PullRequestSummary | null {
+  if (typeof value !== "object" || value === null) {
     return null;
   }
-  const record = parsed as Record<string, unknown>;
+  const record = value as Record<string, unknown>;
   return {
     number: typeof record.number === "number" ? record.number : 0,
     headRefName: typeof record.headRefName === "string" ? record.headRefName : "",
     labels: labelNames(record.labels),
     comments: commentBodies(record.comments),
+    ...(typeof record.createdAt === "string" ? { createdAt: record.createdAt } : {}),
   };
+}
+
+/**
+ * The arguments that read every open pull request in the repository.
+ *
+ * One read for the whole repository, and the caller matches them by head
+ * branch. `gh pr list --head <branch>` answers the same question for one
+ * branch — and the runner asked it about every issue it had ever worked, so
+ * the calls grew with the queue's history rather than with the work in front
+ * of it.
+ */
+export function allOpenPullRequestsArgs(repo: string): string[] {
+  return [
+    "pr",
+    "list",
+    "--repo",
+    repo,
+    "--state",
+    "open",
+    "--limit",
+    String(ISSUE_PAGE_SIZE),
+    "--json",
+    "number,headRefName,labels,comments,createdAt",
+  ];
+}
+
+/** Parse the JSON `gh pr list --json` produces. */
+export function parsePullRequests(json: string): PullRequestSummary[] {
+  const parsed: unknown = JSON.parse(json);
+  if (!Array.isArray(parsed)) {
+    return [];
+  }
+  const pullRequests: PullRequestSummary[] = [];
+  for (const entry of parsed) {
+    const summary = toPullRequestSummary(entry);
+    if (summary !== null) {
+      pullRequests.push(summary);
+    }
+  }
+  return pullRequests;
+}
+
+/** Read every open pull request in the repository. */
+export async function readAllOpenPullRequests(
+  repo: string,
+  gh: GhRunner = runGh,
+): Promise<PullRequestSummary[]> {
+  return parsePullRequests(await gh(allOpenPullRequestsArgs(repo)));
 }
 
 /** Read the issues nobody has claimed. */
