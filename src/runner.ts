@@ -39,6 +39,7 @@ import {
   UNTRUSTED_INPUT_SECTION,
   briefFence,
   createVerdictTool,
+  cutOffMessage,
   runPromptArray,
   startAgent,
   type ReviewVerdict,
@@ -649,7 +650,13 @@ export async function reviewPullRequest(options: {
   if (result.aborted) {
     // The same cut the work session reports; a review that did not finish is
     // not a review that stated no verdict.
-    throw new Error("the review's session was cut off before its last turn");
+    throw new Error(
+      cutOffMessage({
+        what: "the review's session",
+        deadlineMs: options.deadlineMs,
+        reason: result.cutReason,
+      }),
+    );
   }
 
   const verdict = holder.value;
@@ -800,7 +807,13 @@ export async function fixWorktree(options: {
     ...(options.schedule === undefined ? {} : { schedule: options.schedule }),
   });
   if (result.aborted) {
-    throw new Error("the fix's session was cut off before its last turn");
+    throw new Error(
+      cutOffMessage({
+        what: "the fix's session",
+        deadlineMs: options.deadlineMs,
+        reason: result.cutReason,
+      }),
+    );
   }
 }
 
@@ -2101,8 +2114,15 @@ async function runPlan(
         }
         if (result.aborted) {
           // The deadline is one reason a turn is cut; a human stopping the run is
-          // another, and the message must not claim a clock it cannot see.
-          throw new Error("the agent's session was cut off before its last turn");
+          // another. The runner can tell them apart, and the record has to say
+          // which one it was: a record that cannot is not a record.
+          throw new Error(
+            cutOffMessage({
+              what: "the agent's session",
+              deadlineMs: sessionBudgetMs,
+              reason: result.cutReason,
+            }),
+          );
         }
         state.decision = result.decision;
         state.reason = result.reason;

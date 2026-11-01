@@ -3188,6 +3188,50 @@ describe("the CLI's run", () => {
     );
   });
 
+  it("test_the_record_says_the_deadline_cut_the_session", async () => {
+    // The deadline and a human's stop look the same to the runner's caller:
+    // both are a cut turn. The record has to say which one it was, or the
+    // reader has to go and find the session's own log to learn it.
+    const fixture = await fixtureWithSetupScript();
+    try {
+      const { gh } = stubGh([{ number: 42, title: "an issue" }]);
+
+      await expect(
+        runOnce({
+          ...runOptions(fixture, gh),
+          // A deadline of nothing: the turn below never settles on its own.
+          deadlineMs: 1,
+          session: async () => ({
+            async prompt() {
+              await new Promise<void>(() => {
+                // never settles on its own
+              });
+            },
+            async abort() {},
+            dispose() {},
+          }),
+        }),
+      ).rejects.toThrow(/the agent's session hit its .* deadline/);
+
+      // And the record says it too: the record is what a reader has.
+      const record = await readFile(
+        join(
+          fixture.repo,
+          "build",
+          "diagnostics",
+          "issue-42",
+          "2026-10-30T09-00-00-000Z-abcdef12.md",
+        ),
+        "utf8",
+      );
+      expect(record).toContain("session — failed");
+      expect(record).toContain("the agent's session hit its");
+      expect(record).toContain("deadline");
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
   it("test_one_invocation_acts_on_one_issue", async () => {
     const fixture = await fixtureWithSetupScript();
     try {

@@ -332,8 +332,41 @@ export interface PromptArrayResult {
   readonly completed: number;
   /** Whether the deadline cut the run short. */
   readonly aborted: boolean;
+  /**
+   * Why the run was cut off — the deadline, or a human's stop.
+   *
+   * `null` when the run was not cut off, or when it was cut off by neither.
+   */
+  readonly cutReason: "deadline" | "stopped" | null;
   /** What the abort said, when the abort itself failed. */
   readonly abortError: string | null;
+}
+
+/**
+ * Why a run was cut off, in the words the record uses.
+ *
+ * The deadline is one reason and a human's stop is another, and the runner can
+ * tell them apart. A record that says only "cut off" sends the reader to the
+ * session's own log to find out which one it was — and the log is not part of
+ * the record.
+ */
+export function cutOffMessage(options: {
+  /** What was cut off — "the agent's session", "the review's session". */
+  readonly what: string;
+  /** The deadline it was given. */
+  readonly deadlineMs: number;
+  /** Why it was cut off. */
+  readonly reason: "deadline" | "stopped" | null;
+}): string {
+  if (options.reason === "deadline") {
+    const minutes = options.deadlineMs / 60_000;
+    const budget =
+      minutes >= 1
+        ? `${Math.ceil(minutes)}-minute`
+        : `${Math.max(1, Math.round(options.deadlineMs / 1000))}-second`;
+    return `${options.what} hit its ${budget} deadline`;
+  }
+  return `${options.what} was cut off before its last turn`;
 }
 
 /**
@@ -520,6 +553,7 @@ export async function runPromptArray(options: {
 }): Promise<PromptArrayResult> {
   const schedule = options.schedule ?? defaultScheduler;
   let aborted = false;
+  let cutReason: "deadline" | "stopped" | null = null;
   let abortError: string | null = null;
 
   const nodes =
@@ -545,6 +579,7 @@ export async function runPromptArray(options: {
 
   const cancel = schedule(() => {
     aborted = true;
+    cutReason ??= "deadline";
     reachDeadline();
     // The promise is caught: an unhandled rejection inside a timer ends the
     // process, and this is the moment the runner is trying to record a run
@@ -560,6 +595,7 @@ export async function runPromptArray(options: {
       return false;
     }
     aborted = true;
+    cutReason ??= "stopped";
     return true;
   };
 
@@ -603,7 +639,7 @@ export async function runPromptArray(options: {
       ? await runWorkSession({ nodes, run })
       : await runStates({ states: nodes, run });
     const completed = result.completed.filter((state) => state.counts).length;
-    return { completed, aborted: aborted || result.aborted, abortError };
+    return { completed, aborted: aborted || result.aborted, cutReason, abortError };
   } catch (error) {
     // The engine wraps a failed turn and says which state it failed in. The
     // failure underneath it is the cause; the caller reads the message.
