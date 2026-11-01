@@ -541,7 +541,8 @@ describe("the run the front door owns", () => {
       // The worktree that comes back is prepared: the repository's own script
       // ran in it, so the gates work in it the way they work in a worktree the
       // runner made. One run of the script, not two.
-      await vi.waitFor(() => expect(existsSync(join(worktreePath, ".env"))).toBe(true));
+      await vi.waitFor(() => expect(existsSync(join(worktreeRoot, "prepared.log"))).toBe(true));
+      expect(await readFile(join(worktreePath, ".env"), "utf8")).toBe("prepared\n");
       expect(await readFile(join(worktreeRoot, "prepared.log"), "utf8")).toBe("prepared\n");
     } finally {
       await fixture.dispose();
@@ -651,6 +652,69 @@ describe("the run the front door owns", () => {
         const said = notes.map((note) => note.message).join("\n");
         expect(said).toContain("unprepared");
         expect(said).toContain("scripts/setup-worktree.sh");
+      });
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("says so when the setup script is there and fails", async () => {
+    // The script is in the worktree and it exits non-zero. The worktree came
+    // back, and the door says that it is not prepared — with the script's own
+    // reason, and without claiming that the script never ran.
+    const fixture = await createFixtureRepository({
+      files: {
+        "scripts/setup-worktree.sh": [
+          "#!/usr/bin/env bash",
+          "set -eu",
+          'printf "the setup script refused\\n" >&2',
+          "exit 1",
+          "",
+        ].join("\n"),
+      },
+    });
+    const worktreeRoot = join(fixture.root, "worktrees");
+    const worktreePath = join(worktreeRoot, "issue-42");
+    try {
+      const git = (args: readonly string[]) =>
+        gitOutput(args, { cwd: fixture.repo, env: fixture.env });
+      await git(["branch", "agent/issue-42"]);
+      await mkdir(worktreeRoot, { recursive: true });
+      await git(["worktree", "add", worktreePath, "agent/issue-42"]);
+
+      const host = fakePi();
+      const fake = fakeSession();
+      const created = deferred();
+      const release = deferred();
+      let removed = false;
+      const work = async (options: RunOptions): Promise<RunResult> => {
+        options.onIssue?.({ number: 42, title: "Fix the thing" });
+        await options.session({ cwd: worktreePath, systemPromptSections: {} });
+        created.resolve();
+        await release.promise;
+        await git(["worktree", "remove", "--force", worktreePath]);
+        removed = true;
+        return { issue: 42, outcome: "completed", steps: [], record: "" };
+      };
+
+      const door = liveFrontDoor(host.pi, { session: async () => fake.session, work });
+      const { ctx, notes } = fakeContext();
+      await door.start(
+        `--repo gazon1/cardinalfish --checkout ${fixture.repo} --worktree-root ${worktreeRoot}`,
+        ctx,
+      );
+      await created.promise;
+      release.resolve();
+      await vi.waitFor(() => expect(removed).toBe(true));
+
+      // The worktree is back, and the door says that the script did not
+      // prepare it — with the script's own words for why.
+      await vi.waitFor(() => expect(existsSync(worktreePath)).toBe(true));
+      await vi.waitFor(() => {
+        const said = notes.map((note) => note.message).join("\n");
+        expect(said).toContain("unprepared");
+        expect(said).toContain("the setup script refused");
+        expect(said).not.toContain("did not run in it");
       });
     } finally {
       await fixture.dispose();
