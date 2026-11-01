@@ -2569,7 +2569,7 @@ async function runPlan(
           throw cause instanceof Error ? cause : error;
         });
 
-        if (outcome.passed) {
+        if (outcome.stopReason.kind === "passed") {
           return `${state.reviewCount} review(s) — pass`;
         }
 
@@ -2578,8 +2578,8 @@ async function runPlan(
         // The run says what was cut off and what cut it off, and it does not
         // say the review failed: a review that was cut off is not a review
         // that said `fail`.
-        if (outcome.cutOff !== null) {
-          throw new Error(outcome.cutOff);
+        if (outcome.stopReason.kind === "cutOff") {
+          throw new Error(outcome.stopReason.message);
         }
 
         // The review never passed. The finding goes on the issue — where the
@@ -2594,8 +2594,8 @@ async function runPlan(
               findings: state.findings,
               reviews: state.reviewCount,
               exhausted,
-              noChange: outcome.noChange,
-              noVerdict: outcome.statedNoVerdict,
+              noChange: outcome.stopReason.kind === "noChange",
+              noVerdict: outcome.stopReason.kind === "statedNoVerdict",
             }),
           },
           options.gh,
@@ -2603,13 +2603,13 @@ async function runPlan(
         // The reason the loop stopped is in the message: the finding, and —
         // when the fix changed nothing — that the fix did not answer it.
         throw new Error(
-          outcome.statedNoVerdict
+          outcome.stopReason.kind === "statedNoVerdict"
             ? `the review of pull request ${state.pullRequest} stated no verdict`
             : `the review did not pass after ${state.reviewCount} review(s)` +
                 (state.findings.length === 0
                   ? ""
                   : `: ${state.findings.join("; ")}`) +
-                (outcome.noChange ? " — the fix changed nothing" : ""),
+                (outcome.stopReason.kind === "noChange" ? " — the fix changed nothing" : ""),
         );
       },
     });

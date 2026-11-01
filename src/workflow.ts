@@ -413,25 +413,20 @@ export class ReviewStatedNoVerdict extends WorkflowError {
   }
 }
 
+/** Why the review loop stopped. One value per stop. */
+export type ReviewGateStopReason =
+  | { readonly kind: "passed" }
+  | { readonly kind: "failed" }
+  | { readonly kind: "noChange" }
+  | { readonly kind: "statedNoVerdict" }
+  | { readonly kind: "cutOff"; readonly message: string };
+
 /** What the review loop did. */
 export interface ReviewGateResult {
-  /** Whether the review finally passed. */
-  readonly passed: boolean;
   /** How many reviews the engine asked for. */
   readonly reviews: number;
-  /** Whether the loop stopped because a fix changed nothing. */
-  readonly noChange: boolean;
-  /**
-   * The cut-off that stopped the loop, when one did.
-   *
-   * It is the message the run's record carries: what was cut off, and what
-   * cut it off. A review that was cut off stated no verdict and a fix that
-   * was cut off wrote nothing — there is nothing to fix and nothing to review
-   * again, so the loop ends where it is.
-   */
-  readonly cutOff: string | null;
-  /** Whether the loop stopped because a review stated no verdict. */
-  readonly statedNoVerdict: boolean;
+  /** Why the loop stopped. */
+  readonly stopReason: ReviewGateStopReason;
 }
 
 /**
@@ -510,26 +505,17 @@ export async function runReviewGate(options: {
       persistLogs: false,
     });
     return {
-      passed: run.result?.ok === true,
       reviews,
-      noChange: false,
-      cutOff: null,
-      statedNoVerdict: false,
+      stopReason: run.result?.ok === true ? { kind: "passed" } : { kind: "failed" },
     };
   } catch (error) {
     // The fix that changed nothing stops the loop, and the loop's verdict is
     // a failure: the review did not pass, and the fix did not answer it.
     if (error instanceof FixChangedNothing) {
-      return { passed: false, reviews, noChange: true, cutOff: null, statedNoVerdict: false };
+      return { reviews, stopReason: { kind: "noChange" } };
     }
     if (error instanceof ReviewStatedNoVerdict) {
-      return {
-        passed: false,
-        reviews,
-        noChange: false,
-        cutOff: null,
-        statedNoVerdict: true,
-      };
+      return { reviews, stopReason: { kind: "statedNoVerdict" } };
     }
     // The run was cut off — the review's session or the fix's. The engine
     // stopped on it: it is the engine's own abort error, and an unknown
@@ -538,11 +524,8 @@ export async function runReviewGate(options: {
     // reason comes back with it.
     if (isCutOff(error)) {
       return {
-        passed: false,
         reviews,
-        noChange: false,
-        cutOff: error instanceof Error ? error.message : String(error),
-        statedNoVerdict: false,
+        stopReason: { kind: "cutOff", message: error instanceof Error ? error.message : String(error) },
       };
     }
     throw error;
