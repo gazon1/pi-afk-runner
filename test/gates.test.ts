@@ -8,7 +8,9 @@
  * different stories, and the record tells them apart.
  */
 import { describe, expect, it } from "vitest";
-import { readFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
@@ -207,5 +209,87 @@ describe("the gates the runner runs", () => {
     });
 
     expect(output.length).toBe(1024);
+  });
+
+  it("writes the whole of a gate's output to a file, and keeps the tail of it", async () => {
+    // The record quotes the tail of what a gate printed; the file is where the
+    // rest of it is. The two are the same output: the tail is the end of the
+    // file.
+    const dir = await mkdtemp(join(tmpdir(), "afk-gates-"));
+    try {
+      await writeFile(
+        join(dir, "check.sh"),
+        "#!/bin/sh\nfor i in $(seq 1 20000); do echo \"line $i\"; done\nexit 1\n",
+        "utf8",
+      );
+      const log = join(dir, "gates.log");
+
+      const failure = await runGates({
+        run: runCommand,
+        cwd: dir,
+        budgetMs: 60_000,
+        outputFile: log,
+      }).then(
+        () => null,
+        (error: unknown) => error,
+      );
+
+      expect(failure).toBeInstanceOf(GateFailed);
+      const gate = failure as GateFailed;
+      expect(gate.outputFile).toBe(log);
+
+      // The file holds the whole of it.
+      const whole = await readFile(log, "utf8");
+      expect(whole).toContain("line 1\n");
+      expect(whole).toContain("line 20000\n");
+
+      // The runner kept the tail of it, and not the whole of it.
+      expect(gate.output.length).toBeLessThanOrEqual(GATE_OUTPUT_LIMIT_BYTES);
+      expect(gate.output).toContain("line 20000");
+      expect(gate.output).not.toContain("line 1\n");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("leaves no log behind when the gates pass", async () => {
+    // The log of a green build is evidence of nothing, and a diagnostics
+    // directory full of them is a directory nobody reads.
+    const dir = await mkdtemp(join(tmpdir(), "afk-gates-"));
+    try {
+      const log = join(dir, "gates.log");
+      const run: CommandRunner = async (spec) => {
+        // A runner that is asked for a file writes the command's output there.
+        if (spec.outputFile !== undefined) {
+          await writeFile(spec.outputFile, "the gate said this\n", "utf8");
+        }
+        return "";
+      };
+
+      await runGates({ run, cwd: dir, budgetMs: 60_000, outputFile: log });
+
+      expect(existsSync(log)).toBe(false);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("names the gate that failed, when it printed nothing", async () => {
+    // A gate that says nothing has still refused the change, and the record
+    // has to say which gate it was.
+    const run: CommandRunner = async (spec) => {
+      throw new CommandFailed(1, spec.command, [...spec.args], "", "");
+    };
+
+    const failure = await runGates({ run, cwd: "/the/worktree", budgetMs: 60_000 }).then(
+      () => null,
+      (error: unknown) => error,
+    );
+
+    expect(failure).toBeInstanceOf(GateFailed);
+    const gate = failure as GateFailed;
+    expect(gate.reason).toBe("failed");
+    expect(gate.message).toContain("./check.sh");
+    expect(gate.message).toContain("exit 1");
   });
 });

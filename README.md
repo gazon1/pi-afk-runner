@@ -146,7 +146,10 @@ The **runner** runs the target repository's own gates — `./check.sh`, `just tc
 `just docs-audit` — in the worktree, on the tree the agent left, as the `gates` step between the
 session and the push. A gate that does not pass ends the run there: the claim is released, the
 work stays on the local branch, and nothing is pushed. The record carries the tail of what the
-gate printed, so a failed run says which gate failed and why.
+gate printed, so a failed run says which gate failed and why. The whole of what the gate printed
+goes to a file beside the record — `<the run's id>-gates.log` — and the record names it: the
+record is a document a person reads, and the whole build log is kept without being read. A gate
+that passed leaves no log behind.
 
 The agent runs the gates too — it has to, to fix what they report — and the runner runs them
 again, because an agent that skipped them is not a gate. The list is written down **once**, in
@@ -295,7 +298,8 @@ hook. CI still gates landing in the merge mode.
   run, and never a second copy of something that is already open;
 - or, for a split, the two to eight smaller issues it filed instead of working the original,
   chained by `**Depends on:**` so they run in order;
-- a record under `build/diagnostics/issue-<N>/` in the checkout.
+- a record under `build/diagnostics/issue-<N>/` in the checkout, and — when a gate failed — the
+  log of what it printed beside it.
 
 The worktree itself is scratch and is removed when the run finishes, successful or not: the branch
 holds the work — unless this chat was switched into the run's session, in which case the worktree is

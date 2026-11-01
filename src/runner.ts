@@ -999,8 +999,21 @@ export interface StepRecord {
    * The detail names the failure; this is the evidence behind it. Only the
    * gates step carries it: a gate says why it refused the change, and a
    * record that says only "a gate failed" says nothing a reader can act on.
+   *
+   * It is bounded: what is quoted here is the tail of what the command
+   * printed, and never more than `RECORD_OUTPUT_LIMIT_BYTES` of it. The whole
+   * of it is in the file `outputFile` names.
    */
   readonly output?: string;
+  /**
+   * Where the step's whole output is, when it was written to a file.
+   *
+   * The record quotes the tail; this is where the rest of it is, for whoever
+   * wants the whole build log.
+   */
+  readonly outputFile?: string;
+  /** Whether what is quoted is only the tail of what the step printed. */
+  readonly outputTruncated?: boolean;
 }
 
 /** One step of a run. */
@@ -1051,6 +1064,34 @@ function redact(text: string): string {
  */
 export function newRunId(now: Date = new Date()): string {
   return `${now.toISOString().replace(/[:.]/g, "-")}-${randomUUID().slice(0, 8)}`;
+}
+
+/**
+ * How much of a failed step's output the record quotes.
+ *
+ * Sixteen kilobytes: the end of a build log is where the failure is, and a
+ * reader who has to scroll past a thousand lines of it is not reading a
+ * document. The whole output is not lost — the record names the file it is
+ * in.
+ */
+export const RECORD_OUTPUT_LIMIT_BYTES = 16 * 1024;
+
+/**
+ * The end of what a step printed.
+ *
+ * The tail is the part a reader needs, and the bound keeps the record a
+ * document: the record is one markdown file, and it is meant to be read.
+ */
+function tail(text: string, limit: number): { readonly text: string; readonly truncated: boolean } {
+  const bytes = Buffer.from(text, "utf8");
+  if (bytes.length <= limit) {
+    return { text, truncated: false };
+  }
+  const cut = bytes.subarray(bytes.length - limit).toString("utf8");
+  // The cut lands in the middle of a line: the line it lands in is dropped,
+  // and what is quoted starts at a line of its own.
+  const newline = cut.indexOf("\n");
+  return { text: newline === -1 ? cut : cut.slice(newline + 1), truncated: true };
 }
 
 /**
@@ -1118,6 +1159,15 @@ function renderRecord(options: {
   for (const step of options.steps) {
     const detail = step.detail === "" ? "" : ` — ${step.detail}`;
     lines.push(`- ${step.step} — ${step.outcome}${detail}`);
+    // Where the whole output went, when it went somewhere: the record quotes
+    // the tail of it, and the file is where the rest of it is.
+    if (step.outputFile !== undefined) {
+      const quoted =
+        step.outputTruncated === true
+          ? ` — only its last ${RECORD_OUTPUT_LIMIT_BYTES / 1024} KiB are quoted here`
+          : "";
+      lines.push(`  the whole output is at ${step.outputFile}${quoted}`);
+    }
     // What the command printed, indented under the step it belongs to.
     for (const line of (step.output ?? "").split("\n")) {
       if (line.trim() === "") {
@@ -1243,11 +1293,18 @@ export async function runSteps(options: {
       // their detail, and a record of every failed command's output would be
       // a record of megabytes.
       const output = cause instanceof GateFailed ? cause.output : "";
+      // The record quotes the tail of it: the end of a build log is where the
+      // failure is, and the record is a document a person reads.
+      const quoted = tail(output, RECORD_OUTPUT_LIMIT_BYTES);
       record = {
         step: step.name,
         outcome: "failed",
         detail: redact(firstLine(cause.message)),
-        ...(output === "" ? {} : { output: redact(output) }),
+        ...(quoted.text === "" ? {} : { output: redact(quoted.text) }),
+        ...(quoted.truncated ? { outputTruncated: true } : {}),
+        ...(cause instanceof GateFailed && cause.outputFile !== undefined
+          ? { outputFile: cause.outputFile }
+          : {}),
       };
       steps.push(record);
       options.onStep?.(record);
@@ -1645,11 +1702,14 @@ async function gateTheTree(options: {
   readonly run: CommandRunner;
   readonly cwd: string;
   readonly budgetMs: number;
+  /** Where the gates' whole output goes while they run. */
+  readonly outputFile?: string;
 }): Promise<string> {
   const outcome = await runGates({
     run: options.run,
     cwd: options.cwd,
     budgetMs: options.budgetMs,
+    ...(options.outputFile === undefined ? {} : { outputFile: options.outputFile }),
   }).then(
     (summary) => ({ summary, failure: undefined as unknown }),
     (error: unknown) => ({ summary: "", failure: error }),
@@ -2128,6 +2188,17 @@ async function runPlan(
   /** What the gates have spent of their share. */
   let gatesSpentMs = 0;
   /**
+   * The gates' whole output goes to a file beside the record.
+   *
+   * The record quotes the tail of what a gate printed and names the file; the
+   * file is where the rest of it is. A record is a document a person reads,
+   * and a document that carries a whole build log is not read.
+   */
+  const gatesLog = join(
+    recordDirectory(options.checkout, issue.number),
+    `${runId}-gates.log`,
+  );
+  /**
    * The gates run on the tree the agent left, and again on the tree a
    * review's fix left. Both sets come out of the one share, so a fix loop
    * that runs the suite on every iteration cannot spend the run's whole
@@ -2141,6 +2212,7 @@ async function runPlan(
         run: options.run,
         cwd: state.worktreePath,
         budgetMs: Math.max(0, shares.gatesMs - gatesSpentMs),
+        outputFile: gatesLog,
       });
     } finally {
       gatesSpentMs += Date.now() - startedAt;

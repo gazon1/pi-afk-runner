@@ -27,6 +27,7 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
+import { createWriteStream } from "node:fs";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -54,6 +55,15 @@ export interface CommandSpec {
    * whole.
    */
   readonly maxOutputBytes?: number;
+  /**
+   * Where the command's whole output is written, when it is written anywhere.
+   *
+   * The tail the runner keeps is the evidence a reader needs; this is the rest
+   * of it. A runner that is given a file writes the command's standard output
+   * and its standard error there, whole, as they come — and its own memory
+   * still holds only the tail.
+   */
+  readonly outputFile?: string;
   /**
    * Whether a timeout kills the command's whole tree, not just the command.
    *
@@ -229,34 +239,72 @@ export const runCommand: CommandRunner = (spec) =>
     });
     const stdout = new OutputTail(spec.maxOutputBytes ?? Number.POSITIVE_INFINITY);
     const stderr = new OutputTail(spec.maxOutputBytes ?? Number.POSITIVE_INFINITY);
+    // The whole output goes to the file, as it comes: the tail the runner
+    // holds is the evidence a reader needs, and the file is where the rest of
+    // it is.
+    const sink =
+      spec.outputFile === undefined
+        ? null
+        : createWriteStream(spec.outputFile, { flags: "w" });
+    // The log is not the command's business: a file that cannot be written is
+    // not a failure of the command that ran.
+    sink?.on("error", () => {});
+    const closeSink = async (): Promise<void> => {
+      if (sink === null || sink.destroyed) {
+        return;
+      }
+      // 'close' comes after the file is flushed and its handle is closed, and
+      // it comes whether the stream ended or broke. The second is a bound and
+      // not a hope: a flush that never finishes must not hold a gate's
+      // timeout.
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(() => resolve(), 1000);
+        sink.once("close", () => {
+          clearTimeout(timer);
+          resolve();
+        });
+        sink.end();
+      });
+    };
     const timer = setTimeout(() => {
       killTree(child, spec.killGroup === true);
-      reject(
-        new CommandTimedOut(
-          timeoutMs,
-          spec.command,
-          spec.args,
-          stdout.text(),
-          stderr.text(),
-        ),
-      );
+      // The file is flushed before the failure is raised: the record names
+      // the log, and the log has to be there when it does.
+      void closeSink().then(() => {
+        reject(
+          new CommandTimedOut(
+            timeoutMs,
+            spec.command,
+            spec.args,
+            stdout.text(),
+            stderr.text(),
+          ),
+        );
+      });
     }, timeoutMs);
     child.stdout.on("data", (chunk: Buffer) => {
       stdout.push(chunk);
+      sink?.write(chunk);
     });
     child.stderr.on("data", (chunk: Buffer) => {
       stderr.push(chunk);
+      sink?.write(chunk);
     });
-    child.on("error", (err) => { clearTimeout(timer); reject(err); });
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      void closeSink().then(() => reject(err));
+    });
     child.on("close", (code) => {
       clearTimeout(timer);
-      if (code === 0) {
-        resolve(stdout.text());
-      } else {
-        reject(
-          new CommandFailed(code ?? 1, spec.command, spec.args, stdout.text(), stderr.text()),
-        );
-      }
+      void closeSink().then(() => {
+        if (code === 0) {
+          resolve(stdout.text());
+        } else {
+          reject(
+            new CommandFailed(code ?? 1, spec.command, spec.args, stdout.text(), stderr.text()),
+          );
+        }
+      });
     });
     child.stdin.on("error", () => {
       // A command that exits before reading its input closes the pipe; that is

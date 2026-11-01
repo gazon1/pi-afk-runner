@@ -17,6 +17,9 @@
  * judged is the tree that is pushed.
  */
 
+import { mkdir, rm, stat } from "node:fs/promises";
+import { dirname } from "node:path";
+
 import { CommandFailed, CommandTimedOut, type CommandRunner } from "./git.js";
 
 /**
@@ -50,7 +53,8 @@ export const GATE_TIMEOUT_MS = 60 * 60 * 1000;
  * A failing `./check.sh` prints megabytes — a compiler's every finding, a test
  * run's every failure. The record carries the tail of it, and the runner does
  * not hold the rest in memory either: a gate's output is evidence, not a
- * thing to be kept whole.
+ * thing to be kept whole. The whole of it goes to a file, and the record
+ * names the file.
  */
 export const GATE_OUTPUT_LIMIT_BYTES = 64 * 1024;
 
@@ -104,6 +108,13 @@ export class GateFailed extends Error {
   readonly exitCode: number | undefined;
   /** What the gate printed — its standard output and its standard error. */
   readonly output: string;
+  /**
+   * Where the gate's whole output is, when it was written to a file.
+   *
+   * The record quotes the tail of the output; this is where the rest of it
+   * is, for whoever wants to read the whole build log.
+   */
+  readonly outputFile: string | undefined;
 
   constructor(options: {
     readonly gate: string;
@@ -114,6 +125,8 @@ export class GateFailed extends Error {
     readonly program?: string;
     /** What else the record should say. */
     readonly detail?: string;
+    /** Where the gate's whole output was written. */
+    readonly outputFile?: string;
   }) {
     super(gateFailureMessage(options));
     this.name = "GateFailed";
@@ -121,6 +134,7 @@ export class GateFailed extends Error {
     this.reason = options.reason;
     this.exitCode = options.exitCode;
     this.output = options.output;
+    this.outputFile = options.outputFile;
   }
 }
 
@@ -166,17 +180,19 @@ function firstLine(text: string): string {
  * apart: a gate that refused the change, a host that cannot run the gate, and
  * a gate that never got to answer.
  */
-function gateFailure(
+async function gateFailure(
   gate: string,
   invocation: GateInvocation,
   failure: unknown,
-): GateFailed {
+  outputFile: string | undefined,
+): Promise<GateFailed> {
   if (failure instanceof CommandFailed) {
     return new GateFailed({
       gate,
       reason: "failed",
       exitCode: failure.exitCode,
       output: [failure.stdout, failure.stderr].join("\n"),
+      ...(await writtenLog(outputFile)),
     });
   }
   if (failure instanceof CommandTimedOut) {
@@ -185,10 +201,12 @@ function gateFailure(
       reason: "unfinished",
       output: [failure.stdout, failure.stderr].join("\n"),
       detail: `it was killed after ${failure.timeoutMs}ms`,
+      ...(await writtenLog(outputFile)),
     });
   }
   const code = (failure as { code?: string } | null)?.code;
   if (code === "ENOENT" || code === "EACCES") {
+    // The gate never ran, so it printed nothing and there is no log of it.
     return new GateFailed({
       gate,
       reason: "missing",
@@ -202,6 +220,26 @@ function gateFailure(
     output: "",
     detail: failure instanceof Error ? failure.message : String(failure),
   });
+}
+
+/**
+ * The file the gate's whole output went to, when it is there.
+ *
+ * A gate that never ran has no output and no file, and a record that names a
+ * file that is not there sends the reader looking for nothing. A gate that
+ * ran and said nothing has an empty file, and there is nothing to point at.
+ */
+async function writtenLog(
+  outputFile: string | undefined,
+): Promise<{ readonly outputFile?: string }> {
+  if (outputFile === undefined) {
+    return {};
+  }
+  const there = await stat(outputFile).then(
+    (file) => file.size > 0,
+    () => false,
+  );
+  return there ? { outputFile } : {};
 }
 
 /**
@@ -223,6 +261,14 @@ export async function runGates(options: {
   readonly cwd: string;
   /** The budget the gates share, in milliseconds. */
   readonly budgetMs: number;
+  /**
+   * Where the gates' whole output goes while they run.
+   *
+   * The file is the gate's own evidence, whole; the record quotes the tail of
+   * it and names the file. A gate that passes leaves nothing behind: the log
+   * of a green build is evidence of nothing.
+   */
+  readonly outputFile?: string;
 }): Promise<string> {
   const startedAt = Date.now();
   const passed: string[] = [];
@@ -236,6 +282,12 @@ export async function runGates(options: {
         output: "",
         detail: "the run's budget was spent before the gates could run",
       });
+    }
+    const outputFile = options.outputFile;
+    if (outputFile !== undefined) {
+      // The log is a convenience: a directory that cannot be created is not a
+      // gate's verdict, and the gates still have to run.
+      await mkdir(dirname(outputFile), { recursive: true }).catch(() => {});
     }
     try {
       await options.run({
@@ -252,9 +304,22 @@ export async function runGates(options: {
         // The build the gate starts dies with the gate: a build that keeps
         // going writes into the worktree the runner restores and pushes.
         killGroup: true,
+        // The whole of it goes to the file, so that the record can quote the
+        // tail and still say where the rest of it is.
+        ...(outputFile === undefined ? {} : { outputFile }),
       });
     } catch (failure) {
-      throw gateFailure(gate, invocation, failure);
+      const failed = await gateFailure(gate, invocation, failure, outputFile);
+      if (failed.outputFile === undefined && outputFile !== undefined) {
+        // The gate never ran, or it ran and said nothing: there is no log of
+        // it to keep.
+        await rm(outputFile, { force: true });
+      }
+      throw failed;
+    }
+    if (outputFile !== undefined) {
+      // A gate that passed leaves no log behind.
+      await rm(outputFile, { force: true });
     }
     passed.push(`${gate} — ok`);
   }
