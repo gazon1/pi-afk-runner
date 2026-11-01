@@ -68,6 +68,9 @@ argument in one place, every read has a typed argument builder and a tested pars
 the seam the tests inject. `src/gh.ts` is the only module that names the `gh` binary, and
 `test/gh-surface.test.ts` is now the guard that says so.
 
+The rule is about the **runner's own modules**. The agent's session runs `gh` itself, as a person
+would — the fourth turn's leftover instructions ask it to — and that is not the runner's transport.
+
 ## Rationale
 
 **Why the contract does not move.** The contract binds the labels, the markers and the verdict — not
@@ -91,7 +94,8 @@ to ask the same question should find the answer, not repeat the audit.
 
 - `src/gh.ts` is unchanged in behaviour, and `npm run check` still passes on it.
 - The dependency is not taken; `package.json` and `.pi/settings.json` are unchanged.
-- `test/gh-surface.test.ts` fails if a second module starts naming the `gh` binary.
+- `test/gh-surface.test.ts` fails if a second module starts naming the `gh` binary in code; prose
+  that names it in passing does not count.
 - If a real client is wanted later — the GitHub REST API, or a package that really exposes one — it
   is a separate decision, because it changes the authentication model and not only the calls.
 

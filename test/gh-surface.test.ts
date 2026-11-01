@@ -19,6 +19,9 @@ import { describe, expect, it } from "vitest";
 
 const sourceDirectory = fileURLToPath(new URL("../src", import.meta.url));
 
+/** The module that owns the GitHub calls. */
+const GH_MODULE = "gh.ts";
+
 async function sourceFiles(directory: string): Promise<string[]> {
   const entries = await readdir(directory, { withFileTypes: true });
   const files: string[] = [];
@@ -33,27 +36,49 @@ async function sourceFiles(directory: string): Promise<string[]> {
   return files;
 }
 
-/** The `gh` binary, as a string literal — the only way a module can name it. */
-const namesTheBinary = /(["'])gh\1/;
+/**
+ * A file's code, without its comments.
+ *
+ * Prose may name the binary in passing — this file's own docstring does — and
+ * only code names it.
+ */
+function code(text: string): string {
+  return text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+}
+
+/** Whether the code names the `gh` binary, as a string literal. */
+function namesTheBinary(text: string): boolean {
+  return /(["'])gh\1/.test(code(text));
+}
+
+/** The modules that name the binary, other than the one that owns the calls. */
+async function offenders(): Promise<string[]> {
+  const found: string[] = [];
+  for (const file of await sourceFiles(sourceDirectory)) {
+    if (file.endsWith(`/${GH_MODULE}`)) {
+      continue;
+    }
+    if (namesTheBinary(await readFile(file, "utf8"))) {
+      found.push(file.slice(sourceDirectory.length + 1));
+    }
+  }
+  return found;
+}
 
 describe("the gh binary", () => {
   it("is named by one module only", async () => {
-    const files = await sourceFiles(sourceDirectory);
-    const offenders: string[] = [];
-    for (const file of files) {
-      if (file.endsWith("/gh.ts")) {
-        continue;
-      }
-      const text = await readFile(file, "utf8");
-      if (namesTheBinary.test(text)) {
-        offenders.push(file.slice(sourceDirectory.length + 1));
-      }
-    }
-    expect(offenders).toEqual([]);
+    expect(await offenders()).toEqual([]);
   });
 
   it("is named by the module that owns the GitHub calls", async () => {
-    const text = await readFile(`${sourceDirectory}/gh.ts`, "utf8");
-    expect(namesTheBinary.test(text)).toBe(true);
+    expect(namesTheBinary(await readFile(`${sourceDirectory}/${GH_MODULE}`, "utf8"))).toBe(
+      true,
+    );
+  });
+
+  it("is not named by prose", () => {
+    expect(namesTheBinary('// the runner shells out to "gh" here\n')).toBe(false);
+    expect(namesTheBinary("/* the module that runs \"gh\" */\n")).toBe(false);
+    expect(namesTheBinary('execFileAsync("gh", []);\n')).toBe(true);
   });
 });
