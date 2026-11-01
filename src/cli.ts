@@ -69,6 +69,7 @@ export const STEP_EXIT_CODES: Readonly<Record<string, number>> = {
   claim: 20,
   worktree: 30,
   session: 40,
+  gates: 45,
   push: 50,
   "pull request": 60,
   review: 70,

@@ -140,6 +140,44 @@ A model has to resolve, too: `--model <provider/id>` names one; without it the C
 model of the first provider with a credential, and the live chat uses the model of the session it
 was started in.
 
+### The pipeline — the steps a run takes
+
+The steps are the runner's own: claim → worktree → session → push → pull request → review →
+re-count. A repository that wants a different order, or a gate of its own, says so in
+`.afk-runner/pipeline.yml` (or `.afk-runner/pipeline.yaml`):
+
+```yaml
+steps:
+  - claim
+  - worktree
+  - session
+  - gates
+  - push
+  - pull-request
+  - review
+  - re-count
+
+gates:
+  - ./check.sh
+  - just docs-audit
+```
+
+`steps` is the ordered list of the steps the run takes, chosen from the runner's own kinds —
+`claim`, `worktree`, `session`, `gates`, `push`, `pull-request`, `review`, `re-count`. The file
+says which steps happen and in what order; what each step *does* is the runner's, and the run's
+state machine is the one it has always been. A kind the runner does not know is refused when the
+file is read — before the run claims an issue, not half-way through it.
+
+The `claim` step is the one a pipeline cannot leave out: the claim is what stops two runners
+working the same issue, and the runner does not let a file give that up.
+
+`gates` is the list of commands the `gates` step runs, in the worktree, in order. A gate that
+exits non-zero stops the run: the claim is released and nothing is pushed. A repository that
+declares no gates runs none.
+
+A repository with no pipeline file runs the steps it ran before: the list above without the
+gates step, which runs only what the repository declares.
+
 ### From Pi — the live chat
 
 ```bash

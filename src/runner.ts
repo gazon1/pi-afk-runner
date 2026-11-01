@@ -58,6 +58,12 @@ import {
   type GitRunner,
 } from "./git.js";
 import {
+  STEP_NAMES,
+  readPipeline,
+  type Pipeline,
+  type StepKind,
+} from "./pipeline.js";
+import {
   CLAIM_LABEL,
   addPullRequestLabelArgs,
   createPullRequest,
@@ -1302,10 +1308,19 @@ export async function changedChangeSlug(
  * and it is applied by the review step, because the order between the comment
  * and the label is fixed there; the re-count step writes the change's verdict
  * file, which is the record that re-count is counted against.
+ *
+ * That list is the **default**: the repository's own pipeline says which steps
+ * the run takes and in what order, and a repository that declares none runs
+ * exactly these.
  */
 export async function runOnce(options: RunOptions): Promise<RunResult> {
   const now = options.now ?? new Date();
   const runId = options.runId ?? newRunId(now);
+
+  // The pipeline is read first, before the run takes anything. A repository
+  // whose pipeline the runner cannot read has said nothing about how the run
+  // should go, and a run that guessed would claim an issue and then stop.
+  const pipeline = await readPipeline(options.checkout);
 
   // The claimed issues come first. A claim is a run that is either working or
   // dead, and a dead one holds its issue out of the queue for ever — so a
@@ -1333,7 +1348,7 @@ export async function runOnce(options: RunOptions): Promise<RunResult> {
   }
   const lock = await options.lockIssue?.(planOrUnworkable.issue.number);
   try {
-    return await runPlan(options, planOrUnworkable, now, runId);
+    return await runPlan(options, planOrUnworkable, now, runId, pipeline);
   } finally {
     await lock?.release();
   }
@@ -1499,12 +1514,44 @@ async function prepareExistingWorktree(
   });
 }
 
+/**
+ * Run one gate command in the worktree.
+ *
+ * The command is the repository's own — its own shell line, its own exit code —
+ * and a gate that fails stops the run: the claim is released and nothing is
+ * pushed. The failure names the gate, because a record that says "the gates
+ * step failed" does not say which gate did.
+ */
+async function runGate(
+  run: CommandRunner,
+  cwd: string,
+  command: string,
+): Promise<void> {
+  try {
+    await run({ command: "bash", args: ["-c", command], cwd });
+  } catch (failure) {
+    if (failure instanceof CommandFailed) {
+      const output = `${failure.stdout}\n${failure.stderr}`;
+      const first =
+        output
+          .split("\n")
+          .map((line) => line.trim())
+          .find((line) => line !== "") ?? "";
+      throw new Error(
+        `the gate \`${command}\` failed (${failure.exitCode})${first === "" ? "" : `: ${first}`}`,
+      );
+    }
+    throw failure;
+  }
+}
+
 /** The steps of one run, and the work they do. */
 async function runPlan(
   options: RunOptions,
   plan: Plan,
   now: Date,
   runId: string,
+  pipeline: Pipeline,
 ): Promise<RunResult> {
   const issue = plan.issue;
   options.onIssue?.(issue);
@@ -1522,104 +1569,267 @@ async function runPlan(
   let reviews = works || plan.kind === "pull request" || plan.kind === "review";
   let workSessionStartedAt: number | undefined;
 
-  const steps: Step[] = [];
+  if (!works) {
+    // The work is already pushed. The worktree is where that work is read —
+    // the reviewer needs the code, and the branch is not pushed again.
+    state.worktreePath = join(options.worktreeRoot, `issue-${issue.number}`);
+    await prepareExistingWorktree(options, state.worktreePath, issue.number);
+  }
 
-  if (works) {
-    steps.push({
-      name: "claim",
+  /**
+   * The step of a kind, when the run is in a state where the step applies.
+   *
+   * A step that does not apply is not part of the run: the run of a pull
+   * request that is already open has no claim to take and no session to run.
+   * The pipeline says which steps the run takes and in what order; what each
+   * step does is the state machine it has always been.
+   */
+  const builders: Readonly<Record<StepKind, () => Step | null>> = {
+    claim: () =>
+      works
+        ? {
+            name: STEP_NAMES.claim,
+            run: async () => {
+              const claim = {
+                issue,
+                repo: options.repo,
+                remote: options.remote,
+                baseBranch: options.baseBranch,
+                cwd: options.checkout,
+                git: options.git,
+                gh: options.gh,
+                nonce: options.nonce ?? randomUUID(),
+                now,
+              };
+              const outcome =
+                plan.kind === "reclaim"
+                  ? await reclaimClaim({ ...claim, worktreeRoot: options.worktreeRoot })
+                  : await claimIssue(claim);
+              if (!outcome.claimed) {
+                throw new Error(outcome.reason);
+              }
+              state.claimed = true;
+              state.base = outcome.base;
+              return `claimed from ${outcome.base.slice(0, 8)}`;
+            },
+          }
+        : null,
+    worktree: () =>
+      works
+        ? {
+            name: STEP_NAMES.worktree,
+            run: async () => {
+              if (state.base === "") {
+                // The worktree is made from the commit the claim was taken
+                // against. Without the claim there is no commit to make it
+                // from, and a worktree made from nothing is not a worktree.
+                throw new Error(
+                  "the worktree step needs the claim step before it — the pipeline declares it first",
+                );
+              }
+              state.worktreePath = join(options.worktreeRoot, `issue-${issue.number}`);
+              const prepared = await prepareWorktree({
+                repo: options.checkout,
+                remote: options.remote,
+                baseBranch: options.baseBranch,
+                baseSha: state.base,
+                issueNumber: issue.number,
+                worktreePath: state.worktreePath,
+                cwd: options.checkout,
+                git: options.git,
+              });
+              return prepared.path;
+            },
+          }
+        : null,
+    session: () =>
+      works
+        ? {
+            name: STEP_NAMES.session,
+            run: async () => {
+              if (state.worktreePath === "") {
+                throw new Error(
+                  "the session step needs a worktree — the pipeline declares it before the worktree step",
+                );
+              }
+              workSessionStartedAt = Date.now();
+              const result = await startAgent({
+                factory: options.session,
+                cwd: state.worktreePath,
+                repo: options.repo,
+                issueNumber: issue.number,
+                ...(plan.issueDetail === undefined ? {} : { issue: plan.issueDetail }),
+                gh: options.gh,
+                deadlineMs: options.deadlineMs,
+                ...(options.stopped === undefined ? {} : { stopped: options.stopped }),
+              });
+              const workElapsedMs = workSessionStartedAt === undefined ? 0 : Date.now() - workSessionStartedAt;
+              if (workElapsedMs >= options.deadlineMs) {
+                reviews = false;
+              }
+              if (result.aborted) {
+                // The deadline is one reason a turn is cut; a human stopping the run is
+                // another, and the message must not claim a clock it cannot see.
+                throw new Error("the agent's session was cut off before its last turn");
+              }
+              // The prompt asks the agent to commit, and an agent does not always do it.
+              // What it left in the worktree is still the work — and the worktree is
+              // about to be removed — so the runner commits it on the agent's behalf.
+              // A clean worktree makes this a no-op.
+              await commitAll(options.git, state.worktreePath, "the agent's work");
+              const count = (await options.git(["rev-list", "--count", `${state.base}..HEAD`], { cwd: state.worktreePath })).trim();
+              if (count === "0") {
+                throw new Error("the agent made no commits — no changes to push or open a pull request");
+              }
+              return `${result.completed} turns`;
+            },
+          }
+        : null,
+    gates: () => ({
+      name: STEP_NAMES.gates,
       run: async () => {
-        const claim = {
-          issue,
-          repo: options.repo,
-          remote: options.remote,
-          baseBranch: options.baseBranch,
-          cwd: options.checkout,
-          git: options.git,
-          gh: options.gh,
-          nonce: options.nonce ?? randomUUID(),
-          now,
-        };
-        const outcome =
-          plan.kind === "reclaim"
-            ? await reclaimClaim({ ...claim, worktreeRoot: options.worktreeRoot })
-            : await claimIssue(claim);
-        if (!outcome.claimed) {
-          throw new Error(outcome.reason);
+        if (pipeline.gates.length === 0) {
+          // The repository declared the step and no gates: there is nothing to
+          // run, and nothing to fail.
+          return "no gates declared";
         }
-        state.claimed = true;
-        state.base = outcome.base;
-        return `claimed from ${outcome.base.slice(0, 8)}`;
-      },
-    });
-    steps.push({
-      name: "worktree",
-      run: async () => {
-        state.worktreePath = join(options.worktreeRoot, `issue-${issue.number}`);
-        const prepared = await prepareWorktree({
-          repo: options.checkout,
-          remote: options.remote,
-          baseBranch: options.baseBranch,
-          baseSha: state.base,
-          issueNumber: issue.number,
-          worktreePath: state.worktreePath,
-          cwd: options.checkout,
-          git: options.git,
-        });
-        return prepared.path;
-      },
-    });
-    steps.push({
-      name: "session",
-      run: async () => {
-        workSessionStartedAt = Date.now();
-        const result = await startAgent({
-          factory: options.session,
-          cwd: state.worktreePath,
-          repo: options.repo,
-          issueNumber: issue.number,
-          ...(plan.issueDetail === undefined ? {} : { issue: plan.issueDetail }),
-          gh: options.gh,
-          deadlineMs: options.deadlineMs,
-          ...(options.stopped === undefined ? {} : { stopped: options.stopped }),
-        });
-        const workElapsedMs = workSessionStartedAt === undefined ? 0 : Date.now() - workSessionStartedAt;
-        if (workElapsedMs >= options.deadlineMs) {
-          reviews = false;
-        }
-        if (result.aborted) {
-          // The deadline is one reason a turn is cut; a human stopping the run is
-          // another, and the message must not claim a clock it cannot see.
-          throw new Error("the agent's session was cut off before its last turn");
-        }
-        // The prompt asks the agent to commit, and an agent does not always do it.
-        // What it left in the worktree is still the work — and the worktree is
-        // about to be removed — so the runner commits it on the agent's behalf.
-        // A clean worktree makes this a no-op.
-        await commitAll(options.git, state.worktreePath, "the agent's work");
-        const count = (await options.git(["rev-list", "--count", `${state.base}..HEAD`], { cwd: state.worktreePath })).trim();
-        if (count === "0") {
-          throw new Error("the agent made no commits — no changes to push or open a pull request");
-        }
-        return `${result.completed} turns`;
-      },
-    });
-    steps.push({
-      name: "push",
-      run: async () => {
-        // A change the work landed needs its registry entry, and the entry
-        // belongs to the pull request.
-        state.slug = await changedChangeSlug(options.git, state.worktreePath, {
-          base: state.base,
-          head: await headSha(options.git, state.worktreePath),
-        });
-        if (state.slug !== null) {
-          await ensureRegistryEntry(options.run, state.worktreePath);
-          await commitAll(
-            options.git,
-            state.worktreePath,
-            "chore: the change's registry entry",
+        if (state.worktreePath === "") {
+          throw new Error(
+            "the gates step needs a worktree — the pipeline declares it before the worktree step",
           );
         }
+        for (const command of pipeline.gates) {
+          await runGate(options.run, state.worktreePath, command);
+        }
+        return `${pipeline.gates.length} gates passed`;
+      },
+    }),
+    push: () =>
+      works
+        ? {
+            name: STEP_NAMES.push,
+            run: async () => {
+              // A change the work landed needs its registry entry, and the entry
+              // belongs to the pull request.
+              state.slug = await changedChangeSlug(options.git, state.worktreePath, {
+                base: state.base,
+                head: await headSha(options.git, state.worktreePath),
+              });
+              if (state.slug !== null) {
+                await ensureRegistryEntry(options.run, state.worktreePath);
+                await commitAll(
+                  options.git,
+                  state.worktreePath,
+                  "chore: the change's registry entry",
+                );
+              }
+              const sha = await headSha(options.git, state.worktreePath);
+              await pushWorkBranch(options.git, state.worktreePath, {
+                remote: options.remote,
+                issueNumber: issue.number,
+                sha,
+                ...(options.verifyPushes === undefined ? {} : { verify: options.verifyPushes }),
+              });
+              return sha.slice(0, 8);
+            },
+          }
+        : null,
+    "pull-request": () =>
+      works || plan.kind === "pull request"
+        ? {
+            name: STEP_NAMES["pull-request"],
+            run: async () => {
+              const opened = await openPullRequest({
+                repo: options.repo,
+                branch: workBranch(issue.number),
+                title: issue.title,
+                body: pullRequestBody({
+                  issueNumber: issue.number,
+                  title: issue.title,
+                }),
+                // The base the run worked from, not gh's default: the worktree, the
+                // claim and the state observation all used this one, and a pull
+                // request against another branch would be judged by a different
+                // history than the one that was worked.
+                base: options.baseBranch,
+                gh: options.gh,
+                run: options.run,
+              });
+              state.pullRequest = opened.number;
+              return `#${opened.number}`;
+            },
+          }
+        : null,
+    review: () =>
+      reviews
+        ? {
+            name: STEP_NAMES.review,
+            run: async () => {
+              if (!reviews) {
+                return "skipped";
+              }
+              let reviewDeadlineMs = options.deadlineMs;
+              if (workSessionStartedAt !== undefined) {
+                const elapsed = Date.now() - workSessionStartedAt;
+                reviewDeadlineMs = options.deadlineMs - elapsed;
+                if (reviewDeadlineMs <= 0) {
+                  reviews = false;
+                  return "skipped";
+                }
+              }
+              state.reviewedSha = await headSha(options.git, state.worktreePath);
+              const outcome = await reviewPullRequest({
+                repo: options.repo,
+                pullRequest: state.pullRequest,
+                cwd: state.worktreePath,
+                factory: options.session,
+                gh: options.gh,
+                run: options.run,
+                deadlineMs: reviewDeadlineMs,
+                ...(options.stopped === undefined ? {} : { stopped: options.stopped }),
+              });
+              state.verdict = outcome.verdict;
+              return outcome.ciVerdict === null
+                ? outcome.verdict
+                : `${outcome.verdict} — ${outcome.ciVerdict}`;
+            },
+          }
+        : null,
+    "re-count": () => ({
+      name: STEP_NAMES["re-count"],
+      run: async () => {
+        // The label is what makes the gate count the review. The review step
+        // applies it when it posts; here it is the only thing left to do.
+        if (!reviews && state.pullRequest !== 0) {
+          await addRecountLabel({
+            repo: options.repo,
+            pullRequest: state.pullRequest,
+            gh: options.gh,
+          });
+        }
+        if (state.slug === null) {
+          return "no change to count";
+        }
+        const digest = await computeDocumentsDigest(
+          options.run,
+          state.worktreePath,
+          state.slug,
+        );
+        const directory = join(state.worktreePath, ".specify", "reviews");
+        await mkdir(directory, { recursive: true });
+        await writeFile(
+          join(directory, `${state.slug}.md`),
+          verdictFile({
+            slug: state.slug,
+            verdict: state.verdict,
+            date: now.toISOString().slice(0, 10),
+            pullRequest: state.pullRequest,
+            reviewed: state.reviewedSha,
+            documents: digest,
+          }),
+          "utf8",
+        );
+        await commitAll(options.git, state.worktreePath, "chore: the change's verdict");
         const sha = await headSha(options.git, state.worktreePath);
         await pushWorkBranch(options.git, state.worktreePath, {
           remote: options.remote,
@@ -1627,122 +1837,18 @@ async function runPlan(
           sha,
           ...(options.verifyPushes === undefined ? {} : { verify: options.verifyPushes }),
         });
-        return sha.slice(0, 8);
+        return state.slug;
       },
-    });
-  } else {
-    // The work is already pushed. The worktree is where that work is read —
-    // the reviewer needs the code, and the branch is not pushed again.
-    state.worktreePath = join(options.worktreeRoot, `issue-${issue.number}`);
-    await prepareExistingWorktree(options, state.worktreePath, issue.number);
-  }
+    }),
+  };
 
-  if (works || plan.kind === "pull request") {
-    steps.push({
-      name: "pull request",
-      run: async () => {
-        const opened = await openPullRequest({
-          repo: options.repo,
-          branch: workBranch(issue.number),
-          title: issue.title,
-          body: pullRequestBody({
-            issueNumber: issue.number,
-            title: issue.title,
-          }),
-          // The base the run worked from, not gh's default: the worktree, the
-          // claim and the state observation all used this one, and a pull
-          // request against another branch would be judged by a different
-          // history than the one that was worked.
-          base: options.baseBranch,
-          gh: options.gh,
-          run: options.run,
-        });
-        state.pullRequest = opened.number;
-        return `#${opened.number}`;
-      },
-    });
+  const steps: Step[] = [];
+  for (const kind of pipeline.steps) {
+    const step = builders[kind]();
+    if (step !== null) {
+      steps.push(step);
+    }
   }
-
-  if (reviews) {
-    steps.push({
-      name: "review",
-      run: async () => {
-        if (!reviews) {
-          return "skipped";
-        }
-        let reviewDeadlineMs = options.deadlineMs;
-        if (workSessionStartedAt !== undefined) {
-          const elapsed = Date.now() - workSessionStartedAt;
-          reviewDeadlineMs = options.deadlineMs - elapsed;
-          if (reviewDeadlineMs <= 0) {
-            reviews = false;
-            return "skipped";
-          }
-        }
-        state.reviewedSha = await headSha(options.git, state.worktreePath);
-        const outcome = await reviewPullRequest({
-          repo: options.repo,
-          pullRequest: state.pullRequest,
-          cwd: state.worktreePath,
-          factory: options.session,
-          gh: options.gh,
-          run: options.run,
-          deadlineMs: reviewDeadlineMs,
-          ...(options.stopped === undefined ? {} : { stopped: options.stopped }),
-        });
-        state.verdict = outcome.verdict;
-        return outcome.ciVerdict === null
-          ? outcome.verdict
-          : `${outcome.verdict} — ${outcome.ciVerdict}`;
-      },
-    });
-  }
-
-  steps.push({
-    name: "re-count",
-    run: async () => {
-      // The label is what makes the gate count the review. The review step
-      // applies it when it posts; here it is the only thing left to do.
-      if (!reviews && state.pullRequest !== 0) {
-        await addRecountLabel({
-          repo: options.repo,
-          pullRequest: state.pullRequest,
-          gh: options.gh,
-        });
-      }
-      if (state.slug === null) {
-        return "no change to count";
-      }
-      const digest = await computeDocumentsDigest(
-        options.run,
-        state.worktreePath,
-        state.slug,
-      );
-      const directory = join(state.worktreePath, ".specify", "reviews");
-      await mkdir(directory, { recursive: true });
-      await writeFile(
-        join(directory, `${state.slug}.md`),
-        verdictFile({
-          slug: state.slug,
-          verdict: state.verdict,
-          date: now.toISOString().slice(0, 10),
-          pullRequest: state.pullRequest,
-          reviewed: state.reviewedSha,
-          documents: digest,
-        }),
-        "utf8",
-      );
-      await commitAll(options.git, state.worktreePath, "chore: the change's verdict");
-      const sha = await headSha(options.git, state.worktreePath);
-      await pushWorkBranch(options.git, state.worktreePath, {
-        remote: options.remote,
-        issueNumber: issue.number,
-        sha,
-        ...(options.verifyPushes === undefined ? {} : { verify: options.verifyPushes }),
-      });
-      return state.slug;
-    },
-  });
 
   const outcome = await runSteps({
     issue: issue.number,
