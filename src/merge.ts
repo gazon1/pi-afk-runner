@@ -100,6 +100,14 @@ export const MERGE_PROMPT = [
   "3. Leave the tree with no conflict markers and the gate green. Do not commit,",
   "   do not push: the pipeline commits and pushes so the push stays under its",
   "   control.",
+  "",
+  "   **The resolution stays in the tree while this turn runs.** The pipeline",
+  "   keeps the tree and commits it, so the resolution you make belongs in the",
+  "   tree. A stash is not part of what the pipeline commits: it lives in the",
+  "   repository's own stash, where nothing says which entry is whose, and the",
+  "   pipeline does not read it. Stash the resolution to get a clean tree for a",
+  "   gate and the pipeline commits an empty tree. A stash of your own, for your",
+  "   own reasons, is yours to keep — the resolution is not in it.",
 ].join("\n");
 
 /** A pull request the merge pipeline considered. */
