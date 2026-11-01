@@ -47,6 +47,19 @@ new commit to push? The runner's commit is a no-op on a tree nothing changed, so
 nothing leaves the head where it was — and a fix that wrote and reverted nothing is the same
 thing. A fix that wrote something moves the head, whatever the content of that commit is.
 
+**A fix that was cut off stops the loop too.** The head cannot witness a fix that never got as far
+as writing: a fix cut off by the deadline, or by a human's stop, leaves the head where it was —
+but it leaves it by never reaching the commit, so the comparison never runs. The cut-off is
+therefore raised as the engine's own abort error, the one the engine stops the run on. An unknown
+failure is **recoverable**, and a recoverable failure is swallowed: the engine logs it, returns
+nothing, and the loop carries on to the next review — the same diff, again, for a fix that never
+happened. Measured on 2026-11-01: a cut-off fix was swallowed every time, and the loop bought
+four reviews of a diff no fix had touched.
+
+The cut-off is the run's own end, not a failed fix: the run is out of time, the work it left stays
+on the branch, and the next run continues it. A fix that *failed* for any other reason is a
+different stop, and it is settled elsewhere.
+
 ## Rationale
 
 **Why compare the head and not the diff.** The head is one `git rev-parse` before and one after,
@@ -67,6 +80,8 @@ on the issue for the next run to read as intake.
 ## Consequences
 
 - A fix that changes nothing costs one fix turn and no review: the loop stops where it is.
+- A fix that was cut off costs one fix turn and no review: the run ends there, and the work it
+  left stays on the branch for the next run.
 - The continuation comment on the issue says the fix changed nothing, so the next run reads a
   reason and not only a verdict.
 - The gates do not run again on a tree the fix did not change: the tree they judged is the tree
@@ -77,7 +92,10 @@ on the issue for the next run to read as intake.
 ## Links
 
 - `src/workflow.ts` — `FixChangedNothing`, and the `noChange` the review gate comes back with.
-- `src/runner.ts` — the head comparison in the fix, and the continuation comment.
+- `src/runner.ts` — the head comparison in the fix, the continuation comment, and the cut-off the
+  fix raises as the engine's abort error.
 - `test/workflow.test.ts` — the loop stops on a fix that changed nothing.
-- `test/runner.test.ts` — `test_a_fix_that_changes_nothing_stops_the_loop`.
+- `test/runner.test.ts` — `test_a_fix_that_changes_nothing_stops_the_loop`,
+  `test_a_fix_that_is_cut_off_does_not_review_the_same_diff_again`, and
+  `test_a_fix_that_changes_the_head_is_pushed_and_reviewed_again`.
 - `docs/decisions/2026-11-01-the-work-is-a-conditional-graph.md` — the review loop this refines.

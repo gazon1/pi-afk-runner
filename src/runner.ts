@@ -83,7 +83,7 @@ import {
   type IssueSummary,
   type PullRequestSummary,
 } from "./gh.js";
-import { FixChangedNothing, runReviewGate } from "./workflow.js";
+import { FixChangedNothing, cutOffError, runReviewGate } from "./workflow.js";
 import type { Lock } from "./lock.js";
 
 /** The states that can be derived from the observables. */
@@ -807,7 +807,11 @@ export async function fixWorktree(options: {
     ...(options.schedule === undefined ? {} : { schedule: options.schedule }),
   });
   if (result.aborted) {
-    throw new Error(
+    // The cut is the engine's own abort error, not a plain failure: the
+    // engine treats an unknown failure as recoverable and carries on to the
+    // next state, and a fix that was cut off would then be reviewed again —
+    // the same diff, a second verdict, for a fix that never happened.
+    throw cutOffError(
       cutOffMessage({
         what: "the fix's session",
         deadlineMs: options.deadlineMs,
