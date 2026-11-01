@@ -20,6 +20,7 @@ import {
   type SessionFactory,
 } from "../src/session.js";
 import { assistantTextLines, repoFromRemoteUrl, resolveRepo } from "../src/cli.js";
+import { type StateName } from "../src/workflow.js";
 import { createLeftoverTool, LEFTOVER_TOOL_NAME, MAX_LEFTOVERS_PER_RUN } from "../src/leftovers.js";
 import { pullRequestArgs } from "../src/gh.js";
 import {
@@ -101,6 +102,19 @@ import {
   parsePiVersion,
   satisfiesRange,
 } from "../src/version.js";
+
+/**
+ * The states for a run of `count` prompts.
+ *
+ * The tests that use them are about the turns — the deadline, the stop, the
+ * failed turn — and not about what the states are called.
+ */
+function namedStates(count: number): StateName[] {
+  return Array.from({ length: count }, (_unused, index) => ({
+    name: `state-${index + 1}`,
+    phase: "Test",
+  }));
+}
 
 /**
  * The review gate's own rule for a line that states a verdict, mirrored here.
@@ -900,6 +914,7 @@ describe("the agent's session", () => {
     await runPromptArray({
       session,
       prompts: ["one", "two", "three"],
+      states: namedStates(3),
       issueBody: body,
       deadlineMs: 60_000,
     });
@@ -980,6 +995,7 @@ describe("the agent's session", () => {
     const result = await runPromptArray({
       session,
       prompts,
+      states: namedStates(prompts.length),
       issueBody: "the issue",
       deadlineMs: 60_000,
     });
@@ -1020,6 +1036,7 @@ describe("the agent's session", () => {
     const run = runPromptArray({
       session,
       prompts: ["one"],
+      states: namedStates(1),
       deadlineMs: 60_000,
       schedule,
     });
@@ -1070,6 +1087,7 @@ describe("the agent's session", () => {
     const run = runPromptArray({
       session,
       prompts: ["one", "two", "three", "four"],
+      states: namedStates(4),
       deadlineMs: 60_000,
       schedule,
     });
@@ -1104,6 +1122,7 @@ describe("the agent's session", () => {
     const run = runPromptArray({
       session,
       prompts: ["one", "two"],
+      states: namedStates(2),
       deadlineMs: 60_000,
     });
     await expect(run).rejects.toThrow(
@@ -1247,6 +1266,7 @@ describe("the fixes", () => {
     const run = runPromptArray({
       session,
       prompts: ["one"],
+      states: namedStates(1),
       deadlineMs: 60_000,
       schedule,
     });
@@ -1275,6 +1295,7 @@ describe("the fixes", () => {
     const result = await runPromptArray({
       session,
       prompts: ["one", "two", "three"],
+      states: namedStates(3),
       deadlineMs: 60_000,
       stopped: () => stop,
     });

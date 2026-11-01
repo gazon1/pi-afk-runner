@@ -608,6 +608,8 @@ export async function reviewPullRequest(options: {
   const result = await runPromptArray({
     session,
     prompts: [REVIEW_PROMPT],
+    // The review is one state: the verdict, in one turn.
+    states: [{ name: "review", phase: "Review" }],
     deadlineMs: options.deadlineMs,
     ...(options.stopped === undefined ? {} : { stopped: options.stopped }),
     ...(options.schedule === undefined ? {} : { schedule: options.schedule }),
