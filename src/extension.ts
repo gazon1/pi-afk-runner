@@ -48,14 +48,16 @@ import { join, resolve } from "node:path";
 
 import { runCommand, runGit, workBranch, type CommandRunner } from "./git.js";
 import { RUN_STATUS_ENTRY, statusFromEntries, statusLine, type RunStatus } from "./live.js";
-import { takeLock } from "./lock.js";
+import { lockNameFor, takeLock } from "./lock.js";
 import {
   RunFailed,
   SETUP_SCRIPT,
+  blockedReason,
   newRunId,
   runOnce,
   type RunOptions,
   type RunResult,
+  unworkableReason,
 } from "./runner.js";
 import type { AgentSession, SessionFactory } from "./session.js";
 import { PINNED_PI_RANGE, assertInstalledPiVersion, installedPiVersion } from "./version.js";
@@ -415,7 +417,7 @@ export function liveFrontDoor(
 
     let lock: Awaited<ReturnType<typeof takeLock>>;
     try {
-      lock = await takeLock(options.lockDirectory);
+      lock = await takeLock(options.lockDirectory, lockNameFor(options));
     } catch (failure) {
       // A held lock and an unusable one both mean "not this runner, not now", and
       // both already say which.
@@ -513,19 +515,10 @@ export function liveFrontDoor(
     void (async () => {
       try {
         const result = await (dependencies.work ?? runOnce)(runOptions);
-        if ((result.outcome as string) === "unworkable") {
+        if (result.outcome === "unworkable") {
           const issueNum = result.issue ?? options.issue;
-          const derivedState = (result as { derivedState?: string }).derivedState;
-          let reason: string;
-          if (derivedState === "Claimed") {
-            reason = "it is held by another runner";
-          } else if (derivedState === "Reviewed") {
-            reason = "already reviewed";
-          } else if (derivedState === "Counted") {
-            reason = "already counted";
-          } else {
-            reason = "check whether it is claimed by another runner, already reviewed, or already counted";
-          }
+          const reason =
+            blockedReason(result.blockedBy) ?? unworkableReason(result.derivedState);
           talk(
             ctx,
             `afk-runner: issue ${issueNum ?? ""} could not be worked — ${reason}`,
@@ -534,6 +527,14 @@ export function liveFrontDoor(
           finish(ctx, run, "done");
         } else if (result.outcome === "empty") {
           talk(ctx, "afk-runner: the queue is empty — there was nothing to work", "info");
+          finish(ctx, run, "done");
+        } else if (result.outcome === "skipped" || result.outcome === "split") {
+          const what =
+            result.outcome === "skipped"
+              ? "closed as not needed"
+              : "split into smaller issues";
+          const why = result.reason === "" ? "" : ` — ${result.reason}`;
+          talk(ctx, `afk-runner: issue ${result.issue} was ${what}${why}`, "info");
           finish(ctx, run, "done");
         } else {
           talk(

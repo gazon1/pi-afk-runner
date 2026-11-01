@@ -52,7 +52,7 @@ export const LEFTOVER_TOOL_NAME = "agent_leftover";
  * Case and spacing are not what makes two leftovers the same leftover; the
  * words are.
  */
-function normaliseTitle(title: string): string {
+export function normaliseTitle(title: string): string {
   return title.trim().toLowerCase().replace(/\s+/g, " ");
 }
 

@@ -33,7 +33,7 @@ import {
 } from "../src/guard.js";
 import { RUN_STATUS_ENTRY, statusFromEntries, statusLine } from "../src/live.js";
 import { takeLock } from "../src/lock.js";
-import type { RunOptions, RunResult } from "../src/runner.js";
+import { unworkableReason, type RunOptions, type RunResult } from "../src/runner.js";
 import { createFixtureRepository, gitOutput } from "./git-sandbox.js";
 
 
@@ -337,6 +337,40 @@ describe("the run the front door owns", () => {
         title: "Fix the thing",
         stage: "done",
       });
+    } finally {
+      await rm(checkout, { recursive: true, force: true });
+    }
+  });
+
+  it("says why the issue could not be worked, in the words the CLI prints", async () => {
+    const checkout = await mkdtemp(join(tmpdir(), "afk-live-"));
+    try {
+      const host = fakePi();
+      const fake = fakeSession();
+      const work = async (): Promise<RunResult> => ({
+        issue: 42,
+        outcome: "unworkable",
+        steps: [],
+        record: "",
+        derivedState: "Claimed",
+      });
+
+      const door = liveFrontDoor(host.pi, { session: async () => fake.session, work });
+      const { ctx, notes } = fakeContext();
+
+      await door.start(`--repo gazon1/cardinalfish --checkout ${checkout}`, ctx);
+
+      await vi.waitFor(() => {
+        expect(
+          notes.some((note) => note.message.includes("could not be worked")),
+        ).toBe(true);
+      });
+      // The reason is the runner's mapping, not a second copy of it: the CLI
+      // prints the same words for the same derived state.
+      const said = notes.find((note) => note.message.includes("could not be worked"));
+      expect(said?.message).toBe(
+        `afk-runner: issue 42 could not be worked — ${unworkableReason("Claimed")}`,
+      );
     } finally {
       await rm(checkout, { recursive: true, force: true });
     }

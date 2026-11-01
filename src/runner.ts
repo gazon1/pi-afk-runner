@@ -35,6 +35,7 @@ import { GUARD_POLICY } from "./guard.js";
 import {
   UNTRUSTED_INPUT_RULE,
   UNTRUSTED_INPUT_SECTION,
+  briefFence,
   createVerdictTool,
   runPromptArray,
   startAgent,
@@ -45,6 +46,7 @@ import {
 import {
   CommandFailed,
   addWorktree,
+  fetchCommit,
   fetchRef,
   headRef,
   pushWorkBranch,
@@ -59,7 +61,9 @@ import {
 import {
   CLAIM_LABEL,
   addPullRequestLabelArgs,
+  commentIssue,
   createPullRequest,
+  dependencyNumbers,
   postCommentArgs,
   pullRequestBody,
   readClaimed,
@@ -74,6 +78,8 @@ import {
   type IssueSummary,
   type PullRequestSummary,
 } from "./gh.js";
+import { runReviewGate } from "./workflow.js";
+import type { Lock } from "./lock.js";
 
 /** The states that can be derived from the observables. */
 export type DerivedState =
@@ -557,6 +563,8 @@ const CI_BEFORE_RECOUNT = "the CI before the re-count";
 export interface ReviewOutcome {
   readonly verdict: "pass" | "fail";
   readonly comment: string;
+  /** What the reviewer found. Empty when it passed. */
+  readonly findings: readonly string[];
   /** The CI line, when the runner read one. */
   readonly ciVerdict: string | null;
 }
@@ -592,6 +600,14 @@ export async function reviewPullRequest(options: {
   /** Whether somebody has stopped the run. */
   readonly stopped?: () => boolean;
   readonly schedule?: Scheduler;
+  /**
+   * The issue whose brief the review judges the change against.
+   *
+   * The reviewer is a new session: it has not seen the issue, and a diff alone
+   * cannot say whether the change meets the acceptance criteria. The brief
+   * travels with the prompt, fenced as untrusted data.
+   */
+  readonly issue?: IssueDetail;
 }): Promise<ReviewOutcome> {
   const holder: { value?: ReviewVerdict } = {};
   const session = await options.factory({
@@ -602,12 +618,26 @@ export async function reviewPullRequest(options: {
     tools: [createVerdictTool(holder)],
   });
 
+  const fence = options.issue === undefined ? "" : briefFence(options.issue);
+  const prompt =
+    fence === ""
+      ? REVIEW_PROMPT
+      : [
+          REVIEW_PROMPT,
+          "",
+          "## The brief this change is judged against",
+          "",
+          fence,
+        ].join("\n");
+
   // The session belongs to `runPromptArray` once it is given one: it disposes
   // of it when the run is over. A second owner would make the session's life
   // the business of two places that do not agree on who is responsible.
   const result = await runPromptArray({
     session,
-    prompts: [REVIEW_PROMPT],
+    prompts: [prompt],
+    // The review is one state: the verdict, in one turn.
+    states: [{ name: "review", phase: "Review" }],
     deadlineMs: options.deadlineMs,
     ...(options.stopped === undefined ? {} : { stopped: options.stopped }),
     ...(options.schedule === undefined ? {} : { schedule: options.schedule }),
@@ -650,6 +680,7 @@ export async function reviewPullRequest(options: {
   return {
     verdict: verdict.verdict,
     comment,
+    findings: verdict.findings,
     ciVerdict: ciLine === null ? null : `${CI_BEFORE_RECOUNT}: ${ciLine}`,
   };
 }
@@ -689,6 +720,109 @@ export async function addRecountLabel(options: {
   await options.gh(
     addPullRequestLabelArgs(options.repo, options.pullRequest, RECOUNT_LABEL),
   );
+}
+
+/**
+ * The prompt a fix turn is given.
+ *
+ * It is the reviewer's findings, verbatim: the fix is about what the review
+ * found, and a summary of them is a second reading of the diff by somebody who
+ * did not review it. The gates are the same the implementing turn ran.
+ */
+export function fixPrompt(findings: readonly string[], issue?: IssueDetail): string {
+  const fence = issue === undefined ? "" : briefFence(issue);
+  return [
+    "The reviewer of this pull request did not pass it. Fix what it found.",
+    "",
+    "## Findings",
+    "",
+    ...(findings.length === 0
+      ? ["- The review said fail without naming a finding. Read the review comment on the pull request."]
+      : findings.map((finding) => `- ${finding}`)),
+    ...(fence === ""
+      ? []
+      : [
+          "",
+          "## The brief this change must still satisfy",
+          "",
+          fence,
+        ]),
+    "",
+    "1. Address every finding. Where a finding is wrong, make the code say why it is wrong.",
+    "",
+    "2. Run the repository's gates, in this order:",
+    "",
+    "   ```bash",
+    "   ./check.sh",
+    "   just tcheck-evals",
+    "   just docs-audit",
+    "   ```",
+    "",
+    "   A small change — a few lines in one module — needs `./check.sh` only.",
+    "",
+    "3. Do not commit or push. The runner commits and pushes so the push stays",
+    "   under its control.",
+  ].join("\n");
+}
+
+/**
+ * Run one fix turn in the worktree.
+ *
+ * It is a **new session**: the fix's context is the findings and the code, not
+ * the work session's whole conversation. The worktree is the one the pull
+ * request is on, and the runner commits and pushes after it.
+ */
+export async function fixWorktree(options: {
+  readonly cwd: string;
+  readonly factory: SessionFactory;
+  readonly findings: readonly string[];
+  readonly deadlineMs: number;
+  readonly stopped?: () => boolean;
+  readonly schedule?: Scheduler;
+  /** The issue whose brief the fix must not break. */
+  readonly issue?: IssueDetail;
+}): Promise<void> {
+  const session = await options.factory({
+    cwd: options.cwd,
+    systemPromptSections: { [UNTRUSTED_INPUT_SECTION]: UNTRUSTED_INPUT_RULE },
+  });
+  const result = await runPromptArray({
+    session,
+    prompts: [fixPrompt(options.findings, options.issue)],
+    // The fix is one state: the findings, addressed in one turn.
+    states: [{ name: "fix", phase: "Fix" }],
+    deadlineMs: options.deadlineMs,
+    ...(options.stopped === undefined ? {} : { stopped: options.stopped }),
+    ...(options.schedule === undefined ? {} : { schedule: options.schedule }),
+  });
+  if (result.aborted) {
+    throw new Error("the fix's session was cut off before its last turn");
+  }
+}
+
+/** The comment a run leaves on an issue whose review never passed. */
+export function continuationComment(options: {
+  readonly pullRequest: number;
+  readonly findings: readonly string[];
+  readonly reviews: number;
+  readonly exhausted: boolean;
+}): string {
+  const lines = [
+    `The review of pull request #${options.pullRequest} did not pass after ${options.reviews} review(s).`,
+  ];
+  if (options.exhausted) {
+    lines.push("The run's time budget ran out before a passing review.");
+  }
+  lines.push(
+    "",
+    "**What the review found:**",
+    ...(options.findings.length === 0
+      ? ["- the review named no finding"]
+      : options.findings.map((finding) => `- ${finding}`)),
+    "",
+    "The branch and the pull request are kept. The next run picks this issue up and fixes what the review found.",
+  );
+  return lines.join("\n");
 }
 
 /**
@@ -1154,6 +1288,15 @@ export interface RunOptions {
    * issue.
    */
   readonly onIssue?: (issue: { readonly number: number; readonly title: string }) => void;
+  /**
+   * Take the issue's host lock, once the run knows which issue it works.
+   *
+   * A run that named its issue took the lock before it read anything; a run
+   * that let the queue choose did not know the issue until the choice was
+   * made, so the lock has to be taken here — before the first step that
+   * writes anything. It is given back when the run ends, however it ends.
+   */
+  readonly lockIssue?: (issue: number) => Promise<Lock>;
   readonly now?: Date;
   readonly nonce?: string;
   readonly runId?: string;
@@ -1163,18 +1306,160 @@ export interface RunOptions {
 export interface RunResult {
   /** The issue the run worked, or null when it worked none. */
   readonly issue: number | null;
-  readonly outcome: "completed" | "empty" | "unworkable";
+  /**
+   * What the run did with the issue.
+   *
+   * `skipped` and `split` are finished runs: the triage or the scope turn
+   * decided the issue is not one run's work, the run closed it, and the queue
+   * moves on. Neither is a failure.
+   */
+  readonly outcome: "completed" | "empty" | "unworkable" | "skipped" | "split";
   readonly steps: readonly StepRecord[];
   /** Where the record was written. */
   readonly record: string;
   /** The derived state that made a named issue unworkable. */
   readonly derivedState?: DerivedState;
+  /** Why the issue was skipped or split, when it was. */
+  readonly reason?: string;
+  /** The parent issues that are still open, when that is why the issue waits. */
+  readonly blockedBy?: readonly number[];
+}
+
+/**
+ * Why an issue could not be worked, in the words the front doors say.
+ *
+ * One mapping, so the CLI and the live door say the same thing about the
+ * same derived state.
+ */
+export function unworkableReason(derivedState: DerivedState | undefined): string {
+  switch (derivedState) {
+    case "Claimed":
+      return "it is held by another runner";
+    case "Reviewed":
+      return "already reviewed";
+    case "Counted":
+      return "already counted";
+    default:
+      return "check whether it is claimed by another runner, already reviewed, or already counted";
+  }
+}
+
+/**
+ * Why an issue is waiting for its parent, in the words the front doors say.
+ *
+ * A dependency is the issue's own text — `**Depends on:** #N` — and it is
+ * satisfied by the parent being closed. "Not merged" and "not closed" are the
+ * same observable here: the runner cannot see a merge that did not close the
+ * issue, and a human who closed the parent has said the work is done.
+ */
+export function blockedReason(
+  blockedBy: readonly number[] | undefined,
+): string | null {
+  if (blockedBy === undefined || blockedBy.length === 0) {
+    return null;
+  }
+  return `it waits for ${blockedBy.map((number) => `#${number}`).join(", ")} — a parent issue is not merged yet`;
 }
 
 /** The commit the worktree is at. */
 export async function headSha(git: GitRunner, cwd: string): Promise<string> {
   return (await git(["rev-parse", "HEAD"], { cwd })).trim();
 }
+
+/**
+ * A change at or below this many files is small.
+ *
+ * The long checks — the repository's pre-push hook, whose detekt verdict over
+ * one module takes minutes — earn their cost on a change that reaches them. A
+ * handful of files in one module does not, and the run's own gate (the
+ * review) still reads it.
+ */
+export const SMALL_CHANGE_MAX_FILES = 3;
+
+/**
+ * A change at or below this many changed lines is small.
+ *
+ * It is the second half of the size rule: a one-file change that rewrites
+ * three hundred lines is not small, whatever its file count says.
+ */
+export const SMALL_CHANGE_MAX_LINES = 60;
+
+/** How many times the review may fail and be fixed in one run. */
+export const MAX_FIX_ITERATIONS = 3;
+
+/** How big a change is. */
+export interface ChangeSize {
+  /** The files the diff touches. */
+  readonly files: number;
+  /** The lines it adds and removes. Binary files count as zero lines. */
+  readonly lines: number;
+}
+
+/**
+ * The size of the diff between two commits.
+ *
+ * `--numstat` is the form git writes for machines: one line per file, the
+ * additions, the deletions and the path. `-` in either count is a binary file,
+ * which has no line count; it still counts as a file.
+ */
+export async function changedSize(
+  git: GitRunner,
+  cwd: string,
+  options: { readonly base: string; readonly head: string },
+): Promise<ChangeSize> {
+  const output = await git(
+    ["diff", "--numstat", `${options.base}...${options.head}`],
+    { cwd },
+  );
+  let files = 0;
+  let lines = 0;
+  for (const raw of output.split("\n")) {
+    const line = raw.trim();
+    if (line === "") {
+      continue;
+    }
+    const [added, removed] = line.split("\t");
+    if (added === undefined || removed === undefined) {
+      continue;
+    }
+    files += 1;
+    const additions = Number(added);
+    const deletions = Number(removed);
+    if (Number.isFinite(additions)) {
+      lines += additions;
+    }
+    if (Number.isFinite(deletions)) {
+      lines += deletions;
+    }
+  }
+  return { files, lines };
+}
+
+/** Whether a change is small enough to skip the long pre-push checks. */
+export function isSmallChange(size: ChangeSize): boolean {
+  return (
+    size.files > 0 &&
+    size.files <= SMALL_CHANGE_MAX_FILES &&
+    size.lines <= SMALL_CHANGE_MAX_LINES
+  );
+}
+
+/**
+ * Whether a push may skip the repository's pre-push hook.
+ *
+ * An explicit request wins; otherwise a small change skips the hook and a
+ * larger one does not. The hook is the repository's rule, and the skip is a
+ * decision about the repository's state, so the default is the cautious one
+ * everywhere except where the size makes the hook's cost larger than its
+ * value.
+ */
+export function verifyPush(options: {
+  readonly verifyPushes?: boolean | undefined;
+  readonly size: ChangeSize;
+}): boolean {
+  return options.verifyPushes ?? !isSmallChange(options.size);
+}
+
 
 /** Match a path against the guard's glob, where `*` matches anything. */
 function globToRegExp(pattern: string): RegExp {
@@ -1286,22 +1571,65 @@ export async function runOnce(options: RunOptions): Promise<RunResult> {
         outcome: "unworkable",
         steps: [],
         record: "",
-      } as RunResult;
+      };
     }
     return { issue: null, outcome: "empty", steps: [], record: "" };
   }
-  if ((planOrUnworkable as any).unworkable === true) {
-    const unworkable = planOrUnworkable as { readonly unworkable: true; readonly derivedState: DerivedState };
+  if ("unworkable" in planOrUnworkable) {
     return {
       issue: options.issueNumber ?? null,
       outcome: "unworkable",
       steps: [],
       record: "",
-      derivedState: unworkable.derivedState,
+      derivedState: planOrUnworkable.derivedState,
+      ...(planOrUnworkable.blockedBy === undefined
+        ? {}
+        : { blockedBy: planOrUnworkable.blockedBy }),
     };
   }
-  const plan = planOrUnworkable as Plan;
-  return await runPlan(options, plan, now, runId);
+  const lock = await options.lockIssue?.(planOrUnworkable.issue.number);
+  try {
+    return await runPlan(options, planOrUnworkable, now, runId);
+  } finally {
+    await lock?.release();
+  }
+}
+
+/**
+ * The parent issues an issue waits for, of which at least one is still open.
+ *
+ * An issue's dependency is written in its own text, as `**Depends on:** #N`,
+ * and it is settled when the parent is closed. The read is best-effort: an
+ * issue whose text cannot be read, or a parent that cannot be read, does not
+ * block the issue — guessing wrong in that direction would hold an issue out
+ * of the queue for ever, which is the failure this check exists to avoid.
+ */
+export async function openDependencies(
+  options: { readonly repo: string; readonly gh: GhRunner },
+  issue: IssueSummary,
+  detail?: IssueDetail,
+): Promise<number[]> {
+  let read: IssueDetail;
+  try {
+    read = detail ?? (await readIssue(options.repo, issue.number, options.gh));
+  } catch {
+    return [];
+  }
+  const open: number[] = [];
+  for (const dependency of dependencyNumbers([read.body, ...read.comments])) {
+    if (dependency === issue.number) {
+      continue;
+    }
+    try {
+      const parent = await readIssue(options.repo, dependency, options.gh);
+      if (parent.state === "OPEN") {
+        open.push(dependency);
+      }
+    } catch {
+      // A parent that cannot be read is not treated as open.
+    }
+  }
+  return open;
 }
 
 /**
@@ -1315,7 +1643,15 @@ export async function runOnce(options: RunOptions): Promise<RunResult> {
 async function chooseIssue(
   options: RunOptions,
   now: Date,
-): Promise<Plan | { readonly unworkable: true; readonly derivedState: DerivedState } | null> {
+): Promise<
+  | Plan
+  | {
+      readonly unworkable: true;
+      readonly derivedState: DerivedState;
+      readonly blockedBy?: readonly number[];
+    }
+  | null
+> {
   let namedDetail: IssueDetail | undefined;
   let candidates: IssueSummary[];
   try {
@@ -1355,6 +1691,7 @@ async function chooseIssue(
   }
 
   let namedUnworkableState: DerivedState | undefined;
+  let namedBlockedBy: readonly number[] | undefined;
   for (const candidate of candidates) {
     const observation = await observeIssue({
       issue: candidate,
@@ -1368,6 +1705,22 @@ async function chooseIssue(
       staleAfterMs: options.staleAfterMs,
     });
     const plan = planFor(observation);
+    // An issue that has not been started waits for its parents; one that is
+    // already pushed, opened or reviewed is past the waiting, whatever its
+    // text says.
+    if (plan.kind === "work") {
+      const blockedBy = await openDependencies(
+        { repo: options.repo, gh: options.gh },
+        candidate,
+        options.issueNumber !== undefined ? namedDetail : undefined,
+      );
+      if (blockedBy.length > 0) {
+        if (options.issueNumber !== undefined) {
+          namedBlockedBy = blockedBy;
+        }
+        continue;
+      }
+    }
     if (plan.kind !== "none") {
       return namedDetail === undefined ? plan : { ...plan, issueDetail: namedDetail };
     }
@@ -1377,6 +1730,13 @@ async function chooseIssue(
   }
 
   if (options.issueNumber !== undefined) {
+    if (namedBlockedBy !== undefined) {
+      return {
+        unworkable: true,
+        derivedState: namedUnworkableState ?? "Queue",
+        blockedBy: namedBlockedBy,
+      };
+    }
     if (namedUnworkableState !== undefined) {
       return { unworkable: true, derivedState: namedUnworkableState };
     }
@@ -1397,11 +1757,23 @@ async function chooseIssue(
       record: "",
     });
   }
-  const issue = selectIssue(queue);
-  if (issue === undefined) {
-    return null;
+  // The queue is worked in order, and an issue whose parent is still open is
+  // passed over — not worked, and not removed: it is the next run's turn once
+  // the parent closes.
+  for (const candidate of queue) {
+    if (candidate.labels.includes(CLAIM_LABEL)) {
+      continue;
+    }
+    const blockedBy = await openDependencies(
+      { repo: options.repo, gh: options.gh },
+      candidate,
+    );
+    if (blockedBy.length > 0) {
+      continue;
+    }
+    return { kind: "work", issue: candidate, pullRequest: null };
   }
-  return { kind: "work", issue, pullRequest: null };
+  return null;
 }
 
 /**
@@ -1423,17 +1795,20 @@ export async function checkoutPullRequestBranch(options: {
   readonly git: GitRunner;
   readonly run: CommandRunner;
 }): Promise<string> {
-  await fetchRef(options.git, options.checkout, {
-    remote: options.remote,
-    ref: options.branch,
-  });
-  const sha = await readRemoteSha(options.git, options.checkout, {
+  // Read the branch's commit from a ref this run fetched for itself: the
+  // branch can move between a fetch and the read, and `FETCH_HEAD` is shared
+  // with every other run of the checkout.
+  const exists = await readRemoteSha(options.git, options.checkout, {
     remote: options.remote,
     ref: headRef(options.branch),
   });
-  if (sha === null) {
+  if (exists === null) {
     throw new Error(`the branch ${options.branch} is not on ${options.remote}`);
   }
+  const sha = await fetchCommit(options.git, options.checkout, {
+    remote: options.remote,
+    ref: headRef(options.branch),
+  });
   await removeWorktree(options.git, options.checkout, options.worktreePath);
   await options.git(["worktree", "add", "--detach", options.worktreePath, sha], {
     cwd: options.checkout,
@@ -1478,6 +1853,16 @@ async function runPlan(
     reviewedSha: "",
     slug: null as string | null,
     verdict: "pass" as "pass" | "fail",
+    /** The issue, once the work session read it; a resume reads it itself. */
+    issue: plan.issueDetail ?? (null as IssueDetail | null),
+    /** What the work session decided to do with the issue. */
+    decision: "work" as "work" | "skip" | "split",
+    /** Why it decided that. */
+    reason: "",
+    /** What the last review found, when it found something. */
+    findings: [] as readonly string[],
+    /** How many reviews the run took. */
+    reviewCount: 0,
   };
 
   const works = plan.kind === "work" || plan.kind === "reclaim";
@@ -1553,6 +1938,17 @@ async function runPlan(
           // another, and the message must not claim a clock it cannot see.
           throw new Error("the agent's session was cut off before its last turn");
         }
+        state.decision = result.decision;
+        state.reason = result.reason;
+        state.issue = result.issue;
+        if (result.decision !== "work") {
+          // The branch closed the issue (skip) or replaced it with smaller ones
+          // (split). There is no work to commit, push or review: the run ends
+          // where the graph ended, and the sweep moves to the next issue.
+          return result.decision === "skip"
+            ? "closed: the issue does not need work"
+            : "split into smaller issues";
+        }
         // The prompt asks the agent to commit, and an agent does not always do it.
         // What it left in the worktree is still the work — and the worktree is
         // about to be removed — so the runner commits it on the agent's behalf.
@@ -1568,6 +1964,9 @@ async function runPlan(
     steps.push({
       name: "push",
       run: async () => {
+        if (state.decision !== "work") {
+          return "skipped — the issue was not worked";
+        }
         // A change the work landed needs its registry entry, and the entry
         // belongs to the pull request.
         state.slug = await changedChangeSlug(options.git, state.worktreePath, {
@@ -1583,13 +1982,20 @@ async function runPlan(
           );
         }
         const sha = await headSha(options.git, state.worktreePath);
+        const size = await changedSize(options.git, state.worktreePath, {
+          base: state.base,
+          head: sha,
+        });
+        const small = isSmallChange(size);
         await pushWorkBranch(options.git, state.worktreePath, {
           remote: options.remote,
           issueNumber: issue.number,
           sha,
-          ...(options.verifyPushes === undefined ? {} : { verify: options.verifyPushes }),
+          verify: verifyPush({ verifyPushes: options.verifyPushes, size }),
         });
-        return sha.slice(0, 8);
+        return small
+          ? `${sha.slice(0, 8)} (small change — the long checks are skipped)`
+          : sha.slice(0, 8);
       },
     });
   } else {
@@ -1597,12 +2003,21 @@ async function runPlan(
     // the reviewer needs the code, and the branch is not pushed again.
     state.worktreePath = join(options.worktreeRoot, `issue-${issue.number}`);
     await prepareExistingWorktree(options, state.worktreePath, issue.number);
+    // A resume has no claim to record the base, and the size of a fix's diff
+    // is read from the base the pull request is against.
+    state.base = await fetchCommit(options.git, options.checkout, {
+      remote: options.remote,
+      ref: headRef(options.baseBranch),
+    });
   }
 
   if (works || plan.kind === "pull request") {
     steps.push({
       name: "pull request",
       run: async () => {
+        if (state.decision !== "work") {
+          return "skipped — the issue was not worked";
+        }
         const opened = await openPullRequest({
           repo: options.repo,
           branch: workBranch(issue.number),
@@ -1629,33 +2044,107 @@ async function runPlan(
     steps.push({
       name: "review",
       run: async () => {
-        if (!reviews) {
+        if (state.decision !== "work" || !reviews) {
           return "skipped";
         }
-        let reviewDeadlineMs = options.deadlineMs;
-        if (workSessionStartedAt !== undefined) {
-          const elapsed = Date.now() - workSessionStartedAt;
-          reviewDeadlineMs = options.deadlineMs - elapsed;
-          if (reviewDeadlineMs <= 0) {
-            reviews = false;
-            return "skipped";
-          }
-        }
-        state.reviewedSha = await headSha(options.git, state.worktreePath);
-        const outcome = await reviewPullRequest({
-          repo: options.repo,
-          pullRequest: state.pullRequest,
-          cwd: state.worktreePath,
-          factory: options.session,
-          gh: options.gh,
-          run: options.run,
-          deadlineMs: reviewDeadlineMs,
-          ...(options.stopped === undefined ? {} : { stopped: options.stopped }),
+        // The work session handed back the issue it read. A resume has no work
+        // session, so the review reads it once; the fix and every re-review see
+        // the same brief.
+        const detail =
+          state.issue ?? (await readIssue(options.repo, issue.number, options.gh));
+        state.issue = detail;
+        const startedAt = workSessionStartedAt ?? Date.now();
+        const remaining = (): number => options.deadlineMs - (Date.now() - startedAt);
+        let exhausted = false;
+
+        // `gate` is the engine's retry-until-pass block: review, and when the
+        // verdict failed, fix what it found and review the fixed diff again.
+        const outcome = await runReviewGate({
+          attempts: MAX_FIX_ITERATIONS + 1,
+          review: async () => {
+            const budget = remaining();
+            if (budget <= 0) {
+              exhausted = true;
+              return "fail";
+            }
+            state.reviewedSha = await headSha(options.git, state.worktreePath);
+            const reviewed = await reviewPullRequest({
+              repo: options.repo,
+              pullRequest: state.pullRequest,
+              cwd: state.worktreePath,
+              factory: options.session,
+              gh: options.gh,
+              run: options.run,
+              deadlineMs: budget,
+              ...(options.stopped === undefined ? {} : { stopped: options.stopped }),
+              issue: detail,
+            });
+            state.verdict = reviewed.verdict;
+            state.findings = reviewed.findings;
+            state.reviewCount += 1;
+            return reviewed.verdict;
+          },
+          fix: async () => {
+            const budget = remaining();
+            if (budget <= 0) {
+              exhausted = true;
+              return;
+            }
+            // A fresh session per fix: the fix's context is the findings and
+            // the code, not the work session's whole conversation.
+            await fixWorktree({
+              cwd: state.worktreePath,
+              factory: options.session,
+              findings: state.findings,
+              deadlineMs: budget,
+              ...(options.stopped === undefined ? {} : { stopped: options.stopped }),
+              issue: detail,
+            });
+            await commitAll(
+              options.git,
+              state.worktreePath,
+              "fix: the review's findings",
+            );
+            const sha = await headSha(options.git, state.worktreePath);
+            const size = await changedSize(options.git, state.worktreePath, {
+              base: state.base,
+              head: sha,
+            });
+            await pushWorkBranch(options.git, state.worktreePath, {
+              remote: options.remote,
+              issueNumber: issue.number,
+              sha,
+              verify: verifyPush({ verifyPushes: options.verifyPushes, size }),
+            });
+          },
         });
-        state.verdict = outcome.verdict;
-        return outcome.ciVerdict === null
-          ? outcome.verdict
-          : `${outcome.verdict} — ${outcome.ciVerdict}`;
+
+        if (outcome.passed) {
+          return `${state.reviewCount} review(s) — pass`;
+        }
+
+        // The review never passed. The finding goes on the issue — where the
+        // next run reads it as intake — and the run fails, which releases the
+        // claim and leaves the branch and the pull request for that run.
+        await commentIssue(
+          {
+            repo: options.repo,
+            issueNumber: issue.number,
+            body: continuationComment({
+              pullRequest: state.pullRequest,
+              findings: state.findings,
+              reviews: state.reviewCount,
+              exhausted,
+            }),
+          },
+          options.gh,
+        );
+        throw new Error(
+          `the review did not pass after ${state.reviewCount} review(s)` +
+            (state.findings.length === 0
+              ? ""
+              : `: ${state.findings.join("; ")}`),
+        );
       },
     });
   }
@@ -1663,14 +2152,26 @@ async function runPlan(
   steps.push({
     name: "re-count",
     run: async () => {
+      if (state.decision !== "work") {
+        return "skipped — the issue was not worked";
+      }
       // The label is what makes the gate count the review. The review step
-      // applies it when it posts; here it is the only thing left to do.
-      if (!reviews && state.pullRequest !== 0) {
+      // applies it when it posts; here it is the only thing left to do — and
+      // only when there is a review to count. A run whose deadline left no
+      // room for the review must not mark the pull request as reviewed.
+      const reviewed = state.reviewCount > 0 || plan.kind === "re-count";
+      if (!reviews && reviewed && state.pullRequest !== 0) {
         await addRecountLabel({
           repo: options.repo,
           pullRequest: state.pullRequest,
           gh: options.gh,
         });
+      }
+      // A run whose deadline left no room for a review has no verdict to
+      // write. A pass file without a review is a lie the next reader would
+      // believe, so the step says what happened instead.
+      if (state.reviewCount === 0) {
+        return "no review to count";
       }
       if (state.slug === null) {
         return "no change to count";
@@ -1696,17 +2197,21 @@ async function runPlan(
       );
       await commitAll(options.git, state.worktreePath, "chore: the change's verdict");
       const sha = await headSha(options.git, state.worktreePath);
+      const size = await changedSize(options.git, state.worktreePath, {
+        base: state.base,
+        head: sha,
+      });
       await pushWorkBranch(options.git, state.worktreePath, {
         remote: options.remote,
         issueNumber: issue.number,
         sha,
-        ...(options.verifyPushes === undefined ? {} : { verify: options.verifyPushes }),
+        verify: verifyPush({ verifyPushes: options.verifyPushes, size }),
       });
       return state.slug;
     },
   });
 
-  const outcome = await runSteps({
+  const runOutcome = await runSteps({
     issue: issue.number,
     runId,
     root: options.checkout,
@@ -1742,6 +2247,21 @@ async function runPlan(
     },
   });
 
+  // A run that closed or split its issue leaves no claim behind: the claim is
+  // what points the next run at a pull request, and this issue has none. The
+  // release also removes the worktree, which is scratch on every path.
+  if (state.decision !== "work" && state.claimed) {
+    await releaseRun({
+      repo: options.repo,
+      remote: options.remote,
+      cwd: options.checkout,
+      issueNumber: issue.number,
+      ...(state.worktreePath === "" ? {} : { worktreePath: state.worktreePath }),
+      git: options.git,
+      gh: options.gh,
+    });
+  }
+
   // The worktree is scratch, and the branch holds the work: the next run that
   // needs one makes one. Left behind, a worktree per issue fills the worktree
   // root — and the setup script it runs is not cheap.
@@ -1753,8 +2273,14 @@ async function runPlan(
 
   return {
     issue: issue.number,
-    outcome: "completed",
-    steps: outcome.steps,
-    record: outcome.record,
+    outcome:
+      state.decision === "skip"
+        ? "skipped"
+        : state.decision === "split"
+          ? "split"
+          : "completed",
+    steps: runOutcome.steps,
+    record: runOutcome.record,
+    ...(state.reason === "" ? {} : { reason: state.reason }),
   };
 }

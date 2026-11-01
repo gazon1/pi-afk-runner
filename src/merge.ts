@@ -29,7 +29,7 @@ import {
 } from "./gh.js";
 import {
   CommandFailed,
-  fetchRef,
+  fetchCommit,
   headRef,
   pushWorkBranch,
   readRemoteSha,
@@ -271,13 +271,13 @@ async function mergeOne(
     {
       name: "merge-sync",
       run: async () => {
-        await fetchRef(options.git, options.checkout, {
+        // The commit comes from a ref this step fetches for itself, not from
+        // `FETCH_HEAD`: one file serves the whole repository, and a work run's
+        // fetch can land between this one's fetch and the read.
+        const baseSha = await fetchCommit(options.git, options.checkout, {
           remote: options.remote,
           ref: headRef(options.baseBranch),
         });
-        const baseSha = (
-          await options.git(["rev-parse", "FETCH_HEAD"], { cwd: options.checkout })
-        ).trim();
         try {
           await options.git(
             [
@@ -382,7 +382,7 @@ async function mergeOne(
               `${head === null ? "on the remote" : head.slice(0, 8)}`,
           );
         }
-        await mergePullRequest(options.repo, candidate.number, options.gh);
+        await mergePullRequest(options.repo, candidate.number, state.before, options.gh);
         return `#${candidate.number}`;
       },
     },
@@ -463,6 +463,8 @@ async function resolveWithAgent(options: MergeOptions, worktreePath: string): Pr
   const result = await runPromptArray({
     session,
     prompts: [MERGE_PROMPT],
+    // The resolution is one state: the conflict, resolved in one turn.
+    states: [{ name: "resolve", phase: "Resolve" }],
     deadlineMs: options.deadlineMs,
     ...(options.stopped === undefined ? {} : { stopped: options.stopped }),
   });

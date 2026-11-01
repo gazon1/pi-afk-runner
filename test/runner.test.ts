@@ -8,6 +8,8 @@ import {
   UNTRUSTED_INPUT_SECTION,
   BRIEF_MARKER,
   BRIEF_SECTION,
+  ISSUE_DECISION_TOOL_NAME,
+  SCOPE_DECISION_TOOL_NAME,
   VERDICT_TOOL_NAME,
   fenceIssueBody,
   fenceIssueComments,
@@ -15,11 +17,13 @@ import {
   promptsDirectory,
   readPrompts,
   runPromptArray,
+  splitIssue,
   startAgent,
   type AgentSession,
   type SessionFactory,
 } from "../src/session.js";
 import { assistantTextLines, repoFromRemoteUrl, resolveRepo } from "../src/cli.js";
+import { type StateName } from "../src/workflow.js";
 import { createLeftoverTool, LEFTOVER_TOOL_NAME, MAX_LEFTOVERS_PER_RUN } from "../src/leftovers.js";
 import { pullRequestArgs } from "../src/gh.js";
 import {
@@ -27,6 +31,7 @@ import {
   addWorktree,
   allowedPushRefs,
   assertPushableRef,
+  fetchCommit,
   pushRef,
   pushWorkBranch,
   claimRef,
@@ -53,7 +58,10 @@ import {
   REVIEW_MARKER,
   claimedArgs,
   addPullRequestLabelArgs,
+  closeIssueArgs,
+  commentIssueArgs,
   createPullRequestArgs,
+  dependencyNumbers,
   issueArgs,
   postCommentArgs,
   reviewCommentBody,
@@ -68,10 +76,16 @@ import {
 } from "../src/gh.js";
 import {
   UNCLAIMED,
+  blockedReason,
+  changedSize,
   computeDocumentsDigest,
   deriveState,
+  fixPrompt,
+  isSmallChange,
+  verifyPush,
   ensureRegistryEntry,
   newRunId,
+  openDependencies,
   openPullRequest,
   parseCiVerdict,
   readCiVerdict,
@@ -84,12 +98,20 @@ import {
   isStale,
   observePullRequest,
   selectIssue,
+  unworkableReason,
   type Observables,
   type RunOptions,
   type Step,
 } from "../src/runner.js";
-import { HOLDER_COMMAND, takeLock } from "../src/lock.js";
-import { EXIT_LOCKED, EXIT_NO_LOCK, EXIT_USAGE, STEP_EXIT_CODES, main } from "../src/cli.js";
+import { HOLDER_COMMAND, takeLock, workLockName } from "../src/lock.js";
+import {
+  EXIT_LOCKED,
+  EXIT_NO_LOCK,
+  EXIT_USAGE,
+  STEP_EXIT_CODES,
+  main,
+  type CliDependencies,
+} from "../src/cli.js";
 import {
   PINNED_PI_RANGE,
   PiVersionMismatch,
@@ -100,6 +122,19 @@ import {
   parsePiVersion,
   satisfiesRange,
 } from "../src/version.js";
+
+/**
+ * The states for a run of `count` prompts.
+ *
+ * The tests that use them are about the turns — the deadline, the stop, the
+ * failed turn — and not about what the states are called.
+ */
+function namedStates(count: number): StateName[] {
+  return Array.from({ length: count }, (_unused, index) => ({
+    name: `state-${index + 1}`,
+    phase: "Test",
+  }));
+}
 
 /**
  * The review gate's own rule for a line that states a verdict, mirrored here.
@@ -342,6 +377,23 @@ describe("the state the runner derives", () => {
         recountLabel: true,
       }),
     ).toBe("Claimed");
+  });
+});
+
+describe("the reason an issue could not be worked", () => {
+  it("names the state that stopped the run", () => {
+    expect(unworkableReason("Claimed")).toBe("it is held by another runner");
+    expect(unworkableReason("Reviewed")).toBe("already reviewed");
+    expect(unworkableReason("Counted")).toBe("already counted");
+  });
+
+  it("falls back to the check when the state says nothing", () => {
+    expect(unworkableReason(undefined)).toBe(
+      "check whether it is claimed by another runner, already reviewed, or already counted",
+    );
+    expect(unworkableReason("Queue")).toBe(
+      "check whether it is claimed by another runner, already reviewed, or already counted",
+    );
   });
 });
 
@@ -882,6 +934,7 @@ describe("the agent's session", () => {
     await runPromptArray({
       session,
       prompts: ["one", "two", "three"],
+      states: namedStates(3),
       issueBody: body,
       deadlineMs: 60_000,
     });
@@ -962,6 +1015,7 @@ describe("the agent's session", () => {
     const result = await runPromptArray({
       session,
       prompts,
+      states: namedStates(prompts.length),
       issueBody: "the issue",
       deadlineMs: 60_000,
     });
@@ -1002,6 +1056,7 @@ describe("the agent's session", () => {
     const run = runPromptArray({
       session,
       prompts: ["one"],
+      states: namedStates(1),
       deadlineMs: 60_000,
       schedule,
     });
@@ -1052,6 +1107,7 @@ describe("the agent's session", () => {
     const run = runPromptArray({
       session,
       prompts: ["one", "two", "three", "four"],
+      states: namedStates(4),
       deadlineMs: 60_000,
       schedule,
     });
@@ -1086,6 +1142,7 @@ describe("the agent's session", () => {
     const run = runPromptArray({
       session,
       prompts: ["one", "two"],
+      states: namedStates(2),
       deadlineMs: 60_000,
     });
     await expect(run).rejects.toThrow(
@@ -1098,8 +1155,9 @@ describe("the agent's session", () => {
     // The directory is resolved next to the module, so it is the same
     // directory whether the package runs from src/ or from the built dist/.
     const prompts = await readPrompts();
-    expect(prompts).toHaveLength(4);
-    expect(prompts[0]).toContain("## Agent Brief");
+    expect(prompts).toHaveLength(6);
+    expect(prompts[0]).toContain("agent_issue_decision");
+    expect(prompts[1]).toContain("agent_scope_decision");
     expect(promptsDirectory()).toContain("prompts");
   });
 });
@@ -1229,6 +1287,7 @@ describe("the fixes", () => {
     const run = runPromptArray({
       session,
       prompts: ["one"],
+      states: namedStates(1),
       deadlineMs: 60_000,
       schedule,
     });
@@ -1257,6 +1316,7 @@ describe("the fixes", () => {
     const result = await runPromptArray({
       session,
       prompts: ["one", "two", "three"],
+      states: namedStates(3),
       deadlineMs: 60_000,
       stopped: () => stop,
     });
@@ -1754,6 +1814,62 @@ describe("the review", () => {
 
     expect(outcome.ciVerdict).toContain("the CI before the re-count");
     expect(outcome.ciVerdict).toContain("39888579980");
+  });
+
+  it("judges the change against the issue's brief", async () => {
+    let prompt = "";
+    const factory = async (options: {
+      tools?: readonly unknown[];
+    }): Promise<AgentSession> => ({
+      async prompt(text) {
+        prompt = text;
+        const tool = options.tools?.[0] as {
+          execute: (id: string, params: unknown) => Promise<unknown>;
+        };
+        await tool.execute("call-1", { verdict: "pass", findings: [] });
+      },
+      async abort() {},
+      dispose() {},
+    });
+
+    await reviewPullRequest({
+      repo: "gazon1/sing",
+      pullRequest: 1040,
+      cwd: "/tmp/does-not-matter",
+      factory: factory as never,
+      gh: async () => "",
+      run: async () => "",
+      deadlineMs: 60_000,
+      issue: {
+        title: "an issue",
+        body: "## Agent Brief\n\nThe button must stay disabled.",
+        comments: [],
+        labels: [],
+        updatedAt: "",
+        state: "OPEN",
+      },
+    });
+
+    // The reviewer is a new session: the brief travels with its prompt, fenced
+    // as untrusted data, or the diff is judged without the acceptance criteria.
+    expect(prompt).toContain("## The brief this change is judged against");
+    expect(prompt).toContain("The button must stay disabled.");
+    expect(prompt).toContain('trust="untrusted"');
+  });
+
+  it("carries the brief into the fix prompt", () => {
+    const prompt = fixPrompt(["the guard does not fire"], {
+      title: "an issue",
+      body: "## Agent Brief\n\nKeep the button disabled.",
+      comments: [],
+      labels: [],
+      updatedAt: "",
+      state: "OPEN",
+    });
+
+    expect(prompt).toContain("the guard does not fire");
+    expect(prompt).toContain("Keep the button disabled.");
+    expect(prompt).toContain('trust="untrusted"');
   });
 
   it("test_the_review_is_posted_once", async () => {
@@ -2821,6 +2937,198 @@ describe("the CLI's run", () => {
     }
   });
 
+  it("test_two_issues_do_not_wait_for_each_other_or_the_sweep", async () => {
+    const fixture = await fixtureWithSetupScript();
+    try {
+      const lockDirectory = join(fixture.root, "afk-runner");
+      // The sweep's lock and another worker's issue lock are both held: a run
+      // on issue 43 does not care about either, and it works the issue.
+      const sweep = await takeLock(lockDirectory);
+      const other = await takeLock(lockDirectory, workLockName(42));
+      try {
+        const { gh, calls } = stubGh([{ number: 43, title: "another issue" }]);
+        const code = await main(
+          [
+            "--repo",
+            "gazon1/sing",
+            "--checkout",
+            fixture.repo,
+            "--worktree-root",
+            join(fixture.root, "worktrees"),
+            "--lock-dir",
+            lockDirectory,
+            "--issue",
+            "43",
+          ],
+          {
+            gh,
+            session: workingSession(),
+            run: async () => JSON.stringify({ verdict: "ci.yml  run 1  success" }),
+          },
+        );
+
+        expect(code).toBe(0);
+        const claims = calls.filter((call) => call.includes("--add-label agent-in-progress"));
+        expect(claims.some((call) => call.includes(" 43 "))).toBe(true);
+      } finally {
+        await other.release();
+        await sweep.release();
+      }
+    } finally {
+      await fixture.dispose();
+    }
+  }, 60_000);
+
+  it("test_a_sweep_leaves_an_issue_another_run_is_working", async () => {
+    const fixture = await fixtureWithSetupScript();
+    try {
+      const lockDirectory = join(fixture.root, "afk-runner");
+      // Another run is working issue 43; the sweep takes issue 43's lock for
+      // each issue it works, so it reports 43 and works the rest.
+      const held = await takeLock(lockDirectory, workLockName(43));
+      try {
+        const { gh, calls } = stubGh([
+          { number: 42, title: "the first" },
+          { number: 43, title: "the second" },
+        ]);
+        const code = await main(
+          [
+            "--repo",
+            "gazon1/sing",
+            "--checkout",
+            fixture.repo,
+            "--worktree-root",
+            join(fixture.root, "worktrees"),
+            "--lock-dir",
+            lockDirectory,
+            "--all",
+          ],
+          {
+            gh,
+            session: workingSession(),
+            run: async () => JSON.stringify({ verdict: "ci.yml  run 1  success" }),
+          },
+        );
+
+        expect(code).toBe(EXIT_LOCKED);
+        const claims = calls.filter((call) => call.includes("--add-label agent-in-progress"));
+        expect(claims.some((call) => call.includes(" 42 "))).toBe(true);
+        expect(claims.some((call) => call.includes(" 43 "))).toBe(false);
+      } finally {
+        await held.release();
+      }
+    } finally {
+      await fixture.dispose();
+    }
+  }, 60_000);
+
+  it("test_two_runs_work_two_issues_at_once", async () => {
+    const fixture = await fixtureWithSetupScript();
+    try {
+      // The same checkout, the same worktree root, two issues: nothing two
+      // runs share may collide.
+      const lockDirectory = join(fixture.root, "afk-runner");
+      const args = (issue: number): string[] => [
+        "--repo",
+        "gazon1/sing",
+        "--checkout",
+        fixture.repo,
+        "--worktree-root",
+        join(fixture.root, "worktrees"),
+        "--lock-dir",
+        lockDirectory,
+        "--issue",
+        String(issue),
+      ];
+      const dependencies = (
+        gh: (args: readonly string[]) => Promise<string>,
+      ): CliDependencies => ({
+        gh,
+        session: workingSession(),
+        run: async () => JSON.stringify({ verdict: "ci.yml  run 1  success" }),
+      });
+      const first = stubGh([{ number: 42, title: "one" }]);
+      const second = stubGh([{ number: 43, title: "two" }]);
+
+      const codes = await Promise.all([
+        main(args(42), dependencies(first.gh)),
+        main(args(43), dependencies(second.gh)),
+      ]);
+
+      expect(codes).toEqual([0, 0]);
+      expect(
+        first.calls.some((call) => call.includes("--add-label agent-in-progress") && call.includes(" 42 ")),
+      ).toBe(true);
+      expect(
+        second.calls.some((call) => call.includes("--add-label agent-in-progress") && call.includes(" 43 ")),
+      ).toBe(true);
+    } finally {
+      await fixture.dispose();
+    }
+  }, 60_000);
+
+  it("test_two_runs_on_one_issue_do_not_work_it_at_once", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "afk-lock-"));
+    try {
+      // A run already working the issue holds its lock for the whole run.
+      const held = await takeLock(directory, workLockName(42));
+      try {
+        const { gh, calls } = stubGh([{ number: 42, title: "an issue" }]);
+        const code = await main(
+          [
+            "--repo",
+            "gazon1/sing",
+            "--checkout",
+            directory,
+            "--lock-dir",
+            directory,
+            "--issue",
+            "42",
+          ],
+          { gh },
+        );
+
+        expect(code).toBe(EXIT_LOCKED);
+        expect(calls).toHaveLength(0);
+      } finally {
+        await held.release();
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("test_a_merge_does_not_wait_for_the_work_lock", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "afk-lock-"));
+    try {
+      // The work lock is held: a merge reads the pull requests' readiness, not
+      // the work runner's lock, so it runs anyway.
+      const held = await takeLock(directory);
+      try {
+        const { gh, calls } = stubGh([]);
+        const code = await main(
+          [
+            "--repo",
+            "gazon1/sing",
+            "--checkout",
+            directory,
+            "--lock-dir",
+            directory,
+            "--merge",
+          ],
+          { gh },
+        );
+
+        expect(code).toBe(0);
+        expect(calls.length).toBeGreaterThan(0);
+      } finally {
+        await held.release();
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   it("test_the_lock_does_not_outlive_the_runner", async () => {
     const directory = await mkdtemp(join(tmpdir(), "afk-lock-"));
     try {
@@ -2914,6 +3222,28 @@ describe("the CLI's run", () => {
         return runGit(args, options);
       };
     }
+
+    it("test_a_remote_read_answers_its_own_ref_and_leaves_nothing_behind", async () => {
+      const fixture = await fixtureWithSetupScript();
+      try {
+        // Two runs share the checkout, so a read must not depend on `FETCH_HEAD`,
+        // which the other run's fetch overwrites.
+        const sha = await fetchCommit(runGit, fixture.repo, {
+          remote: fixture.remote,
+          ref: "refs/heads/main",
+        });
+        const head = (await runGit(["rev-parse", "HEAD"], { cwd: fixture.repo })).trim();
+        expect(sha).toBe(head);
+
+        // And the private ref the fetch used is gone again.
+        const left = await runGit(["for-each-ref", "--format=%(refname)", "refs/afk"], {
+          cwd: fixture.repo,
+        });
+        expect(left.trim()).toBe("");
+      } finally {
+        await fixture.dispose();
+      }
+    }, 60_000);
 
     it("test_a_stranded_claim_is_reclaimed", async () => {
       const fixture = await fixtureWithSetupScript();
@@ -3503,14 +3833,15 @@ describe("the leftovers a run files", () => {
   }
 
   it("test_the_prompt_array_asks_what_follows_the_work", async () => {
-    // Four turns now: the last one asks the question the work leaves open.
-    expect(PROMPT_FILES).toHaveLength(4);
-    expect(PROMPT_FILES[3]).toBe("04-next.md");
+    // Six turns now: the first two decide whether the issue is worked and
+    // whether it fits, and the last asks what follows from the work.
+    expect(PROMPT_FILES).toHaveLength(6);
+    expect(PROMPT_FILES[5]).toBe("04-next.md");
 
     const prompts = await readPrompts();
-    expect(prompts).toHaveLength(4);
+    expect(prompts).toHaveLength(6);
 
-    const last = prompts[3] ?? "";
+    const last = prompts[5] ?? "";
     expect(last).toContain("improvement and refactoring");
     expect(last).toContain("## Agent Brief");
     expect(last).toContain(LEFTOVER_TOOL_NAME);
@@ -3645,5 +3976,285 @@ describe("the leftovers a run files", () => {
     expect(result.isError).toBe(true);
     expect(result.details.filed).toBe(false);
     expect(target.created).toHaveLength(0);
+  });
+});
+
+describe("the dependencies an issue declares", () => {
+  it("reads only lines that start with the marker", () => {
+    expect(
+      dependencyNumbers([
+        "**Depends on:** #3",
+        "Parent: #7, #9",
+        "Blocked by: #11",
+      ]),
+    ).toEqual([3, 7, 9, 11]);
+
+    // Prose that happens to mention a parent is not a dependency: a line has
+    // to start with the marker.
+    expect(dependencyNumbers(["a paragraph that mentions a parent #5 in prose"])).toEqual(
+      [],
+    );
+    expect(dependencyNumbers(["text", ""])).toEqual([]);
+  });
+
+  it("says why an issue waits", () => {
+    expect(blockedReason([3, 7])).toContain("#3, #7");
+    expect(blockedReason([3])).toContain("not merged");
+    expect(blockedReason([])).toBeNull();
+    expect(blockedReason(undefined)).toBeNull();
+  });
+
+  it("is blocked while a parent is open, and free when it closes", async () => {
+    const gh = async (args: readonly string[]): Promise<string> => {
+      const number = Number(args[2]);
+      if (number === 1) {
+        return JSON.stringify({
+          body: "**Depends on:** #2",
+          comments: [],
+          state: "OPEN",
+        });
+      }
+      if (number === 2) {
+        return JSON.stringify({ body: "", comments: [], state: "OPEN" });
+      }
+      return "";
+    };
+    const child = { number: 1, title: "the child", updatedAt: "", labels: [] };
+
+    expect(await openDependencies({ repo: "gazon1/sing", gh }, child)).toEqual([2]);
+
+    const closedParent = async (args: readonly string[]): Promise<string> => {
+      const number = Number(args[2]);
+      if (number === 1) {
+        return JSON.stringify({
+          body: "Parent: #2",
+          comments: [],
+          state: "OPEN",
+        });
+      }
+      if (number === 2) {
+        return JSON.stringify({ body: "", comments: [], state: "CLOSED" });
+      }
+      return "";
+    };
+    expect(
+      await openDependencies({ repo: "gazon1/sing", gh: closedParent }, child),
+    ).toEqual([]);
+  });
+});
+
+describe("a small change", () => {
+  it("is read from the diff, and skips the long pre-push checks", async () => {
+    const git = async (args: readonly string[]): Promise<string> =>
+      args.includes("--numstat")
+        ? "10\t5\tsrc/a.ts\n-\t-\tassets/logo.png\n"
+        : "";
+
+    const size = await changedSize(git, "/tmp/does-not-matter", {
+      base: "a",
+      head: "b",
+    });
+    // The binary file counts as a file and adds no lines.
+    expect(size).toEqual({ files: 2, lines: 15 });
+    expect(isSmallChange(size)).toBe(true);
+    expect(isSmallChange({ files: 4, lines: 15 })).toBe(false);
+    expect(isSmallChange({ files: 2, lines: 61 })).toBe(false);
+
+    // A small change skips the hook; a larger one runs it; an explicit request
+    // wins either way.
+    expect(verifyPush({ size })).toBe(false);
+    expect(verifyPush({ verifyPushes: true, size })).toBe(true);
+    expect(verifyPush({ verifyPushes: false, size: { files: 9, lines: 900 } })).toBe(
+      false,
+    );
+  });
+});
+
+describe("closing and commenting on an issue", () => {
+  it("names the issue and the reason", () => {
+    expect(closeIssueArgs("gazon1/sing", 42, "already done")).toEqual([
+      "issue",
+      "close",
+      "42",
+      "--repo",
+      "gazon1/sing",
+      "--comment",
+      "already done",
+    ]);
+    expect(closeIssueArgs("gazon1/sing", 42)).not.toContain("--comment");
+    expect(commentIssueArgs("gazon1/sing", 42, "the findings")).toEqual([
+      "issue",
+      "comment",
+      "42",
+      "--repo",
+      "gazon1/sing",
+      "--body",
+      "the findings",
+    ]);
+  });
+});
+
+describe("the work session's decisions", () => {
+  it("closes the issue when the triage says skip", async () => {
+    const calls: string[] = [];
+    const gh = async (args: readonly string[]): Promise<string> => {
+      calls.push(args.join(" "));
+      if (args[0] === "issue" && args[1] === "view") {
+        return JSON.stringify({
+          body: "## Agent Brief\n\ndo the thing",
+          comments: [],
+          title: "an issue",
+          labels: [],
+          updatedAt: "",
+          state: "OPEN",
+        });
+      }
+      return "";
+    };
+    const factory: SessionFactory = async ({ tools }) => ({
+      async prompt(text) {
+        if (!text.includes(ISSUE_DECISION_TOOL_NAME)) {
+          return;
+        }
+        const tool = (tools ?? []).find(
+          (candidate) =>
+            (candidate as { readonly name?: string }).name === ISSUE_DECISION_TOOL_NAME,
+        ) as unknown as { execute: (id: string, params: unknown) => Promise<unknown> };
+        await tool.execute("call-1", {
+          decision: "skip",
+          reason: "already fixed by #12",
+        });
+      },
+      async abort() {},
+      dispose() {},
+    });
+
+    const result = await startAgent({
+      factory,
+      cwd: "/tmp/does-not-matter",
+      repo: "gazon1/sing",
+      issueNumber: 42,
+      gh,
+      deadlineMs: 60_000,
+    });
+
+    expect(result.decision).toBe("skip");
+    expect(result.reason).toContain("already fixed");
+    expect(calls.some((call) => call.startsWith("issue close 42"))).toBe(true);
+  });
+
+  it("files the subtasks, chains them, and closes the parent", async () => {
+    const created: { readonly title: string; readonly body: string }[] = [];
+    const calls: string[] = [];
+    let number = 100;
+    const gh = async (args: readonly string[]): Promise<string> => {
+      calls.push(args.join(" "));
+      if (args[0] === "issue" && args[1] === "view") {
+        return JSON.stringify({
+          body: "## Agent Brief\n\none large task",
+          comments: [],
+          title: "one large task",
+          labels: [],
+          updatedAt: "",
+          state: "OPEN",
+        });
+      }
+      if (args[0] === "issue" && args[1] === "list") {
+        return "[]";
+      }
+      if (args[0] === "issue" && args[1] === "create") {
+        created.push({
+          title: args[args.indexOf("--title") + 1] ?? "",
+          body: args[args.indexOf("--body") + 1] ?? "",
+        });
+        return `https://github.com/gazon1/sing/issues/${number++}\n`;
+      }
+      return "";
+    };
+    const factory: SessionFactory = async ({ tools }) => ({
+      async prompt(text) {
+        const find = (name: string): {
+          execute: (id: string, params: unknown) => Promise<unknown>;
+        } =>
+          (tools ?? []).find(
+            (candidate) => (candidate as { readonly name?: string }).name === name,
+          ) as unknown as { execute: (id: string, params: unknown) => Promise<unknown> };
+        if (text.includes(ISSUE_DECISION_TOOL_NAME)) {
+          await find(ISSUE_DECISION_TOOL_NAME).execute("call-1", {
+            decision: "work",
+            reason: "worth doing",
+          });
+        }
+        if (text.includes(SCOPE_DECISION_TOOL_NAME)) {
+          await find(SCOPE_DECISION_TOOL_NAME).execute("call-1", {
+            decision: "split",
+            reason: "too large for one run",
+            subtasks: [
+              { title: "first", brief: "## Agent Brief\n\nfirst piece" },
+              { title: "second", brief: "## Agent Brief\n\nsecond piece" },
+            ],
+          });
+        }
+      },
+      async abort() {},
+      dispose() {},
+    });
+
+    const result = await startAgent({
+      factory,
+      cwd: "/tmp/does-not-matter",
+      repo: "gazon1/sing",
+      issueNumber: 42,
+      gh,
+      deadlineMs: 60_000,
+    });
+
+    expect(result.decision).toBe("split");
+    expect(created.map((issue) => issue.title)).toEqual(["first", "second"]);
+    // The pieces are chained: the second waits for the first to close.
+    expect(created[0]?.body).not.toContain("Depends on");
+    expect(created[1]?.body).toContain("**Depends on:** #100");
+    expect(calls.some((call) => call.startsWith("issue comment 42"))).toBe(true);
+    expect(calls.some((call) => call.startsWith("issue close 42"))).toBe(true);
+  });
+
+  it("reuses a piece a failed split already filed", async () => {
+    const created: string[] = [];
+    const calls: string[] = [];
+    const gh = async (args: readonly string[]): Promise<string> => {
+      calls.push(args.join(" "));
+      if (args[0] === "issue" && args[1] === "list") {
+        return JSON.stringify([
+          { number: 100, title: "first", updatedAt: "", labels: [QUEUE_LABEL] },
+        ]);
+      }
+      if (args[0] === "issue" && args[1] === "create") {
+        created.push(args[args.indexOf("--title") + 1] ?? "");
+        return "https://github.com/gazon1/sing/issues/101\n";
+      }
+      return "";
+    };
+
+    const filed = await splitIssue({
+      repo: "gazon1/sing",
+      issueNumber: 42,
+      subtasks: [
+        { title: "first", brief: "## Agent Brief\n\nfirst piece" },
+        { title: "second", brief: "## Agent Brief\n\nsecond piece" },
+      ],
+      gh,
+    });
+
+    // The first piece is the one the failed split already filed; only the
+    // second is new, and it still waits for the reused first.
+    expect(filed).toEqual([100, 101]);
+    expect(created).toEqual(["second"]);
+    expect(
+      calls.some(
+        (call) =>
+          call.startsWith("issue create") && call.includes("**Depends on:** #100"),
+      ),
+    ).toBe(true);
+    expect(calls.some((call) => call.startsWith("issue close 42"))).toBe(true);
   });
 });

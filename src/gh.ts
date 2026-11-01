@@ -398,8 +398,14 @@ export function newestReviewVerdict(
   return null;
 }
 
-/** The arguments that land a pull request: squash it, and remove its branch. */
-export function mergePullRequestArgs(repo: string, number: number): string[] {
+/**
+ * The arguments that land a pull request: squash it, and remove its branch.
+ *
+ * `head` is the commit the run checked. With it, GitHub refuses the merge if
+ * the branch moved in between — a work run pushing the same branch is not
+ * excluded by any lock, so the check and the landing have to be one step.
+ */
+export function mergePullRequestArgs(repo: string, number: number, head?: string): string[] {
   return [
     "pr",
     "merge",
@@ -408,16 +414,18 @@ export function mergePullRequestArgs(repo: string, number: number): string[] {
     repo,
     "--squash",
     "--delete-branch",
+    ...(head === undefined ? [] : ["--match-head-commit", head]),
   ];
 }
 
-/** Land a pull request. */
+/** Land a pull request, if its head is still the commit the run checked. */
 export async function mergePullRequest(
   repo: string,
   number: number,
+  head?: string,
   gh: GhRunner = runGh,
 ): Promise<void> {
-  await gh(mergePullRequestArgs(repo, number));
+  await gh(mergePullRequestArgs(repo, number, head));
 }
 
 /** The arguments that read one issue's body and its comments. */
@@ -525,6 +533,92 @@ export async function createIssue(
     throw new Error(`gh did not say which issue it opened: ${output.trim()}`);
   }
   return number;
+}
+
+/** The arguments that post a comment on an issue. */
+export function commentIssueArgs(
+  repo: string,
+  issueNumber: number,
+  body: string,
+): string[] {
+  return ["issue", "comment", String(issueNumber), "--repo", repo, "--body", body];
+}
+
+/** Post a comment on an issue. */
+export async function commentIssue(
+  options: {
+    readonly repo: string;
+    readonly issueNumber: number;
+    readonly body: string;
+  },
+  gh: GhRunner = runGh,
+): Promise<void> {
+  await gh(commentIssueArgs(options.repo, options.issueNumber, options.body));
+}
+
+/** The arguments that close an issue, with an optional comment. */
+export function closeIssueArgs(
+  repo: string,
+  issueNumber: number,
+  body?: string,
+): string[] {
+  return [
+    "issue",
+    "close",
+    String(issueNumber),
+    "--repo",
+    repo,
+    ...(body === undefined || body.trim() === "" ? [] : ["--comment", body]),
+  ];
+}
+
+/** Close an issue, saying why when there is a why. */
+export async function closeIssue(
+  options: {
+    readonly repo: string;
+    readonly issueNumber: number;
+    readonly body?: string;
+  },
+  gh: GhRunner = runGh,
+): Promise<void> {
+  await gh(closeIssueArgs(options.repo, options.issueNumber, options.body));
+}
+
+/**
+ * The marker a line that names a dependency opens with.
+ *
+ * A dependency is a line the brief or the body writes as `**Depends on:** #N`
+ * (or `Blocked by:` / `Parent:`). It is the runner's own convention: the
+ * queue is a set of issues, and an issue that waits for another one says so in
+ * the text every run already reads. A line has to start with the marker, so
+ * prose that happens to mention a parent does not block the issue.
+ */
+export const DEPENDENCY_MARKER =
+  /^(?:\*\*)?(?:depends on|blocked by|parent)(?:\*\*)?\s*:/i;
+
+/**
+ * The issue numbers a text says it waits for.
+ *
+ * The whole text is read — the body and every comment — because a brief may be
+ * the body or a comment, and a dependency may be recorded in either.
+ */
+export function dependencyNumbers(texts: readonly string[]): number[] {
+  const found = new Set<number>();
+  for (const text of texts) {
+    for (const raw of text.split("\n")) {
+      const line = raw.trim();
+      if (!DEPENDENCY_MARKER.test(line)) {
+        continue;
+      }
+      for (const match of line.matchAll(/#(\d+)/g)) {
+        const number = Number(match[1]);
+        if (Number.isInteger(number) && number > 0) {
+          found.add(number);
+        }
+      }
+    }
+  }
+  return [...found];
 }
 
 /**

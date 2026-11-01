@@ -37,13 +37,13 @@ import { EnvHttpProxyAgent, fetch as undiciFetch, setGlobalDispatcher } from "un
 import { readClaimed, readQueue, runGh, type GhRunner } from "./gh.js";
 import { guardExtensionPath, installGuardPolicy } from "./guard.js";
 import { runCommand, runGit, type CommandRunner, type GitRunner } from "./git.js";
-import { LockHeld, LockUnusable, takeLock } from "./lock.js";
+import { LockHeld, LockUnusable, lockNameFor, takeLock, workLockName } from "./lock.js";
 import {
   mergeReviewedPullRequests,
   type MergeOptions,
   type MergeResult,
 } from "./merge.js";
-import { RunFailed, runOnce, type RunOptions } from "./runner.js";
+import { RunFailed, blockedReason, runOnce, type RunOptions, unworkableReason } from "./runner.js";
 import { skillsDirectory, type AgentSession, type SessionFactory } from "./session.js";
 
 /** The run finished, or the queue was empty. */
@@ -549,6 +549,12 @@ export function runOptionsFrom(
     deadlineMs: options.deadlineMs,
     staleAfterMs: options.staleAfterMs,
     ...(options.verifyPushes === undefined ? {} : { verifyPushes: options.verifyPushes }),
+    // A named issue took its lock before the run read anything. A run that lets
+    // the queue choose does not know the issue until it has chosen it, so the
+    // lock is taken inside the run — one issue at a time, even in a sweep.
+    ...(options.issue === undefined
+      ? { lockIssue: (issue: number) => takeLock(options.lockDirectory, workLockName(issue)) }
+      : {}),
   };
 }
 
@@ -623,7 +629,9 @@ export interface CliDependencies {
  * One issue, or the whole queue with `--all`. The lock is taken for the whole
  * invocation and given back whatever happens — a runner that died holding it
  * would keep the next one out for ever, and a runner that gave it back too
- * early would let two of them work at once.
+ * early would let two of them work at once. Work on a named issue takes the
+ * issue's own lock, so two issues can be worked on one host at once; a merge
+ * takes its own and never waits for a work run.
  */
 export async function main(
   argv: readonly string[],
@@ -652,7 +660,7 @@ export async function main(
 
   let lock;
   try {
-    lock = await takeLock(resolved.lockDirectory);
+    lock = await takeLock(resolved.lockDirectory, lockNameFor(resolved));
   } catch (failure) {
     if (failure instanceof LockHeld) {
       process.stderr.write(`${failure.message}\n`);
@@ -811,23 +819,21 @@ async function work(runOptions: RunOptions, namedIssue: number | undefined): Pro
     const result = await runOnce(runOptions);
     if (result.outcome === "empty") {
       process.stdout.write("the queue is empty — there was nothing to work\n");
-    } else if ((result.outcome as string) === "unworkable") {
+    } else if (result.outcome === "unworkable") {
       const issueNum = result.issue ?? namedIssue;
-      const derivedState = (result as { derivedState?: string }).derivedState;
-      let reason: string;
-      if (derivedState === "Claimed") {
-        reason = "it is held by another runner";
-      } else if (derivedState === "Reviewed") {
-        reason = "already reviewed";
-      } else if (derivedState === "Counted") {
-        reason = "already counted";
-      } else {
-        reason = "check whether it is claimed by another runner, already reviewed, or already counted";
-      }
+      const reason =
+        blockedReason(result.blockedBy) ?? unworkableReason(result.derivedState);
       process.stderr.write(
         `issue ${issueNum} could not be worked — ${reason}\n`,
       );
       return 1;
+    } else if (result.outcome === "skipped" || result.outcome === "split") {
+      const what =
+        result.outcome === "skipped"
+          ? "closed as not needed"
+          : "split into smaller issues";
+      const why = result.reason === "" ? "" : ` — ${result.reason}`;
+      process.stdout.write(`issue ${result.issue} was ${what}${why}\n`);
     } else {
       process.stdout.write(
         `worked issue ${result.issue} — the record is at ${result.record}\n`,
@@ -835,6 +841,14 @@ async function work(runOptions: RunOptions, namedIssue: number | undefined): Pro
     }
     return EXIT_OK;
   } catch (failure) {
+    if (failure instanceof LockHeld) {
+      process.stderr.write(`${failure.message}\n`);
+      return EXIT_LOCKED;
+    }
+    if (failure instanceof LockUnusable) {
+      process.stderr.write(`${failure.message}\n`);
+      return EXIT_NO_LOCK;
+    }
     if (failure instanceof RunFailed) {
       process.stderr.write(`${failure.message}\n`);
       return STEP_EXIT_CODES[failure.step] ?? 1;

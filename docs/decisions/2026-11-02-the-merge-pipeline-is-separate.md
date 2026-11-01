@@ -40,8 +40,10 @@ pipeline opened.**
   when the branch does not move.** A branch that has to move — a conflict, or the base's arrival
   breaking the gate — is resolved by an agent, gated by the repository's own `./check.sh`, pushed,
   and freshly reviewed; it lands on the **next** run, once CI has judged the new commit.
-- No candidate is merged twice, and the host lock is the work pipeline's, so the two never run at
-  once.
+- No candidate is merged twice. The merge takes its own host lock, not the work runner's
+  (`2026-11-01-the-lock-is-per-issue.md`), so it runs beside the work runs; the candidate rule — a
+  pass from the newest review, `agent-reviewed`, and a green CI — is what keeps it off work in
+  flight.
 
 ## Rationale
 
