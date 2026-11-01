@@ -271,9 +271,10 @@ is opened. The decisions are tools, `agent_issue_decision` and
 The review is a loop, not a single pass. A `fail` verdict buys a fix turn (a
 fresh session) and a push, and the fixed diff is reviewed again, up to three
 times or until the run's deadline leaves no budget — the engine's own `gate`
-block. A review that still fails leaves its finding on the issue and fails the
-run: the claim is released, the branch and the pull request stay, and the next
-run continues them.
+block. A fix that changes nothing — the branch's head did not move — stops the
+loop: there is nothing to push and nothing to review again. A review that still
+fails leaves its finding on the issue and fails the run: the claim is released,
+the branch and the pull request stay, and the next run continues them.
 
 A **small change** — a few files, a few dozen lines — skips the repository's
 pre-push hook; an explicit `--no-verify`, or its absence, decides the rest. The

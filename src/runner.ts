@@ -84,7 +84,7 @@ import {
   type IssueSummary,
   type PullRequestSummary,
 } from "./gh.js";
-import { runReviewGate } from "./workflow.js";
+import { FixChangedNothing, cutOffError, runReviewGate } from "./workflow.js";
 import type { Lock } from "./lock.js";
 
 /** The states that can be derived from the observables. */
@@ -808,7 +808,11 @@ export async function fixWorktree(options: {
     ...(options.schedule === undefined ? {} : { schedule: options.schedule }),
   });
   if (result.aborted) {
-    throw new Error(
+    // The cut is the engine's own abort error, not a plain failure: the
+    // engine treats an unknown failure as recoverable and carries on to the
+    // next state, and a fix that was cut off would then be reviewed again —
+    // the same diff, a second verdict, for a fix that never happened.
+    throw cutOffError(
       cutOffMessage({
         what: "the fix's session",
         deadlineMs: options.deadlineMs,
@@ -824,12 +828,19 @@ export function continuationComment(options: {
   readonly findings: readonly string[];
   readonly reviews: number;
   readonly exhausted: boolean;
+  /** Whether the loop stopped because the fix changed nothing. */
+  readonly noChange: boolean;
 }): string {
   const lines = [
     `The review of pull request #${options.pullRequest} did not pass after ${options.reviews} review(s).`,
   ];
   if (options.exhausted) {
     lines.push("The run's time budget ran out before a passing review.");
+  }
+  if (options.noChange) {
+    lines.push(
+      "The fix that followed the review changed nothing — the branch's head did not move, so there was nothing to push and nothing to review again.",
+    );
   }
   lines.push(
     "",
@@ -2381,6 +2392,9 @@ async function runPlan(
               exhausted = true;
               return;
             }
+            // The head before the fix: a fix that leaves it where it was
+            // changed nothing.
+            const before = await headSha(options.git, state.worktreePath);
             // A fresh session per fix: the fix's context is the findings and
             // the code, not the work session's whole conversation.
             await fixWorktree({
@@ -2396,6 +2410,13 @@ async function runPlan(
               state.worktreePath,
               "fix: the review's findings",
             );
+            const after = await headSha(options.git, state.worktreePath);
+            if (after === before) {
+              // The fix changed nothing: there is nothing to push and nothing
+              // to review again. The loop stops here, and the run fails with
+              // the reason — the same way an exhausted loop does.
+              throw new FixChangedNothing();
+            }
             // The fix changed the tree, so the tree the gates judged is not
             // the tree that would be pushed: the gates run again, and a fix
             // that does not pass them is not pushed. The tree on the remote
@@ -2442,15 +2463,19 @@ async function runPlan(
               findings: state.findings,
               reviews: state.reviewCount,
               exhausted,
+              noChange: outcome.noChange,
             }),
           },
           options.gh,
         );
+        // The reason the loop stopped is in the message: the finding, and —
+        // when the fix changed nothing — that the fix did not answer it.
         throw new Error(
           `the review did not pass after ${state.reviewCount} review(s)` +
             (state.findings.length === 0
               ? ""
-              : `: ${state.findings.join("; ")}`),
+              : `: ${state.findings.join("; ")}`) +
+            (outcome.noChange ? " — the fix changed nothing" : ""),
         );
       },
     });

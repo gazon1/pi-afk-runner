@@ -3189,6 +3189,255 @@ describe("the CLI's run", () => {
     }
   });
 
+  it("test_a_fix_that_changes_nothing_stops_the_loop", async () => {
+    // The fix session changed nothing: the branch's head did not move. There
+    // is nothing to push and nothing to review again — the loop stops, and
+    // the run says why.
+    const fixture = await fixtureWithSetupScript();
+    try {
+      const { gh, calls } = stubGh([{ number: 42, title: "an issue" }]);
+      let reviews = 0;
+      const pushes: string[][] = [];
+      const failure = await runOnce({
+        ...runOptions(fixture, gh),
+        git: (args, options) => {
+          if (args[0] === "push") {
+            pushes.push([...args]);
+          }
+          return runGit(args, options);
+        },
+        session: async ({ cwd, tools }) => {
+          if (isReviewer(tools)) {
+            reviews += 1;
+            return {
+              async prompt() {
+                const tool = tools?.[0] as unknown as {
+                  execute: (id: string, params: unknown) => Promise<unknown>;
+                };
+                await tool.execute("call-1", {
+                  verdict: "fail",
+                  findings: ["the fix is missing"],
+                });
+              },
+              async abort() {},
+              dispose() {},
+            };
+          }
+          // The fix session is the one without tools, and it writes nothing.
+          if (tools === undefined) {
+            return {
+              async prompt() {},
+              async abort() {},
+              dispose: () => {},
+            };
+          }
+          return {
+            async prompt() {
+              await writeFile(join(cwd, "work.txt"), "the work\n", "utf8");
+            },
+            async abort() {},
+            dispose() {},
+          };
+        },
+      }).then(
+        () => null,
+        (error: unknown) => error,
+      );
+
+      expect(failure).toBeInstanceOf(RunFailed);
+      expect((failure as RunFailed).step).toBe("review");
+      expect((failure as RunFailed).message).toContain("the fix changed nothing");
+
+      // The diff was reviewed once: the same diff was not reviewed again.
+      expect(reviews).toBe(1);
+
+      // The branch was pushed once, for the work. The fix that changed
+      // nothing was not pushed at all.
+      const branchPushes = pushes.filter((args) =>
+        args.some((arg) => arg.endsWith(`refs/heads/${workBranch(42)}`)),
+      );
+      expect(branchPushes).toHaveLength(1);
+
+      // The issue carries the reason the loop stopped.
+      const comment = calls.find((call) => call.startsWith("gh issue comment 42"));
+      expect(comment).toContain("changed nothing");
+
+      // And the branch carries the work, not a fix that changed nothing.
+      const pushed = (
+        await gitOutput(["ls-remote", fixture.remote, workBranch(42)], {
+          cwd: fixture.repo,
+          env: fixture.env,
+        })
+      ).trim();
+      const sha = pushed.split(/\s+/)[0] ?? "";
+      const files = (
+        await gitOutput(["ls-tree", "-r", "--name-only", sha], {
+          cwd: fixture.repo,
+          env: fixture.env,
+        })
+      ).split("\n");
+      expect(files).toContain("work.txt");
+      expect(files).not.toContain("fix.txt");
+
+      // The branch carries the work and nothing else: the fix was not
+      // committed and not pushed.
+      const base = (
+        await gitOutput(["rev-parse", "main"], {
+          cwd: fixture.repo,
+          env: fixture.env,
+        })
+      ).trim();
+      const commits = (
+        await gitOutput(["rev-list", "--count", `${base}..${sha}`], {
+          cwd: fixture.repo,
+          env: fixture.env,
+        })
+      ).trim();
+      expect(commits).toBe("1");
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("test_a_fix_that_changes_the_head_is_pushed_and_reviewed_again", async () => {
+    // The fix changed the tree: the head moved, so there is a commit to push
+    // and a fixed diff to review. The loop carries on as it always did.
+    const fixture = await fixtureWithSetupScript();
+    try {
+      const { gh } = stubGh([{ number: 42, title: "an issue" }]);
+      let reviews = 0;
+      await runOnce({
+        ...runOptions(fixture, gh),
+        session: async ({ cwd, tools }) => {
+          if (isReviewer(tools)) {
+            reviews += 1;
+            // The first review finds something; the second one passes.
+            const first = reviews === 1;
+            return {
+              async prompt() {
+                const tool = tools?.[0] as unknown as {
+                  execute: (id: string, params: unknown) => Promise<unknown>;
+                };
+                await tool.execute("call-1", {
+                  verdict: first ? "fail" : "pass",
+                  findings: first ? ["the fix is missing"] : [],
+                });
+              },
+              async abort() {},
+              dispose() {},
+            };
+          }
+          // The fix session is the one without tools, and it writes the fix.
+          if (tools === undefined) {
+            return {
+              async prompt() {
+                await writeFile(join(cwd, "fix.txt"), "the fix\n", "utf8");
+              },
+              async abort() {},
+              dispose: () => {},
+            };
+          }
+          return {
+            async prompt() {
+              await writeFile(join(cwd, "work.txt"), "the work\n", "utf8");
+            },
+            async abort() {},
+            dispose: () => {},
+          };
+        },
+      });
+
+      // The fixed diff was reviewed again, and it passed.
+      expect(reviews).toBe(2);
+
+      // The branch carries the work and the fix: the fix that moved the head
+      // was pushed.
+      const pushed = (
+        await gitOutput(["ls-remote", fixture.remote, workBranch(42)], {
+          cwd: fixture.repo,
+          env: fixture.env,
+        })
+      ).trim();
+      const sha = pushed.split(/\s+/)[0] ?? "";
+      const files = (
+        await gitOutput(["ls-tree", "-r", "--name-only", sha], {
+          cwd: fixture.repo,
+          env: fixture.env,
+        })
+      ).split("\n");
+      expect(files).toContain("work.txt");
+      expect(files).toContain("fix.txt");
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("test_a_fix_that_is_cut_off_does_not_review_the_same_diff_again", async () => {
+    // The agent stopped early: the fix's session was cut off before it could
+    // answer. Nothing was written, so there is nothing to push and nothing to
+    // review again — the loop stops where it is.
+    const fixture = await fixtureWithSetupScript();
+    try {
+      const { gh } = stubGh([{ number: 42, title: "an issue" }]);
+      let reviews = 0;
+      // The run is stopped once the review has been answered: the fix that
+      // follows is cut off before it can write anything.
+      let stopped = false;
+      const failure = await runOnce({
+        ...runOptions(fixture, gh),
+        stopped: () => stopped,
+        session: async ({ cwd, tools }) => {
+          if (isReviewer(tools)) {
+            reviews += 1;
+            return {
+              async prompt() {
+                const tool = tools?.[0] as unknown as {
+                  execute: (id: string, params: unknown) => Promise<unknown>;
+                };
+                await tool.execute("call-1", {
+                  verdict: "fail",
+                  findings: ["the fix is missing"],
+                });
+              },
+              async abort() {},
+              // The review is over when its session is done.
+              dispose: () => {
+                stopped = true;
+              },
+            };
+          }
+          // The fix session is the one without tools, and it writes nothing.
+          if (tools === undefined) {
+            return {
+              async prompt() {},
+              async abort() {},
+              dispose: () => {},
+            };
+          }
+          return {
+            async prompt() {
+              await writeFile(join(cwd, "work.txt"), "the work\n", "utf8");
+            },
+            async abort() {},
+            dispose: () => {},
+          };
+        },
+      }).then(
+        () => null,
+        (error: unknown) => error,
+      );
+
+      expect(failure).toBeInstanceOf(RunFailed);
+      expect((failure as RunFailed).step).toBe("review");
+      // The same diff was not reviewed again.
+      expect(reviews).toBe(1);
+      // And the run says why it stopped.
+      expect((failure as RunFailed).message).toContain("the fix's session");
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
   it("test_the_gates_keep_their_own_share_of_the_runs_budget", () => {
     // The gates keep what the merge door gives the same gate — an hour each,
     // because the gate has the same work to do there — and the session and
