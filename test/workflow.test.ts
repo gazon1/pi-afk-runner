@@ -441,7 +441,7 @@ describe("the review loop", () => {
 
     // `gate` is the engine's block: the failed verdict's feedback buys a fix,
     // then the fixed diff is reviewed again.
-    expect(result.passed).toBe(true);
+    expect(result.stopReason).toEqual({ kind: "passed" });
     expect(result.reviews).toBe(2);
     expect(calls).toEqual(["review 1", "fix", "review 2"]);
   });
@@ -453,10 +453,9 @@ describe("the review loop", () => {
       fix: async () => {},
     });
 
-    expect(result.passed).toBe(false);
+    expect(result.stopReason).toEqual({ kind: "failed" });
     expect(result.reviews).toBe(3);
     // A review that failed is not a review that was cut off.
-    expect(result.cutOff).toBe(null);
   });
 
   it("stops when the fix changes nothing", async () => {
@@ -475,10 +474,9 @@ describe("the review loop", () => {
       },
     });
 
-    expect(result.passed).toBe(false);
-    expect(result.noChange).toBe(true);
+    expect(result.stopReason).toEqual({ kind: "noChange" });
     // A fix that changed nothing is not a fix that was cut off.
-    expect(result.cutOff).toBe(null);
+
     expect(result.reviews).toBe(1);
     expect(calls).toEqual(["review", "fix"]);
   });
@@ -490,8 +488,7 @@ describe("the review loop", () => {
       fix: async () => {},
     });
 
-    expect(result.noChange).toBe(false);
-    expect(result.cutOff).toBe(null);
+    expect(result.stopReason).toEqual({ kind: "failed" });
   });
 
   it("stops when the review is cut off", async () => {
@@ -513,10 +510,7 @@ describe("the review loop", () => {
       },
     });
 
-    expect(result.passed).toBe(false);
-    // The run's record carries the cut-off: what was cut off, and what cut it
-    // off.
-    expect(result.cutOff).toBe("the review's session hit its 30-minute deadline");
+    expect(result.stopReason).toEqual({ kind: "cutOff", message: "the review's session hit its 30-minute deadline" });
     expect(result.reviews).toBe(1);
     // The same diff was not reviewed again, and no fix was bought for it.
     expect(calls).toEqual(["review"]);
@@ -538,9 +532,8 @@ describe("the review loop", () => {
       },
     });
 
-    expect(result.cutOff).toBe("the fix's session was cut off before its last turn");
+    expect(result.stopReason).toEqual({ kind: "cutOff", message: "the fix's session was cut off before its last turn" });
     // A fix that was cut off is not a fix that changed nothing.
-    expect(result.noChange).toBe(false);
     expect(calls).toEqual(["review", "fix"]);
   });
 });
