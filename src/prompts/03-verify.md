@@ -2,7 +2,8 @@
 
 You have made the change and the gates have run. Now look at it again with
 fresh eyes, because you wrote it and cannot see it clearly. Activate the
-`ponytail-review` skill (`$ponytail-review`) and run its checklist on your
+`code-review-pr-workflow` skill (`$code-review-pr-workflow`) — the
+repository's own review skill — and apply its self-review checklist to your
 own diff.
 
 1. **Read the diff.** `git diff main...HEAD`. Every line of it is yours now.

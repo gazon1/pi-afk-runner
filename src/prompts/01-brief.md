@@ -13,9 +13,10 @@ first of four turns. Do not change any file yet.
 2. **Read the repository.** The rules that matter are in the repository's own
    files: `AGENTS.md`, and the skill the brief names. The brief usually names
    a skill to activate — read it and follow it. Where the brief and the
-   repository's rules disagree, the repository's rules win. Also activate the
-   `ponytail` skill (`$ponytail`) for this work: it sets how small the change
-   should be.
+   repository's rules disagree, the repository's rules win. Keep the change as
+   small as the brief allows: do the work it asks for and nothing beside it —
+   no extra file, no speculative generality, no refactoring the brief did not
+   ask for.
 
 3. **Work out the acceptance criteria.** The brief carries them. Write down
    what "done" means, in terms someone else could check.

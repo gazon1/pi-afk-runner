@@ -66,7 +66,16 @@ apply to a TypeScript suite, and the **ban list** names Kotlin tools.
 [skills/](skills/) holds the skills the runner's agent uses — the review, the gates, the change
 workflow, the decision log, the issue triage — and
 [writing-for-agents](skills/writing-for-agents/SKILL.md), which is how this repository's own
-documents are written. When a prompt in `src/prompts/` names a skill, that skill is one of these.
+documents are written.
+
+A prompt in `src/prompts/` may name a skill, and then the skill has to be one **the work session
+has**: a skill of the target repository's `.agents/skills`, or one of these. The runner ships
+these and puts them in the session's skill paths, so a skill the runner depends on is a skill the
+runner carries. A skill that exists only on the host that happens to run the runner is not one a
+prompt may name — the run has to be the same on every host.
+
+A prompt names a skill as `$<name>`, and the suite reads that shape: every `$name` in a prompt is
+a skill the runner carries, and a session on a host with no skills of its own has it anyway.
 
 ## One commit, one thought
 

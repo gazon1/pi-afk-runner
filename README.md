@@ -240,13 +240,15 @@ queue — so the target repository's own workflow removes it on close
 | `contract/` | **a copy** of the contract this runner binds to, taken from the repository it operates on — see [contract/README.md](contract/README.md) |
 | `docs/decisions/` | the decisions behind the runner and the practices it inherits |
 | `docs/practices/` | the working practices: the agent's rules, the coding standards, the test rules, the order of the checks, the gate registry, the docs lifecycle |
-| `skills/` | the skills the runner's agent uses — the review, the gates, the change workflow, the decision log, the issue triage, and how to write for agents |
+| `skills/` | the skills the runner's agent uses — the review, the gates, the change workflow, the decision log, the issue triage, and how to write for agents. The package ships them, and the work session's skill paths carry them, so a prompt may name one of them |
 | `pipelines/` | the CI workflow the runner's verdict tool reads |
 | `systemd/` | the service and the timer that run it unattended, and what the exit codes mean |
 
 `contract/`, `docs/practices/`, `skills/` and `pipelines/` are copies from the repository this
 runner operates on. The runner **runs** that repository's copies — the ones here are for the
-tests, for the reader, and for the agent's own working rules.
+tests, for the reader, and for the agent's own working rules. The skills are also **shipped**:
+the package carries them and the work session's skill paths point at them, so that a skill a
+prompt names is a skill the runner carries rather than one the host happens to have.
 
 ## Development
 

@@ -38,7 +38,7 @@ import { guardExtensionPath, installGuardPolicy } from "./guard.js";
 import { runCommand, runGit, type CommandRunner, type GitRunner } from "./git.js";
 import { LockHeld, LockUnusable, takeLock } from "./lock.js";
 import { RunFailed, runOnce, type RunOptions } from "./runner.js";
-import type { AgentSession, SessionFactory } from "./session.js";
+import { skillsDirectory, type AgentSession, type SessionFactory } from "./session.js";
 
 /** The run finished, or the queue was empty. */
 export const EXIT_OK = 0;
@@ -324,6 +324,97 @@ export function assistantTextLines(text: string): string[] {
 }
 
 /**
+ * The loader the session's resources come from.
+ *
+ * It is the SDK's own loader, with three things said: the guard's extension is
+ * installed into the session, the runner's own skills are in its skill paths,
+ * and this package's own extension is dropped from the set the loader
+ * discovered.
+ */
+export function createResourceLoader(options: {
+  readonly cwd: string;
+  readonly agentDirectory: string;
+  readonly systemPromptSections: Record<string, string>;
+  /** Told what the agent is doing, as it does it. */
+  readonly onEvent?: (line: string) => void;
+}): DefaultResourceLoader {
+  return new DefaultResourceLoader({
+    cwd: options.cwd,
+    agentDir: options.agentDirectory,
+    additionalExtensionPaths: [guardExtensionPath()],
+    // The runner's own skills, and nothing else: the target repository's
+    // skills and the host user's come from the loader's own discovery. The
+    // host's are not the runner's to depend on — a run has to be the same on
+    // every host — so a skill the runner depends on is a skill the runner
+    // carries.
+    additionalSkillPaths: [skillsDirectory()],
+    extensionsOverride: (loaded) => ({
+      ...loaded,
+      extensions: loaded.extensions.filter((extension) => !isOwnExtension(extension.path)),
+    }),
+    extensionFactories: [
+      {
+        name: "afk-runner-guardrail",
+        factory: (pi) => {
+          pi.on("before_agent_start", (event) => {
+            for (const [name, text] of Object.entries(options.systemPromptSections)) {
+              event.systemPromptOptions.sections[name] = text;
+            }
+          });
+          pi.on("tool_call", (event) => {
+            options.onEvent?.(chalk.dim(`  → ${describeToolCall(event)}`));
+          });
+          pi.on("message_end", (event: any) => {
+            const message = event?.message;
+            if (!message || message.role !== "assistant") {
+              return;
+            }
+            const content = Array.isArray(message.content)
+              ? message.content
+              : [];
+            for (const block of content) {
+              if (!block || typeof block !== "object") {
+                continue;
+              }
+              if (block.type === "thought" || block.type === "thinking") {
+                const thinking =
+                  typeof (block as any).thinking === "string"
+                    ? (block as any).thinking
+                    : typeof (block as any).text === "string"
+                      ? (block as any).text
+                      : "";
+                if (thinking === "") {
+                  continue;
+                }
+                const lines = thinking.split("\n");
+                const shown = lines.slice(0, 3);
+                for (const line of shown) {
+                  options.onEvent?.(chalk.dim(line));
+                }
+                if (lines.length > 3) {
+                  options.onEvent?.(chalk.dim(`… (+${lines.length - 3} lines)`));
+                }
+                continue;
+              }
+              if (block.type === "text") {
+                const text =
+                  typeof (block as any).text === "string"
+                    ? (block as any).text
+                    : "";
+                for (const line of assistantTextLines(text)) {
+                  options.onEvent?.(line);
+                }
+                continue;
+              }
+            }
+          });
+        },
+      },
+    ],
+  });
+}
+
+/**
  * The session the agent works in.
  *
  * Pi's own session, with two things added: the runner's guardrail reaches the
@@ -349,73 +440,11 @@ export function piSessionFactory(options: {
   return async ({ cwd, systemPromptSections, tools }) => {
     useProxyFromEnvironment();
     await installGuardPolicy({ cwd });
-    const loader = new DefaultResourceLoader({
+    const loader = createResourceLoader({
       cwd,
-      agentDir: options.agentDirectory,
-      additionalExtensionPaths: [guardExtensionPath()],
-      extensionsOverride: (loaded) => ({
-        ...loaded,
-        extensions: loaded.extensions.filter((extension) => !isOwnExtension(extension.path)),
-      }),
-      extensionFactories: [
-        {
-          name: "afk-runner-guardrail",
-          factory: (pi) => {
-            pi.on("before_agent_start", (event) => {
-              for (const [name, text] of Object.entries(systemPromptSections)) {
-                event.systemPromptOptions.sections[name] = text;
-              }
-            });
-            pi.on("tool_call", (event) => {
-              options.onEvent?.(chalk.dim(`  → ${describeToolCall(event)}`));
-            });
-            pi.on("message_end", (event: any) => {
-              const message = event?.message;
-              if (!message || message.role !== "assistant") {
-                return;
-              }
-              const content = Array.isArray(message.content)
-                ? message.content
-                : [];
-              for (const block of content) {
-                if (!block || typeof block !== "object") {
-                  continue;
-                }
-                if (block.type === "thought" || block.type === "thinking") {
-                  const thinking =
-                    typeof (block as any).thinking === "string"
-                      ? (block as any).thinking
-                      : typeof (block as any).text === "string"
-                        ? (block as any).text
-                        : "";
-                  if (thinking === "") {
-                    continue;
-                  }
-                  const lines = thinking.split("\n");
-                  const shown = lines.slice(0, 3);
-                  for (const line of shown) {
-                    options.onEvent?.(chalk.dim(line));
-                  }
-                  if (lines.length > 3) {
-                    options.onEvent?.(chalk.dim(`… (+${lines.length - 3} lines)`));
-                  }
-                  continue;
-                }
-                if (block.type === "text") {
-                  const text =
-                    typeof (block as any).text === "string"
-                      ? (block as any).text
-                      : "";
-                  for (const line of assistantTextLines(text)) {
-                    options.onEvent?.(line);
-                  }
-                  continue;
-                }
-              }
-            });
-          },
-        },
-      ],
+      agentDirectory: options.agentDirectory,
+      systemPromptSections,
+      ...(options.onEvent === undefined ? {} : { onEvent: options.onEvent }),
     });
     await loader.reload();
 

@@ -165,6 +165,18 @@ export function promptsDirectory(): string {
 }
 
 /**
+ * The directory the runner's own skills live in.
+ *
+ * It is the package's `skills/` directory — the skills a prompt may name, and
+ * the ones the runner **carries** so that a run does not depend on the host it
+ * happens to run on. It is resolved next to the package root, so it is the
+ * same directory from `src/` and from the built `dist/`.
+ */
+export function skillsDirectory(): string {
+  return fileURLToPath(new URL("../skills/", import.meta.url));
+}
+
+/**
  * Read the prompt array.
  *
  * A missing prompt file is a failure, and it happens **before** the agent
