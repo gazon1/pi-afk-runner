@@ -38,9 +38,14 @@ already uses.** The flag is the `stopped` callback the prompt array checks betwe
 running session is aborted; the session step fails with the message it already has for a cut turn;
 the failure path releases the claim and writes the record. A second signal exits with 130.
 
-**A stop after the work was pushed keeps the claim.** The pull request is that issue's state now,
-and the claim label is what makes the next run derive it — released, the issue has no label, derives
-as `Queue`, and the next run works it a second time. The worktree is still removed: it is scratch.
+**A stop after the work was pushed keeps the claim.** The pull request is that issue's state now, and
+the claim keeps the issue out of the queue. The worktree is still removed: it is scratch.
+
+> The claim used to be what pointed the next run at the pull request — released, the issue had no
+> label, derived as `Queue`, and the next run worked it a second time. The pull request is derived
+> without the claim now (`2026-11-02-the-pull-request-is-asked-about-before-the-claim.md`), so the
+> claim is kept for the claim's own sake: a fresh claim is somebody else's work, and the pull
+> request is left alone until the claim goes stale.
 
 The sweep reads the same flag between issues: a human who stopped the run stopped the sweep, not one
 issue of it.
@@ -61,8 +66,11 @@ at the price of the claim. That is the same trade the stale window makes, withou
 ## Consequences
 
 - Interrupting a run costs the abort's settling time — the release and the record still run.
-- An interrupt during the review keeps the claim, so the next run resumes at the review instead of
-  working the issue again; the review reports the same cut turn the work session does.
+- An interrupt during the review keeps the claim, so the next run does not work the issue again; it
+  resumes at the review once the claim goes stale, and the review reports the same cut turn the work
+  session does. A fresh claim is somebody else's review
+  (`2026-11-02-the-pull-request-is-asked-about-before-the-claim.md`), and an interrupted run's claim
+  is fresh.
 - A sweep stopped between issues exits non-zero: issues were left in the queue, and a zero would
   say the queue was drained.
 - The CLI's exit code is the step's, not 130, on a single signal; 130 is reserved for the second.

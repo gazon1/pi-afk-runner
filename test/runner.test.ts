@@ -98,8 +98,11 @@ import {
   prepareWorktree,
   isStale,
   observePullRequest,
+  planFor,
   selectIssue,
   unworkableReason,
+  type DerivedState,
+  type IssueObservation,
   type Observables,
   type RunOptions,
   type Step,
@@ -379,11 +382,88 @@ describe("the state the runner derives", () => {
       }),
     ).toBe("Claimed");
   });
+
+  it("asks about the pull request before the claim", () => {
+    // The claim is a promise that a run is working an issue; the pull request
+    // is the work itself. A run that failed after the pull request was opened
+    // leaves the issue unclaimed, and the work is still open: the issue is
+    // reviewed, not worked a second time.
+    expect(
+      deriveState({ ...UNCLAIMED, pullRequest: true }),
+    ).toBe("Opened");
+    expect(
+      deriveState({ ...UNCLAIMED, pullRequest: true, reviewComment: true }),
+    ).toBe("Reviewed");
+    expect(
+      deriveState({
+        ...UNCLAIMED,
+        pullRequest: true,
+        reviewComment: true,
+        recountLabel: true,
+      }),
+    ).toBe("Counted");
+
+    // The same for the work that was pushed and never opened: the branch
+    // carries it, so the pull request is what the run still owes.
+    expect(
+      deriveState({ ...UNCLAIMED, workBranch: true }),
+    ).toBe("Pushed");
+  });
+});
+
+describe("the plan an observation asks for", () => {
+  const issue = {
+    number: 42,
+    title: "an issue",
+    updatedAt: "2026-10-30T00:00:00Z",
+    labels: [] as readonly string[],
+  };
+  const observation = (
+    state: DerivedState,
+    over: { claimed?: boolean; stale?: boolean } = {},
+  ): IssueObservation => ({
+    issue,
+    state,
+    pullRequest: null,
+    claimed: over.claimed ?? false,
+    stale: over.stale ?? false,
+  });
+
+  it("reviews an open pull request instead of working the issue again", () => {
+    // The work is open. Working it again would push over the same branch and
+    // post a second review on the same pull request.
+    expect(planFor(observation("Opened")).kind).toBe("review");
+  });
+
+  it("leaves a fresh claim alone", () => {
+    // Somebody is reviewing that pull request right now, and the claim is
+    // what says so. The claim excludes a second claim, not a second review.
+    expect(planFor(observation("Opened", { claimed: true })).kind).toBe("none");
+  });
+
+  it("takes over a stale claim", () => {
+    // The run that held the claim is gone, and the pull request is waiting.
+    expect(planFor(observation("Opened", { claimed: true, stale: true })).kind).toBe(
+      "review",
+    );
+  });
+
+  it("keeps the other states where they were", () => {
+    expect(planFor(observation("Queue")).kind).toBe("work");
+    expect(planFor(observation("Orphaned")).kind).toBe("reclaim");
+    expect(planFor(observation("Pushed")).kind).toBe("pull request");
+    expect(planFor(observation("Reviewed")).kind).toBe("re-count");
+    expect(planFor(observation("Counted")).kind).toBe("none");
+    expect(planFor(observation("Claimed")).kind).toBe("none");
+  });
 });
 
 describe("the reason an issue could not be worked", () => {
   it("names the state that stopped the run", () => {
     expect(unworkableReason("Claimed")).toBe("it is held by another runner");
+    expect(unworkableReason("Opened")).toBe(
+      "its pull request is being reviewed by another runner",
+    );
     expect(unworkableReason("Reviewed")).toBe("already reviewed");
     expect(unworkableReason("Counted")).toBe("already counted");
   });
@@ -2279,7 +2359,12 @@ describe("the assistant's lines in the stream", () => {
  * The unattended front door: the lock, the exit codes, and the run itself.
  */
 describe("the CLI's run", () => {
-  /** A `gh` that answers the runner's calls and remembers them. */
+  /**
+   * A `gh` that answers the runner's calls and remembers them.
+   *
+   * The pull requests are the ones that are open, by their branch: the runner
+   * asks for the pull request of a branch, not for a number.
+   */
   function stubGh(
     queue: readonly {
       number: number;
@@ -2287,7 +2372,14 @@ describe("the CLI's run", () => {
       labels?: readonly string[];
       updatedAt?: string;
       state?: string;
+      body?: string;
     }[],
+    pullRequests: readonly {
+      number: number;
+      headRefName: string;
+      comments?: readonly string[];
+      labels?: readonly string[];
+    }[] = [],
   ): {
     gh: (args: readonly string[]) => Promise<string>;
     calls: string[];
@@ -2296,8 +2388,16 @@ describe("the CLI's run", () => {
     const gh = async (args: readonly string[]): Promise<string> => {
       calls.push(`gh ${args.join(" ")}`);
       if (args[0] === "issue" && args[1] === "list") {
+        // Three reads, and the stub answers each the way `gh` would: the
+        // queue excludes the claimed issues, the claimed read asks for them,
+        // and the open read asks for everything.
+        const wanted = args.includes(CLAIM_LABEL)
+          ? queue.filter((issue) => (issue.labels ?? []).includes(CLAIM_LABEL))
+          : args.includes("--search")
+            ? queue.filter((issue) => !(issue.labels ?? []).includes(CLAIM_LABEL))
+            : queue;
         return JSON.stringify(
-          queue.map((issue) => ({
+          wanted.map((issue) => ({
             number: issue.number,
             title: issue.title,
             updatedAt: issue.updatedAt ?? "",
@@ -2306,7 +2406,21 @@ describe("the CLI's run", () => {
         );
       }
       if (args[0] === "pr" && args[1] === "list") {
-        return "[]";
+        // The runner asks for the pull request of a branch; the merge
+        // pipeline asks for the open ones, and there are none here.
+        const head = args.includes("--head") ? valueAfter(args, "--head") : "";
+        const open = pullRequests.find((pullRequest) => pullRequest.headRefName === head);
+        if (open === undefined) {
+          return "[]";
+        }
+        return JSON.stringify([
+          {
+            number: open.number,
+            headRefName: open.headRefName,
+            labels: open.labels ?? [],
+            comments: (open.comments ?? []).map((body) => ({ body })),
+          },
+        ]);
       }
       if (args[0] === "pr" && args[1] === "create") {
         return "https://github.com/gazon1/sing/pull/1040\n";
@@ -2317,7 +2431,7 @@ describe("the CLI's run", () => {
         const number = Number(args[2] ?? "");
         const issue = queue.find((candidate) => candidate.number === number);
         return JSON.stringify({
-          body: "**What this is:** the work\n\n**Fix:** 1. do it",
+          body: issue?.body ?? "**What this is:** the work\n\n**Fix:** 1. do it",
           comments: [{ body: "a comment" }],
           title: "an issue",
           labels: [],
@@ -2469,6 +2583,184 @@ describe("the CLI's run", () => {
       expect(
         await gitOutput(["show", `${sha}:work.txt`], { cwd: fixture.repo, env: fixture.env }),
       ).toContain("the work");
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  /**
+   * The work branch of an issue, on the fixture's remote.
+   *
+   * The runner reads the branch of an issue before it plans anything: a
+   * branch that carries the work is work that is already done.
+   */
+  async function pushTheWorkBranch(
+    fixture: Awaited<ReturnType<typeof createFixtureRepository>>,
+    issueNumber: number,
+    options: { readonly work?: boolean } = {},
+  ): Promise<void> {
+    if (options.work === true) {
+      await gitOutput(["checkout", "-q", "-b", workBranch(issueNumber)], {
+        cwd: fixture.repo,
+        env: fixture.env,
+      });
+      await writeFile(join(fixture.repo, "work.txt"), "the work\n", "utf8");
+      await gitOutput(["add", "-A"], { cwd: fixture.repo, env: fixture.env });
+      await gitOutput(["commit", "-q", "-m", "the work"], {
+        cwd: fixture.repo,
+        env: fixture.env,
+      });
+      await gitOutput(["checkout", "-q", "main"], { cwd: fixture.repo, env: fixture.env });
+    } else {
+      await gitOutput(["branch", workBranch(issueNumber)], {
+        cwd: fixture.repo,
+        env: fixture.env,
+      });
+    }
+    await gitOutput(["push", fixture.remote, workBranch(issueNumber)], {
+      cwd: fixture.repo,
+      env: fixture.env,
+    });
+  }
+
+  it("reviews an open pull request instead of working the issue again", async () => {
+    // A run that failed after the pull request was opened leaves the issue
+    // unclaimed and the pull request open. The issue is not worked a second
+    // time: the work is open, so it is reviewed.
+    const fixture = await fixtureWithSetupScript();
+    try {
+      await pushTheWorkBranch(fixture, 42);
+      const { gh, calls } = stubGh(
+        [{ number: 42, title: "an issue" }],
+        [{ number: 77, headRefName: workBranch(42) }],
+      );
+
+      const result = await runOnce(runOptions(fixture, gh));
+
+      // The issue was not claimed: nobody works an issue whose pull request
+      // is open.
+      expect(
+        calls.filter((call) => call.includes("--add-label agent-in-progress")),
+      ).toHaveLength(0);
+
+      // And the pull request that was open is the one that was reviewed.
+      expect(calls.some((call) => call.includes("pr comment 77"))).toBe(true);
+      expect(result.issue).toBe(42);
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("opens the pull request of work that was pushed and never opened", async () => {
+    // The branch carries the work and no pull request exists: the run owes
+    // the pull request, not another round of work.
+    const fixture = await fixtureWithSetupScript();
+    try {
+      await pushTheWorkBranch(fixture, 42, { work: true });
+      const { gh, calls } = stubGh([{ number: 42, title: "an issue" }]);
+
+      await runOnce(runOptions(fixture, gh));
+
+      expect(calls.some((call) => call.includes("pr create"))).toBe(true);
+      expect(
+        calls.filter((call) => call.includes("--add-label agent-in-progress")),
+      ).toHaveLength(0);
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("leaves a pull request that another runner is reviewing alone", async () => {
+    // The claim is fresh: somebody is reviewing that pull request right now.
+    // The claim excludes a second claim, not a second review, so the claim's
+    // freshness is what keeps two hosts off one pull request.
+    const fixture = await fixtureWithSetupScript();
+    try {
+      await pushTheWorkBranch(fixture, 42);
+      const { gh, calls } = stubGh(
+        [{ number: 42, title: "an issue", labels: [CLAIM_LABEL] }],
+        [{ number: 77, headRefName: workBranch(42) }],
+      );
+
+      const result = await runOnce(runOptions(fixture, gh));
+
+      expect(result.outcome).toBe("empty");
+      expect(calls.some((call) => call.includes("pr comment"))).toBe(false);
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("does not review a pull request that already carries a review", async () => {
+    // The gate decides on the newest marked comment, so a second review of
+    // the same pull request would override the first — and a `pass` after a
+    // `fail` would turn a red pull request green on a review of a different
+    // diff.
+    const fixture = await fixtureWithSetupScript();
+    try {
+      await pushTheWorkBranch(fixture, 42);
+      const { gh, calls } = stubGh(
+        [{ number: 42, title: "an issue" }],
+        [
+          {
+            number: 77,
+            headRefName: workBranch(42),
+            comments: [`${REVIEW_MARKER}\n\n**Verdict:** fail\n`],
+          },
+        ],
+      );
+
+      await runOnce(runOptions(fixture, gh));
+
+      expect(calls.some((call) => call.includes("pr comment"))).toBe(false);
+      // The review is there; it is counted again, and not written a second time.
+      expect(
+        calls.some((call) =>
+          call.includes(`pr edit 77 --repo gazon1/sing --add-label ${RECOUNT_LABEL}`),
+        ),
+      ).toBe(true);
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("passes a claimed issue over", async () => {
+    // The claim guard has one implementation, and the queue path calls it: a
+    // claimed issue is not worked, whatever the query returned.
+    const fixture = await fixtureWithSetupScript();
+    try {
+      const { gh, calls } = stubGh([
+        { number: 42, title: "claimed", labels: [CLAIM_LABEL] },
+        { number: 43, title: "free" },
+      ]);
+
+      const result = await runOnce(runOptions(fixture, gh));
+
+      expect(result.issue).toBe(43);
+      const claims = calls.filter((call) => call.includes("--add-label agent-in-progress"));
+      expect(claims).toHaveLength(1);
+      expect(claims[0]).toContain("43");
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("passes over an issue whose parent is still open", async () => {
+    // The parent is open, so the child waits: it is not worked, and it is not
+    // removed — it is the next run's turn once the parent closes.
+    const fixture = await fixtureWithSetupScript();
+    try {
+      const { gh, calls } = stubGh([
+        { number: 42, title: "the child", body: "**Depends on:** #3" },
+        { number: 3, title: "the parent", labels: [CLAIM_LABEL], state: "OPEN" },
+      ]);
+
+      const result = await runOnce(runOptions(fixture, gh));
+
+      expect(result.outcome).toBe("empty");
+      expect(
+        calls.some((call) => call.includes("--add-label agent-in-progress")),
+      ).toBe(false);
     } finally {
       await fixture.dispose();
     }

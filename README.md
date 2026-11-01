@@ -197,7 +197,9 @@ run puts it back before it ends.
 
 `/afk-runner-stop` cuts the agent's turn the way the deadline does: the run fails where it stands
 and its failure path releases the claim and the worktree, while the branch keeps the commits it has.
-Killing the process instead leaves the claim to go stale.
+A run that already opened a pull request keeps its claim: the issue stays out of the queue, and the
+pull request is reviewed once that claim goes stale. Killing the process instead leaves the claim to
+go stale as well.
 
 ### From the CLI — unattended
 
@@ -243,8 +245,17 @@ The review is a loop, not a single pass. A `fail` verdict buys a fix turn (a
 fresh session) and a push, and the fixed diff is reviewed again, up to three
 times or until the run's deadline leaves no budget — the engine's own `gate`
 block. A review that still fails leaves its finding on the issue and fails the
-run: the claim is released, the branch and the pull request stay, and the next
-run continues them.
+run: the claim is released, and the branch and the pull request stay. A pull
+request is reviewed once, so the next run leaves that pull request alone — it
+is red, and it is a human's to look at.
+
+An issue whose pull request is open is never worked a second time. The queue is
+not only the issues nobody has claimed: a run that failed after its pull
+request was opened leaves the issue unclaimed and the pull request open, and
+the next run reads the pull request before it plans the work. What is open is
+reviewed — or counted, when it already carries a review — and what was pushed
+and never opened gets its pull request. A claim that is still fresh is
+somebody else's run, and the pull request it is reviewing is left alone.
 
 A **small change** — a few files, a few dozen lines — skips the repository's
 pre-push hook; an explicit `--no-verify`, or its absence, decides the rest. CI

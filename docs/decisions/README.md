@@ -28,6 +28,7 @@ for the rule that the copies follow.
 | `2026-11-02-a-prompt-may-only-name-a-skill-the-runner-carries.md` | the skills a prompt may name, and who carries them |
 | `2026-11-02-the-reclaim-deletes-the-branch-the-dead-run-left.md` | what the reclaim does with the branch the dead run left on the remote |
 | `2026-11-02-the-merge-pipeline-is-separate.md` | why landing is an opt-in mode, and when a pull request is a candidate |
+| `2026-11-02-the-pull-request-is-asked-about-before-the-claim.md` | what is derived first, and why an open pull request is reviewed and never worked again |
 | `2026-11-02-the-session-is-a-workflow.md` | the session's states, the workflow that runs them, and whose rules they stay |
 | `2026-11-01-the-work-is-a-conditional-graph.md` | triage, scope and split as a branch; `gate` for the review loop; dependencies; the small-change skip |
 | `2026-10-30-the-afk-runner-is-a-pi-extension.md` | why the runner is a separate repository, and the three layers of exclusion |

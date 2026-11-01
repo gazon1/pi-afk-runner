@@ -140,17 +140,21 @@ export const UNCLAIMED: Observables = {
  *
  * The order of the questions is the order of the decisions:
  *
- * 1. No claim label → the issue is in the queue, whoever gets it.
- * 2. A pull request exists → the issue has left the queue, and how far it got
+ * 1. A pull request exists → the issue has left the queue, and how far it got
  *    is what the pull request's own state says.
- * 3. No pull request but a work branch → the work was pushed and the pull
+ * 2. No pull request but a work branch → the work was pushed and the pull
  *    request was never opened.
+ * 3. Neither, and no claim label → the issue is in the queue, whoever gets it.
  * 4. Neither → the claim is either live or stranded, and the age decides.
+ *
+ * The pull request is asked about **first**, and the claim label does not come
+ * before it. The claim is a promise that a run is *working* an issue; the pull
+ * request is the work itself. A run that fails after the pull request was
+ * opened leaves the claim behind or takes it away again, and neither changes
+ * the fact that the work is open: an issue whose pull request is open is
+ * reviewed, never worked a second time.
  */
 export function deriveState(observables: Observables): DerivedState {
-  if (!observables.claimLabel) {
-    return "Queue";
-  }
   if (observables.pullRequest) {
     if (observables.reviewComment) {
       return observables.recountLabel ? "Counted" : "Reviewed";
@@ -160,11 +164,14 @@ export function deriveState(observables: Observables): DerivedState {
   if (observables.workBranch) {
     return "Pushed";
   }
+  if (!observables.claimLabel) {
+    return "Queue";
+  }
   return observables.stale ? "Orphaned" : "Claimed";
 }
 
 /**
- * Pick the issue this run will work.
+ * Pick the issue this run will work on.
  *
  * The queue query already excludes the claimed issues — the exclusion is in the
  * search form, so the claimed issues are never fetched. This is the second
@@ -172,6 +179,10 @@ export function deriveState(observables: Observables): DerivedState {
  * it. A queue that somehow carries a claimed issue is a bug in the query, and
  * working it anyway would put two runs on one issue — the exact thing the
  * claim exists to prevent.
+ *
+ * The issue this returns is not necessarily worked: the queue is looked at
+ * one issue at a time, and what is behind an issue decides what happens to
+ * it. An issue whose pull request is open is reviewed, not worked.
  */
 export function selectIssue(
   queue: readonly IssueSummary[],
@@ -821,7 +832,9 @@ export function continuationComment(options: {
       ? ["- the review named no finding"]
       : options.findings.map((finding) => `- ${finding}`)),
     "",
-    "The branch and the pull request are kept. The next run picks this issue up and fixes what the review found.",
+    "The branch and the pull request are kept, and the pull request keeps the review that failed.",
+    "A pull request is reviewed once, so the next run leaves it alone. The pull request is red,",
+    "and it is a human's to look at.",
   );
   return lines.join("\n");
 }
@@ -839,6 +852,10 @@ export interface IssueObservation {
   readonly state: DerivedState;
   /** The pull request behind it, when there is one. */
   readonly pullRequest: PullRequestSummary | null;
+  /** `L` — the issue carries the claim label. */
+  readonly claimed: boolean;
+  /** `A` — the claim is older than the staleness window. */
+  readonly stale: boolean;
 }
 
 /**
@@ -867,16 +884,20 @@ export async function observeIssue(options: {
     base: options.baseBranch,
   });
   const observed = observePullRequest(pullRequest);
+  const claimed = options.issue.labels.includes(CLAIM_LABEL);
+  const stale = isStale(options.issue.updatedAt, options.now, options.staleAfterMs);
   return {
     issue: options.issue,
     pullRequest,
+    claimed,
+    stale,
     state: deriveState({
-      claimLabel: options.issue.labels.includes(CLAIM_LABEL),
+      claimLabel: claimed,
       pullRequest: pullRequest !== null,
       reviewComment: observed.reviewComment,
       recountLabel: observed.recountLabel,
       workBranch: ahead !== null && ahead > 0,
-      stale: isStale(options.issue.updatedAt, options.now, options.staleAfterMs),
+      stale,
     }),
   };
 }
@@ -914,25 +935,47 @@ export interface Plan {
  * and has nothing behind it is a dead run's, and it is taken over. A claim
  * with a pull request behind it is finished where it stopped: the pull request
  * is opened, reviewed or counted, and never worked a second time.
+ *
+ * A pull request with no review on it is **reviewed**, and not worked: the
+ * work is already open, and a second run that worked the issue again would
+ * push over the same branch and post a second review on the same pull
+ * request — and the gate reads the newest marked comment, so a `pass` after a
+ * `fail` would turn a red pull request green on a review of a different diff.
+ *
+ * The exception is a **fresh claim**: somebody is reviewing that pull request
+ * right now, and the claim is what says so. The claim excludes a second
+ * *claim*, not a second *review*, so the freshness of the claim is what keeps
+ * two hosts off one pull request. A claim that has gone stale is nobody's, and
+ * the pull request is reviewed.
  */
 export function planFor(observation: IssueObservation): Plan {
-  const kind: PlanKind =
-    observation.state === "Queue"
-      ? "work"
-      : observation.state === "Orphaned"
-        ? "reclaim"
-        : observation.state === "Pushed"
-          ? "pull request"
-          : observation.state === "Opened"
-            ? "review"
-            : observation.state === "Reviewed"
-              ? "re-count"
-              : "none";
+  const kind = planKind(observation);
   return {
     kind,
     issue: observation.issue,
     pullRequest: observation.pullRequest,
   };
+}
+
+/** The plan an observation asks for. */
+function planKind(observation: IssueObservation): PlanKind {
+  switch (observation.state) {
+    case "Queue":
+      return "work";
+    case "Orphaned":
+      return "reclaim";
+    case "Pushed":
+      return "pull request";
+    case "Opened":
+      // A fresh claim is somebody else's review in progress.
+      return observation.claimed && !observation.stale ? "none" : "review";
+    case "Reviewed":
+      return "re-count";
+    default:
+      // `Claimed` — a live run owns it — and `Counted` — the runner is done
+      // with it — are both nothing to do.
+      return "none";
+  }
 }
 
 /** What one step of a run did. */
@@ -1336,6 +1379,8 @@ export function unworkableReason(derivedState: DerivedState | undefined): string
   switch (derivedState) {
     case "Claimed":
       return "it is held by another runner";
+    case "Opened":
+      return "its pull request is being reviewed by another runner";
     case "Reviewed":
       return "already reviewed";
     case "Counted":
@@ -1761,18 +1806,48 @@ async function chooseIssue(
   // The queue is worked in order, and an issue whose parent is still open is
   // passed over — not worked, and not removed: it is the next run's turn once
   // the parent closes.
-  for (const candidate of queue) {
-    if (candidate.labels.includes(CLAIM_LABEL)) {
+  //
+  // Every issue in the queue is **observed** before it is planned. An issue
+  // nobody has claimed may still have its work open: a run that failed after
+  // the pull request was opened leaves the claim behind or takes it away
+  // again, and the pull request is still open. Working such an issue again
+  // would push over the same branch and post a second review on the same pull
+  // request, and the gate reads the newest marked comment — so a `pass` after
+  // a `fail` would turn a red pull request green on a review of a different
+  // diff. What is open is reviewed, not worked.
+  let remaining = [...queue];
+  while (remaining.length > 0) {
+    const candidate = selectIssue(remaining);
+    if (candidate === undefined) {
+      // Every issue left is claimed, and the claim is what excludes it.
+      break;
+    }
+    remaining = remaining.filter((issue) => issue.number !== candidate.number);
+    const observation = await observeIssue({
+      issue: candidate,
+      repo: options.repo,
+      remote: options.remote,
+      baseBranch: options.baseBranch,
+      cwd: options.checkout,
+      git: options.git,
+      gh: options.gh,
+      now,
+      staleAfterMs: options.staleAfterMs,
+    });
+    const plan = planFor(observation);
+    if (plan.kind === "none") {
       continue;
     }
-    const blockedBy = await openDependencies(
-      { repo: options.repo, gh: options.gh },
-      candidate,
-    );
-    if (blockedBy.length > 0) {
-      continue;
+    if (plan.kind === "work") {
+      const blockedBy = await openDependencies(
+        { repo: options.repo, gh: options.gh },
+        candidate,
+      );
+      if (blockedBy.length > 0) {
+        continue;
+      }
     }
-    return { kind: "work", issue: candidate, pullRequest: null };
+    return plan;
   }
   return null;
 }
@@ -2048,6 +2123,24 @@ async function runPlan(
         if (state.decision !== "work" || !reviews) {
           return "skipped";
         }
+        // The pull request's comments are read **first**. A pull request that
+        // already carries a marked review has been reviewed, and the gate
+        // decides on the newest marked comment — so a second review of the
+        // same pull request would override the first, and a `pass` after a
+        // `fail` would turn a red pull request green on a review of a
+        // different diff. The runner reviews once.
+        //
+        // The check is here, before the gate's loop, and not inside the
+        // review: the loop reviews the *fixed* diff, and that review is the
+        // same run's answer to the findings of the first one.
+        const current = await readPullRequest(
+          options.repo,
+          workBranch(issue.number),
+          options.gh,
+        );
+        if (observePullRequest(current).reviewComment) {
+          return "skipped — the pull request already carries a review";
+        }
         // The work session handed back the issue it read. A resume has no work
         // session, so the review reads it once; the fix and every re-review see
         // the same brief.
@@ -2174,6 +2267,17 @@ async function runPlan(
       if (state.reviewCount === 0) {
         return "no review to count";
       }
+      // The slug of the change the pull request carries. A run that worked the
+      // issue knows it from the work session; a run that took the pull
+      // request over reads it from the diff — the same function, the same
+      // answer. Without it the verdict file is not written, and the pull
+      // request stays red on a change that needs one.
+      if (state.slug === null) {
+        state.slug = await changedChangeSlug(options.git, state.worktreePath, {
+          base: state.base,
+          head: await headSha(options.git, state.worktreePath),
+        });
+      }
       if (state.slug === null) {
         return "no change to count";
       }
@@ -2223,9 +2327,11 @@ async function runPlan(
       if (!state.claimed) {
         return;
       }
-      // A stopped run that already pushed is not a dead run: the claim is what
-      // points the next run at its pull request. Released, the issue has no
-      // label, derives as `Queue`, and the next run works it a second time.
+      // A stopped run that already pushed is not a dead run: its pull request
+      // is open, and the claim keeps the issue out of the queue. The pull
+      // request is found without the claim — `deriveState` asks about it
+      // first — but a fresh claim is somebody else's work, so the next run
+      // leaves the pull request alone until the claim goes stale.
       if (options.stopped?.() === true && state.pullRequest !== 0) {
         if (state.worktreePath !== "") {
           await removeWorktree(options.git, options.checkout, state.worktreePath).catch(
