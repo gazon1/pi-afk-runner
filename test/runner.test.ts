@@ -3129,6 +3129,49 @@ describe("the CLI's run", () => {
       }
     }, 60_000);
 
+    it("test_a_stale_claim_with_an_empty_branch_is_reclaimed", async () => {
+      const fixture = await fixtureWithSetupScript();
+      try {
+        // A claim a dead run left behind, and older than the staleness window.
+        const stale = {
+          number: 42,
+          title: "an issue",
+          labels: ["agent-in-progress"],
+          updatedAt: "2026-01-01T00:00:00Z",
+        };
+        const { gh, calls } = stubGh([stale]);
+
+        // The branch the dead run pushed and never filled: it points at the
+        // base, so it carries nothing and no pull request can be opened for it.
+        const base = (await runGit(["rev-parse", "HEAD"], { cwd: fixture.repo })).trim();
+        await runGit(["push", fixture.remote, `${base}:refs/heads/agent/issue-42`], {
+          cwd: fixture.repo,
+        });
+
+        const result = await runOnce({
+          ...runOptions(fixture, gh),
+          staleAfterMs: 60_000,
+          now: new Date("2026-10-30T09:00:00Z"),
+        });
+
+        // The claim is stale and the branch carries nothing, so the issue is a
+        // dead run's: it was taken over and worked again.
+        expect(result.issue).toBe(42);
+        expect(result.steps.map((step) => step.step)).toContain("session");
+        // The work was pushed over the leftover branch...
+        const pushed = (
+          await runGit(["ls-remote", fixture.remote, "refs/heads/agent/issue-42"], {
+            cwd: fixture.repo,
+          })
+        ).trim();
+        expect(pushed.split(/\s+/)[0]).not.toBe(base);
+        // ...and the pull request was opened from it.
+        expect(calls.some((call) => call.includes("pr create"))).toBe(true);
+      } finally {
+        await fixture.dispose();
+      }
+    }, 60_000);
+
     it("test_a_human_comment_defers_the_reclaim", async () => {
       const fixture = await fixtureWithSetupScript();
       try {
