@@ -38,6 +38,7 @@ import {
   type GitRunner,
 } from "./git.js";
 import {
+  GATE_TIMEOUT_MS,
   RunFailed,
   checkoutPullRequestBranch,
   commitAll,
@@ -64,9 +65,6 @@ export const GATE_SCRIPT = "./check.sh";
 
 /** A marker a resolved conflict must not leave behind. */
 const CONFLICT_MARKER = "^<<<<<<< ";
-
-/** How long the gate may run before it is a failure of its own. */
-const DEFAULT_GATE_TIMEOUT_MS = 60 * 60 * 1000;
 
 /**
  * The prompt the merge agent is given.
@@ -436,7 +434,7 @@ async function verifyGate(options: MergeOptions, worktreePath: string): Promise<
       command: "bash",
       args: [GATE_SCRIPT],
       cwd: worktreePath,
-      timeoutMs: options.gateTimeoutMs ?? DEFAULT_GATE_TIMEOUT_MS,
+      timeoutMs: options.gateTimeoutMs ?? GATE_TIMEOUT_MS,
     });
   };
   try {

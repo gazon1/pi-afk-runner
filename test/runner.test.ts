@@ -42,6 +42,7 @@ import {
   runCommand,
   runGit,
   workBranch,
+  type CommandRunner,
 } from "../src/git.js";
 import { createFixtureRepository, gitOutput } from "./git-sandbox.js";
 import { chmod, cp, mkdir } from "node:fs/promises";
@@ -77,6 +78,7 @@ import {
 } from "../src/gh.js";
 import {
   UNCLAIMED,
+  GATE_TIMEOUT_MS,
   blockedReason,
   changedSize,
   computeDocumentsDigest,
@@ -94,6 +96,7 @@ import {
   reviewPullRequest,
   runOnce,
   runSteps,
+  RunFailed,
   verdictFile,
   prepareWorktree,
   isStale,
@@ -2469,6 +2472,147 @@ describe("the CLI's run", () => {
       expect(
         await gitOutput(["show", `${sha}:work.txt`], { cwd: fixture.repo, env: fixture.env }),
       ).toContain("the work");
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("test_the_runner_runs_the_repositorys_own_gates_in_the_worktree", async () => {
+    // The gates are the repository's, in the repository's order, and they run
+    // where the repository runs them: in the worktree, on the work the agent
+    // left.
+    const fixture = await fixtureWithSetupScript();
+    try {
+      const { gh } = stubGh([{ number: 42, title: "an issue" }]);
+      const gates: string[] = [];
+      const budgets: (number | undefined)[] = [];
+      const run: CommandRunner = async (spec) => {
+        if (spec.command === "bash" || spec.command === "just") {
+          gates.push(`${spec.command} ${spec.args.join(" ")} in ${spec.cwd}`);
+          budgets.push(spec.timeoutMs);
+        }
+        return JSON.stringify({ verdict: "ci.yml  run 1  success" });
+      };
+
+      await runOnce({ ...runOptions(fixture, gh), run });
+
+      // They ran in the worktree — where the repository runs them — and not in
+      // the runner's own checkout.
+      const worktree = issueWorktreePath(join(fixture.root, "worktrees"), 42);
+      expect(gates).toEqual([
+        `bash ./check.sh in ${worktree}`,
+        `just tcheck-evals in ${worktree}`,
+        `just docs-audit in ${worktree}`,
+      ]);
+      // And each gate had the gate budget, not the command runner's default:
+      // a build that runs long is still the gate's own answer.
+      expect(budgets).toEqual([GATE_TIMEOUT_MS, GATE_TIMEOUT_MS, GATE_TIMEOUT_MS]);
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("test_a_gate_that_fails_stops_the_run_and_pushes_nothing", async () => {
+    const fixture = await fixtureWithSetupScript();
+    try {
+      const { gh, calls } = stubGh([{ number: 42, title: "an issue" }]);
+      const run: CommandRunner = async (spec) => {
+        if (spec.command === "bash" && spec.args.includes("./check.sh")) {
+          throw new CommandFailed(
+            1,
+            "bash",
+            [...spec.args],
+            "the build is broken",
+            "detekt found a problem",
+          );
+        }
+        return JSON.stringify({ verdict: "ci.yml  run 1  success" });
+      };
+
+      const failure = await runOnce({ ...runOptions(fixture, gh), run }).then(
+        () => null,
+        (error: unknown) => error,
+      );
+
+      // The run stopped at the gates step, and it says which gate failed.
+      expect(failure).toBeInstanceOf(RunFailed);
+      expect((failure as RunFailed).step).toBe("gates");
+
+      // The claim is released: the issue is free for the next run.
+      expect(
+        calls.some((call) => call.includes("--remove-label agent-in-progress")),
+      ).toBe(true);
+
+      // And nothing is pushed: the work never left the machine.
+      const pushed = (
+        await gitOutput(["ls-remote", fixture.remote, workBranch(42)], {
+          cwd: fixture.repo,
+          env: fixture.env,
+        })
+      ).trim();
+      expect(pushed).toBe("");
+
+      // The record says which gate failed, and carries what it printed.
+      const record = await readFile((failure as RunFailed).record, "utf8");
+      expect(record).toContain("gates — failed");
+      expect(record).toContain("./check.sh");
+      expect(record).toContain("detekt found a problem");
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("test_gates_that_pass_carry_the_run_on_to_the_push", async () => {
+    const fixture = await fixtureWithSetupScript();
+    try {
+      const { gh } = stubGh([{ number: 42, title: "an issue" }]);
+      const run: CommandRunner = async () =>
+        JSON.stringify({ verdict: "ci.yml  run 1  success" });
+
+      const result = await runOnce({ ...runOptions(fixture, gh), run });
+
+      // The work was pushed, and the record says the gates passed.
+      const pushed = (
+        await gitOutput(["ls-remote", fixture.remote, workBranch(42)], {
+          cwd: fixture.repo,
+          env: fixture.env,
+        })
+      ).trim();
+      expect(pushed).not.toBe("");
+
+      const record = await readFile(result.record, "utf8");
+      expect(record).toContain("gates — ok");
+      expect(record).toContain("push — ok");
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("test_a_gate_that_never_returned_an_exit_code_is_not_reported_as_one", async () => {
+    // A gate that was killed, or that never started, has no exit code. The
+    // record must not claim one: "exit 1" would say the gate refused the
+    // change when it never got to answer.
+    const fixture = await fixtureWithSetupScript();
+    try {
+      const { gh } = stubGh([{ number: 42, title: "an issue" }]);
+      const run: CommandRunner = async (spec) => {
+        if (spec.command === "bash" && spec.args.includes("./check.sh")) {
+          throw new Error(
+            `command timed out after ${GATE_TIMEOUT_MS}ms: bash ./check.sh`,
+          );
+        }
+        return JSON.stringify({ verdict: "ci.yml  run 1  success" });
+      };
+
+      const failure = await runOnce({ ...runOptions(fixture, gh), run }).then(
+        () => null,
+        (error: unknown) => error,
+      );
+
+      expect(failure).toBeInstanceOf(RunFailed);
+      const record = await readFile((failure as RunFailed).record, "utf8");
+      expect(record).toContain("the gate ./check.sh failed");
+      expect(record).not.toContain("exit 1");
     } finally {
       await fixture.dispose();
     }

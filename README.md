@@ -10,10 +10,10 @@ and its CI say so.
 
 ## Status
 
-The runner works end to end: claim, worktree, agent, push, pull request, review and re-count have
-been run against a real GitHub repository, unattended and through the live chat. It is not published
-to npm yet — attach it to a Pi session with `--extension`, or install it from a checkout. The plan
-and the specification live in the repository this runner operates on — see
+The runner works end to end: claim, worktree, agent, gates, push, pull request, review and re-count
+have been run against a real GitHub repository, unattended and through the live chat. It is not
+published to npm yet — attach it to a Pi session with `--extension`, or install it from a checkout.
+The plan and the specification live in the repository this runner operates on — see
 [the change directory](https://github.com/gazon1/sing/tree/main/openspec/changes/afk-issue-agent-pipeline)
 and [the contract](https://github.com/gazon1/sing/blob/main/docs/architecture/afk-runner.md).
 
@@ -207,7 +207,7 @@ pi-afk-runner --checkout ~/work/singularity          # --repo defaults to that c
 
 A systemd timer runs it every hour; the unit passes `--all`, so one invocation drains the queue — it
 works every eligible issue in turn, each one to the end of its journey (claim, worktree, triage,
-scope, agent, push, pull request, review, re-count) — and then stops.
+scope, agent, gates, push, pull request, review, re-count) — and then stops.
 
 The **exit code says which step the run reached**, because a scheduler has nothing else to read:
 `0` is a finished run, `1` says an issue could not be worked, `10`..`80` are the steps, `75` says
@@ -249,6 +249,13 @@ run continues them.
 A **small change** — a few files, a few dozen lines — skips the repository's
 pre-push hook; an explicit `--no-verify`, or its absence, decides the rest. CI
 still gates landing in the merge mode.
+
+Before anything is pushed, the runner runs the **repository's own gates** in the
+worktree, on the tree the agent left: the list the work prompt names —
+`./check.sh`, `just tcheck-evals`, `just docs-audit`. A gate that fails ends the
+run there: the claim is released, nothing is pushed, and the record says which
+gate failed and what it printed. The agent is told to run the gates too; the
+runner runs them because an agent that skipped them is not a gate.
 
 ### What a run leaves behind
 
