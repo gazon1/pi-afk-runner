@@ -438,6 +438,9 @@ async function verifyGate(options: MergeOptions, worktreePath: string): Promise<
       // The tail of the output is the evidence; the rest is noise neither the
       // runner nor the record has to hold.
       maxOutputBytes: GATE_OUTPUT_LIMIT_BYTES,
+      // The build the gate starts dies with the gate: a build that keeps
+      // going writes into the worktree the merge pushes.
+      killGroup: true,
     });
   };
   try {

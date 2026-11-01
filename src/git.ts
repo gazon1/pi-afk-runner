@@ -26,7 +26,7 @@
  * only on the remote, and the runner's own checkout is left as it found it.
  */
 
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -54,6 +54,14 @@ export interface CommandSpec {
    * whole.
    */
   readonly maxOutputBytes?: number;
+  /**
+   * Whether a timeout kills the command's whole tree, not just the command.
+   *
+   * The command leads a process group of its own, and the group is what the
+   * timeout kills: a build the command started is the work that must stop
+   * with it.
+   */
+  readonly killGroup?: boolean;
 }
 
 /** Runs a command and returns its standard output. */
@@ -173,6 +181,26 @@ export const runGit: GitRunner = (args, options) =>
   });
 
 /**
+ * Kill the command, and the tree it started when it leads one.
+ *
+ * A negative pid is a process group, so the group is what dies: a gate that
+ * is killed half-way through takes its build with it. The command alone is
+ * not enough — the build it started is the work that must stop, and it is
+ * the build that writes into the worktree.
+ */
+function killTree(child: ChildProcess, group: boolean): void {
+  if (group && child.pid !== undefined) {
+    try {
+      process.kill(-child.pid, "SIGTERM");
+      return;
+    } catch {
+      // The group is gone already, or the command never led one.
+    }
+  }
+  child.kill();
+}
+
+/**
  * Runs a command.
  *
  * `spawn` rather than `execFile`, because `git mktag` reads its payload from
@@ -185,11 +213,16 @@ export const runCommand: CommandRunner = (spec) =>
     const child = spawn(spec.command, [...spec.args], {
       cwd: spec.cwd,
       stdio: ["pipe", "pipe", "pipe"],
+      // The command leads its own process group, when the caller asks for it:
+      // a gate that is killed half-way through must take its build with it,
+      // or the build keeps writing into the worktree the runner restores and
+      // pushes.
+      detached: spec.killGroup === true,
     });
     const stdout = new OutputTail(spec.maxOutputBytes ?? Number.POSITIVE_INFINITY);
     const stderr = new OutputTail(spec.maxOutputBytes ?? Number.POSITIVE_INFINITY);
     const timer = setTimeout(() => {
-      child.kill();
+      killTree(child, spec.killGroup === true);
       reject(
         new CommandTimedOut(
           timeoutMs,

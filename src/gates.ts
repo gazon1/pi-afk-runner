@@ -249,6 +249,9 @@ export async function runGates(options: {
         // The tail of the output is the evidence; the rest is noise the
         // runner neither keeps nor records.
         maxOutputBytes: GATE_OUTPUT_LIMIT_BYTES,
+        // The build the gate starts dies with the gate: a build that keeps
+        // going writes into the worktree the runner restores and pushes.
+        killGroup: true,
       });
     } catch (failure) {
       throw gateFailure(gate, invocation, failure);
