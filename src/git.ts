@@ -275,10 +275,51 @@ export function claimRef(issueNumber: number): string {
   return `refs/tags/${claimRefName(issueNumber)}`;
 }
 
+/**
+ * The prefix every work branch carries.
+ *
+ * The branch's name and the pattern that recognises it are written here and
+ * nowhere else. A name spelled in three places is three chances to disagree,
+ * and the places that disagree are a removal guard that refuses the runner's
+ * own worktrees — or removes somebody else's — and a merge pipeline that no
+ * longer sees the branches it is meant to land.
+ */
+const WORK_BRANCH_PREFIX = "agent/";
+
+/** The segment of the branch's name between the prefix and the issue number. */
+const WORK_BRANCH_SEGMENT = "issue-";
+
+/**
+ * Literal text, safe to put inside a regular expression.
+ *
+ * The name is written once and interpolated into the pattern that recognises
+ * it, so the parts of it that are not the issue number are escaped: a name
+ * that carried a `.` would otherwise match a character it does not have, and
+ * the guard would accept a branch that is not the runner's own.
+ */
+function regexLiteral(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 /** The branch the work goes on. */
 export function workBranch(issueNumber: number): string {
-  return `agent/issue-${issueNumber}`;
+  return `${WORK_BRANCH_PREFIX}${WORK_BRANCH_SEGMENT}${issueNumber}`;
 }
+
+/**
+ * The pattern that recognises a work branch.
+ *
+ * It answers for a branch's name and for the full ref git reports, because
+ * the two callers see different things — the merge pipeline sees a pull
+ * request's head, the removal guard sees `refs/heads/...` — and they ask the
+ * same question: is this the runner's own branch?
+ *
+ * The issue number is the first group, so the merge pipeline reads the issue
+ * out of the very match the guard uses to say yes.
+ */
+export const WORK_BRANCH_PATTERN = new RegExp(
+  `^(?:refs/heads/)?${regexLiteral(WORK_BRANCH_PREFIX)}${regexLiteral(WORK_BRANCH_SEGMENT)}(\\d+)$`,
+);
 
 /**
  * Where an issue's worktree lives.
@@ -501,10 +542,12 @@ export async function readClaimBase(
  * The runner's branches are `agent/issue-<N>` (see `workBranch`), and this is
  * what one `ls-remote` and one `fetch` ask for.
  */
-const WORK_BRANCH_PATTERN = "refs/heads/agent/*";
+const WORK_BRANCH_REF_GLOB = `refs/heads/${WORK_BRANCH_PREFIX}*`;
 
-/** The prefix every work branch carries. */
-const WORK_BRANCH_PREFIX = "agent/";
+/** The line `ls-remote` prints for a work branch. */
+const REMOTE_WORK_BRANCH_LINE = new RegExp(
+  `^[0-9a-f]+\\s+refs/heads/(${regexLiteral(WORK_BRANCH_PREFIX)}.*)$`,
+);
 
 /** A counter that keeps the private refs of one bulk read apart. */
 let bulkCounter = 0;
@@ -521,12 +564,12 @@ async function readRemoteWorkBranches(
   cwd: string,
   options: { readonly remote: string },
 ): Promise<ReadonlySet<string>> {
-  const output = await git(["ls-remote", "--heads", options.remote, WORK_BRANCH_PATTERN], {
+  const output = await git(["ls-remote", "--heads", options.remote, WORK_BRANCH_REF_GLOB], {
     cwd,
   });
   const branches = new Set<string>();
   for (const line of output.split("\n")) {
-    const match = /^[0-9a-f]+\s+refs\/heads\/(agent\/.*)$/.exec(line.trim());
+    const match = REMOTE_WORK_BRANCH_LINE.exec(line.trim());
     if (match !== null) {
       branches.add(match[1] ?? "");
     }
@@ -581,7 +624,7 @@ export async function branchesWithWork(
         "fetch",
         options.remote,
         `+${headRef(options.base)}:${namespace}/base`,
-        `+${WORK_BRANCH_PATTERN}:${namespace}/branch/*`,
+        `+${WORK_BRANCH_REF_GLOB}:${namespace}/branch/*`,
       ],
       { cwd },
     );
@@ -754,8 +797,8 @@ export async function removeWorktree(
   }
 
   if (registeredBranch !== null) {
-    // Only our own worktrees may be removed: those on agent/issue-<N>.
-    if (!/^refs\/heads\/agent\/issue-\d+$/.test(registeredBranch)) {
+    // Only our own worktrees may be removed: those on a branch of ours.
+    if (!WORK_BRANCH_PATTERN.test(registeredBranch)) {
       throw new Error(
         `refusing to remove worktree at ${path}: it is registered to branch ${registeredBranch}`,
       );

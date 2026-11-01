@@ -269,6 +269,27 @@ describe("the merge pipeline", () => {
     }
   });
 
+  it("test_another_authors_pull_request_is_not_a_candidate", async () => {
+    const fixture = await createFixtureRepository({ files: { "scripts/setup-worktree.sh": SETUP } });
+    try {
+      await pushBranch(fixture);
+      const { gh, merged, calls } = stubGh([
+        reviewedPullRequest(),
+        reviewedPullRequest({ number: 8, headRefName: "feature/thing" }),
+      ]);
+
+      const result = await mergeReviewedPullRequests(options(fixture, gh));
+
+      // Only the work pipeline's own branch is a candidate: the pull request on
+      // somebody else's branch is not even looked at.
+      expect(result.merged).toEqual([7]);
+      expect(merged).toEqual([7]);
+      expect(calls.some((call) => call.includes("pr merge 8"))).toBe(false);
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
   it("test_a_failed_or_missing_review_is_not_merged", async () => {
     const fixture = await createFixtureRepository({ files: { "scripts/setup-worktree.sh": SETUP } });
     try {
