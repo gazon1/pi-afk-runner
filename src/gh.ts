@@ -309,6 +309,117 @@ export async function readPullRequest(
   return parsePullRequest(JSON.stringify(parsed[0]));
 }
 
+/** An open pull request, as far as the merge pipeline cares. */
+export interface OpenPullRequest {
+  readonly number: number;
+  readonly title: string;
+  /** The branch the pull request comes from. */
+  readonly headRefName: string;
+  readonly isDraft: boolean;
+  readonly labels: readonly string[];
+  readonly comments: readonly string[];
+}
+
+/**
+ * The arguments that read the open pull requests against a base.
+ *
+ * The merge pipeline reads them all and filters by the branch prefix itself:
+ * `gh` cannot be asked for a head pattern, and the branch name is where the
+ * pipeline's own work is recognised.
+ */
+export function openPullRequestsArgs(repo: string, base: string): string[] {
+  return [
+    "pr",
+    "list",
+    "--repo",
+    repo,
+    "--state",
+    "open",
+    "--base",
+    base,
+    "--limit",
+    String(ISSUE_PAGE_SIZE),
+    "--json",
+    "number,title,headRefName,isDraft,labels,comments",
+  ];
+}
+
+/** Parse the JSON `gh pr list --json` produces. */
+export function parseOpenPullRequests(json: string): OpenPullRequest[] {
+  const parsed: unknown = JSON.parse(json);
+  if (!Array.isArray(parsed)) {
+    return [];
+  }
+  return parsed.map((entry) => {
+    const record = entry as Record<string, unknown>;
+    return {
+      number: typeof record.number === "number" ? record.number : 0,
+      title: typeof record.title === "string" ? record.title : "",
+      headRefName: typeof record.headRefName === "string" ? record.headRefName : "",
+      isDraft: record.isDraft === true,
+      labels: labelNames(record.labels),
+      comments: commentBodies(record.comments),
+    };
+  });
+}
+
+/** Read the open pull requests against a base. */
+export async function readOpenPullRequests(
+  repo: string,
+  base: string,
+  gh: GhRunner = runGh,
+): Promise<OpenPullRequest[]> {
+  return parseOpenPullRequests(await gh(openPullRequestsArgs(repo, base)));
+}
+
+/**
+ * The verdict of the newest marked review comment, or null.
+ *
+ * The gate's own rule: the **newest** comment that opens with the marker
+ * decides, a comment that states two verdicts decides nothing, and a newest
+ * comment with no verdict decides nothing rather than falling back to an older
+ * `pass`. A merge gate that guessed would land a change a review had blocked.
+ */
+export function newestReviewVerdict(
+  comments: readonly string[],
+): "pass" | "fail" | null {
+  for (let index = comments.length - 1; index >= 0; index -= 1) {
+    const body = (comments[index] ?? "").trimStart();
+    if (!body.startsWith(REVIEW_MARKER)) {
+      continue;
+    }
+    const stated = [
+      ...body.matchAll(
+        /^\s*\**\s*verdict\s*\**\s*:\s*\**\s*(pass|fail)\s*\**\s*\.?\s*$/gim,
+      ),
+    ];
+    return stated.length === 1 ? (stated[0]?.[1] as "pass" | "fail") : null;
+  }
+  return null;
+}
+
+/** The arguments that land a pull request: squash it, and remove its branch. */
+export function mergePullRequestArgs(repo: string, number: number): string[] {
+  return [
+    "pr",
+    "merge",
+    String(number),
+    "--repo",
+    repo,
+    "--squash",
+    "--delete-branch",
+  ];
+}
+
+/** Land a pull request. */
+export async function mergePullRequest(
+  repo: string,
+  number: number,
+  gh: GhRunner = runGh,
+): Promise<void> {
+  await gh(mergePullRequestArgs(repo, number));
+}
+
 /** The arguments that read one issue's body and its comments. */
 export function issueArgs(repo: string, issueNumber: number): string[] {
   return [

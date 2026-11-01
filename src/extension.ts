@@ -387,6 +387,10 @@ export function liveFrontDoor(
       talk(ctx, "afk-runner: --all is the CLI's sweep; this command works one issue", "warning");
       return;
     }
+    if (options.merge === true) {
+      talk(ctx, "afk-runner: --merge is the CLI's mode; this command works one issue", "warning");
+      return;
+    }
     // The model is the one this session runs on unless the command names one.
     const model = options.model ?? hostModel(ctx.model) ?? undefined;
 
