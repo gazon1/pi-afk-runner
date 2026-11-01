@@ -5,6 +5,11 @@ run**, or has to become smaller issues. Do not change any file yet.
 
 Read the brief's acceptance criteria and the code they touch.
 
+**The checkout may carry an earlier run's work.** The system prompt names the
+commits this branch has that the base does not. Judge the size of the brief,
+not of what the tree already contains: a piece already on the branch is not a
+second piece, and it is not a reason to split.
+
 1. **A task fits one run** when a single agent can finish it in one pass: the
    criteria are a handful, they touch one area, and none of them needs a
    decision from a human that the brief does not already make. Most issues fit.
