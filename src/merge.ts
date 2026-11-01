@@ -592,5 +592,8 @@ async function resolveWithAgent(
     throw new Error(`conflict markers remain in ${marked.trim().split("\n")[0] ?? "the tree"}`);
   }
 
+  // The resolution is the work; what the session left that the resolution
+  // did not need — a note, a scratch file, a copy — is not. Only those go.
+  await options.git(["clean", "-fd"], { cwd: worktreePath });
   await commitAll(options.git, worktreePath, "merge: bring the branch up to date");
 }
