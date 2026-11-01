@@ -64,6 +64,36 @@ function fakePi() {
   return { pi: pi as unknown as ExtensionAPI, commands, handlers, entries };
 }
 
+/**
+ * The rejections a test catches, and the listeners it gives back afterwards.
+ *
+ * The run's own promise rejects when its reporting fails, and nothing catches
+ * that rejection: the host's process would end on it. That is another issue's
+ * bug, and a test that drives the failure path would fail the suite on it, so
+ * the rejection is caught here and the test runner's own listeners are put
+ * back.
+ */
+function catchRejections(): {
+  readonly rejections: unknown[];
+  readonly release: () => void;
+} {
+  const listeners = process.listeners("unhandledRejection");
+  const rejections: unknown[] = [];
+  process.removeAllListeners("unhandledRejection");
+  process.on("unhandledRejection", (reason: unknown) => {
+    rejections.push(reason);
+  });
+  return {
+    rejections,
+    release: () => {
+      process.removeAllListeners("unhandledRejection");
+      for (const listener of listeners) {
+        process.on("unhandledRejection", listener as (reason: unknown) => void);
+      }
+    },
+  };
+}
+
 /** A fake host context: the footer, the notifications, and the session's own entries. */
 function fakeContext(
   options: {
@@ -113,6 +143,16 @@ function fakeContext(
 
 /** Where the fake session says its transcript is. */
 const TRANSCRIPT = "/tmp/afk-e2e/transcript.jsonl";
+
+/** The host's own words for "the context you hold is stale". */
+const STALE_SESSION =
+  "This extension ctx is stale after session replacement or reload.";
+
+/** The host's UI, as a test needs it: it can be made to fail. */
+type FakeUi = {
+  setStatus: (key: string, text: string | undefined) => void;
+  notify: (message: string, kind?: string) => void;
+};
 
 /** A picture the human pasted, as the queue carries it. */
 const IMAGE = { type: "image" as const, data: "iVBORw0KGgo=", mimeType: "image/png" };
@@ -538,6 +578,59 @@ describe("the run the front door owns", () => {
     }
   });
 
+  it("keeps a worktree that git still knows, and the work in it", async () => {
+    const fixture = await createFixtureRepository();
+    const worktreeRoot = join(fixture.root, "worktrees");
+    const worktreePath = join(worktreeRoot, "issue-42");
+    try {
+      const git = (args: readonly string[]) =>
+        gitOutput(args, { cwd: fixture.repo, env: fixture.env });
+      await git(["branch", "agent/issue-42"]);
+      await mkdir(worktreeRoot, { recursive: true });
+      await git(["worktree", "add", worktreePath, "agent/issue-42"]);
+      // The run's work: a file the worktree holds and git does not know.
+      await writeFile(join(worktreePath, "notes.md"), "the work of the run\n");
+
+      const host = fakePi();
+      const fake = fakeSession();
+      const created = deferred();
+      const release = deferred();
+      const work = async (options: RunOptions): Promise<RunResult> => {
+        options.onIssue?.({ number: 42, title: "Fix the thing" });
+        await options.session({ cwd: worktreePath, systemPromptSections: {} });
+        created.resolve();
+        await release.promise;
+        return { issue: 42, outcome: "completed", steps: [], record: "" };
+      };
+
+      const door = liveFrontDoor(host.pi, { session: async () => fake.session, work });
+      const { ctx, switches } = fakeContext();
+      await door.start(
+        `--repo gazon1/cardinalfish --checkout ${fixture.repo} --worktree-root ${worktreeRoot}`,
+        ctx,
+      );
+      await created.promise;
+
+      // The auto-attach puts the worktree back before it switches this chat:
+      // wait for the switch, so the assertion below is about the worktree and
+      // not about how far the attach has come.
+      await vi.waitFor(() => expect(switches).toEqual([TRANSCRIPT]));
+
+      release.resolve();
+      await vi.waitFor(() => {
+        expect(host.entries.length).toBeGreaterThan(0);
+      });
+
+      // The worktree is registered, so it carries the run's work: putting it
+      // back is leaving it alone.
+      expect(existsSync(worktreePath)).toBe(true);
+      expect(existsSync(join(worktreePath, "notes.md"))).toBe(true);
+      expect(await git(["worktree", "list", "--porcelain"])).toContain(worktreePath);
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
   it("leaves a slash command to the host session", async () => {
     const checkout = await mkdtemp(join(tmpdir(), "afk-live-"));
     try {
@@ -565,6 +658,117 @@ describe("the run the front door owns", () => {
 
       expect(reply).toEqual({ action: "continue" });
 
+      release.resolve();
+      await vi.waitFor(() => {
+        expect(host.entries.length).toBeGreaterThan(0);
+      });
+    } finally {
+      await rm(checkout, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("a host that stops answering", () => {
+  it("lets a failure that is not a gone session out", async () => {
+    const checkout = await mkdtemp(join(tmpdir(), "afk-live-"));
+    try {
+      const host = fakePi();
+      const door = liveFrontDoor(host.pi);
+      const { ctx } = fakeContext();
+      const ui = ctx.ui as unknown as FakeUi;
+      ui.notify = () => {
+        throw new Error("the notification is broken");
+      };
+
+      await expect(
+        door.start(`--repo gazon1/cardinalfish --checkout ${checkout} --all`, ctx),
+      ).rejects.toThrow("the notification is broken");
+    } finally {
+      await rm(checkout, { recursive: true, force: true });
+    }
+  });
+
+  it("lets a failure of the status line out as well", async () => {
+    const checkout = await mkdtemp(join(tmpdir(), "afk-live-"));
+    try {
+      const host = fakePi();
+      const door = liveFrontDoor(host.pi);
+      const { ctx } = fakeContext();
+      const ui = ctx.ui as unknown as FakeUi;
+      ui.setStatus = () => {
+        throw new Error("the footer is broken");
+      };
+
+      await expect(
+        door.start(`--repo gazon1/cardinalfish --checkout ${checkout}`, ctx),
+      ).rejects.toThrow("the footer is broken");
+    } finally {
+      await rm(checkout, { recursive: true, force: true });
+    }
+  });
+
+  it("says what failed even when the status line cannot be written", async () => {
+    const checkout = await mkdtemp(join(tmpdir(), "afk-live-"));
+    const caught = catchRejections();
+    try {
+      const host = fakePi();
+      const work = async (options: RunOptions): Promise<RunResult> => {
+        options.onIssue?.({ number: 42, title: "Fix the thing" });
+        throw new Error("the run broke");
+      };
+      const door = liveFrontDoor(host.pi, { work });
+
+      const { ctx, notes } = fakeContext();
+      const ui = ctx.ui as unknown as FakeUi;
+      ui.setStatus = (_key, text) => {
+        // The stage cannot be written; the notification still can.
+        if (text !== undefined && text.includes("failed")) {
+          throw new Error("the footer is broken");
+        }
+      };
+
+      await door.start(`--repo gazon1/cardinalfish --checkout ${checkout}`, ctx);
+      // The stage that could not be written is what escapes the run's promise.
+      await vi.waitFor(() => {
+        expect(caught.rejections.length).toBe(1);
+      });
+      // What failed was said before the stage was published, so the human hears
+      // it even though the footer is broken.
+      expect(notes.map((note) => note.message)).toContain("afk-runner: the run broke");
+    } finally {
+      caught.release();
+      await rm(checkout, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps quiet when the session it reports through is gone", async () => {
+    const checkout = await mkdtemp(join(tmpdir(), "afk-live-"));
+    try {
+      const host = fakePi();
+      const fake = fakeSession();
+      const created = deferred();
+      const release = deferred();
+      const work = async (options: RunOptions): Promise<RunResult> => {
+        options.onIssue?.({ number: 42, title: "Fix the thing" });
+        await options.session({ cwd: checkout, systemPromptSections: {} });
+        created.resolve();
+        await release.promise;
+        return { issue: 42, outcome: "completed", steps: [], record: "" };
+      };
+
+      const door = liveFrontDoor(host.pi, { session: async () => fake.session, work });
+      const { ctx } = fakeContext();
+      const ui = ctx.ui as unknown as FakeUi;
+      ui.setStatus = () => {
+        throw new Error(STALE_SESSION);
+      };
+      ui.notify = () => {
+        throw new Error(STALE_SESSION);
+      };
+
+      // The session is gone; the run is not. It goes on without the footer.
+      await door.start(`--repo gazon1/cardinalfish --checkout ${checkout}`, ctx);
+      await created.promise;
       release.resolve();
       await vi.waitFor(() => {
         expect(host.entries.length).toBeGreaterThan(0);
