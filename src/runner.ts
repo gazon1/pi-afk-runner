@@ -39,6 +39,7 @@ import {
   UNTRUSTED_INPUT_SECTION,
   briefFence,
   createVerdictTool,
+  cutOffMessage,
   runPromptArray,
   startAgent,
   type ReviewVerdict,
@@ -649,7 +650,13 @@ export async function reviewPullRequest(options: {
   if (result.aborted) {
     // The same cut the work session reports; a review that did not finish is
     // not a review that stated no verdict.
-    throw new Error("the review's session was cut off before its last turn");
+    throw new Error(
+      cutOffMessage({
+        what: "the review's session",
+        deadlineMs: options.deadlineMs,
+        reason: result.cutReason,
+      }),
+    );
   }
 
   const verdict = holder.value;
@@ -800,7 +807,13 @@ export async function fixWorktree(options: {
     ...(options.schedule === undefined ? {} : { schedule: options.schedule }),
   });
   if (result.aborted) {
-    throw new Error("the fix's session was cut off before its last turn");
+    throw new Error(
+      cutOffMessage({
+        what: "the fix's session",
+        deadlineMs: options.deadlineMs,
+        reason: result.cutReason,
+      }),
+    );
   }
 }
 
@@ -1157,7 +1170,7 @@ export async function runSteps(options: {
   readonly heading?: string;
   readonly subject?: string;
   /** What a failure releases: the claim, the worktree, the ref. */
-  readonly release?: () => Promise<void>;
+  readonly release?: () => Promise<string | void>;
   /** Told about every step, as it finishes. */
   readonly onStep?: (record: StepRecord) => void;
   /** Told about a step as it starts. */
@@ -1204,8 +1217,8 @@ export async function runSteps(options: {
   // an issue nobody can take.
   if (failure !== null && options.release !== undefined) {
     try {
-      await options.release();
-      steps.push({ step: "release", outcome: "ok", detail: "" });
+      const detail = await options.release();
+      steps.push({ step: "release", outcome: "ok", detail: detail ?? "" });
     } catch (releaseError) {
       steps.push({
         step: "release",
@@ -1619,6 +1632,36 @@ async function gateTheTree(options: {
 export async function restoreWorktree(git: GitRunner, cwd: string): Promise<void> {
   await git(["reset", "--hard"], { cwd });
   await git(["clean", "-fd"], { cwd });
+}
+
+/**
+ * Keep the work a run that did not finish left behind.
+ *
+ * The worktree goes when the run ends, and what was only in the worktree goes
+ * with it. The agent's own commits are on the branch; the files it had not
+ * committed yet are not. They are committed here, on the branch the next run
+ * continues, so the next run starts from the work rather than from the base.
+ *
+ * The commit is local. The branch is not pushed, so the issue does not derive
+ * as "pushed" and the next run works the issue rather than planning a pull
+ * request for work nobody has reviewed.
+ */
+export async function preserveUnfinishedWork(options: {
+  readonly git: GitRunner;
+  readonly cwd: string;
+  /** The branch the work is kept on. */
+  readonly branch: string;
+}): Promise<string | null> {
+  const status = await options.git(["status", "--porcelain"], { cwd: options.cwd });
+  if (status.trim() === "") {
+    return null;
+  }
+  await commitAll(
+    options.git,
+    options.cwd,
+    "wip: the work a run that did not finish left behind",
+  );
+  return `the unfinished work is on ${options.branch}`;
 }
 
 /**
@@ -2101,8 +2144,15 @@ async function runPlan(
         }
         if (result.aborted) {
           // The deadline is one reason a turn is cut; a human stopping the run is
-          // another, and the message must not claim a clock it cannot see.
-          throw new Error("the agent's session was cut off before its last turn");
+          // another. The runner can tell them apart, and the record has to say
+          // which one it was: a record that cannot is not a record.
+          throw new Error(
+            cutOffMessage({
+              what: "the agent's session",
+              deadlineMs: sessionBudgetMs,
+              reason: result.cutReason,
+            }),
+          );
         }
         state.decision = result.decision;
         state.reason = result.reason;
@@ -2443,6 +2493,17 @@ async function runPlan(
         }
         return;
       }
+      // The work a failed run did is durable: what the agent left in the
+      // worktree is committed to the branch before the worktree goes, so the
+      // next run continues it instead of starting again.
+      const kept =
+        state.worktreePath === ""
+          ? null
+          : await preserveUnfinishedWork({
+              git: options.git,
+              cwd: state.worktreePath,
+              branch: workBranch(issue.number),
+            }).catch(() => null);
       await releaseRun({
         repo: options.repo,
         remote: options.remote,
@@ -2452,6 +2513,7 @@ async function runPlan(
         git: options.git,
         gh: options.gh,
       });
+      return kept ?? "";
     },
   });
 

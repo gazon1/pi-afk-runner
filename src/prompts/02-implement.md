@@ -2,6 +2,11 @@
 
 The plan is settled. Now do the work.
 
+**The tree may carry the unfinished work of an earlier run.** A run that did
+not finish leaves its work on the branch, and this run continues it: read the
+tree and `git log` before you write, and finish what is there rather than
+starting again. A commit that says `wip:` is an earlier run's work.
+
 1. **Make the change.** Small, in the shape the repository already uses. Match
    the surrounding code: its names, its structure, its level of abstraction.
    Do not add a layer because a layer is possible — add one because something

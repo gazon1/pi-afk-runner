@@ -3174,7 +3174,10 @@ describe("the CLI's run", () => {
     // spends its whole budget must not leave the gates nothing to run with.
     const shares = budgetShares(DEFAULT_DEADLINE_MS);
     expect(shares.gatesMs).toBe(3 * GATE_TIMEOUT_MS);
-    expect(shares.sessionMs).toBe(60 * 60 * 1000);
+    // The session's share is the two hours the target's work costs: it
+    // implements, it runs the gates, and on a screen change it runs the
+    // desktop suite, which is a quarter of an hour on its own.
+    expect(shares.sessionMs).toBe(2 * 60 * 60 * 1000);
     expect(shares.reviewMs).toBeGreaterThan(0);
     expect(shares.sessionMs + shares.gatesMs + shares.reviewMs).toBe(DEFAULT_DEADLINE_MS);
 
@@ -3186,6 +3189,188 @@ describe("the CLI's run", () => {
     expect(small.sessionMs + small.gatesMs + small.reviewMs).toBeLessThanOrEqual(
       DEFAULT_DEADLINE_MS / 10,
     );
+  });
+
+  it("test_the_record_says_the_deadline_cut_the_session", async () => {
+    // The deadline and a human's stop look the same to the runner's caller:
+    // both are a cut turn. The record has to say which one it was, or the
+    // reader has to go and find the session's own log to learn it.
+    const fixture = await fixtureWithSetupScript();
+    try {
+      const { gh } = stubGh([{ number: 42, title: "an issue" }]);
+
+      await expect(
+        runOnce({
+          ...runOptions(fixture, gh),
+          // A deadline of nothing: the turn below never settles on its own.
+          deadlineMs: 1,
+          session: async () => ({
+            async prompt() {
+              await new Promise<void>(() => {
+                // never settles on its own
+              });
+            },
+            async abort() {},
+            dispose() {},
+          }),
+        }),
+      ).rejects.toThrow(/the agent's session hit its .* deadline/);
+
+      // And the record says it too: the record is what a reader has.
+      const record = await readFile(
+        join(
+          fixture.repo,
+          "build",
+          "diagnostics",
+          "issue-42",
+          "2026-10-30T09-00-00-000Z-abcdef12.md",
+        ),
+        "utf8",
+      );
+      expect(record).toContain("session — failed");
+      expect(record).toContain("the agent's session hit its");
+      expect(record).toContain("deadline");
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("test_a_failed_run_leaves_its_unfinished_work_on_the_branch", async () => {
+    // The worktree goes when the run ends, and what was only in the worktree
+    // goes with it. The agent's own commits are on the branch; the files it
+    // had not committed yet are not — so they are committed there, and the
+    // next run continues them.
+    const fixture = await fixtureWithSetupScript();
+    try {
+      const { gh } = stubGh([{ number: 42, title: "an issue" }]);
+
+      await expect(
+        runOnce({
+          ...runOptions(fixture, gh),
+          // The session keeps a share of it: long enough for the agent's turn
+          // to write its file, short enough for the test.
+          deadlineMs: 2000,
+          session: async ({ cwd }) => ({
+            async prompt() {
+              await writeFile(join(cwd, "half-done.txt"), "the half of it\n", "utf8");
+              await new Promise<void>(() => {
+                // never settles on its own
+              });
+            },
+            async abort() {},
+            dispose() {},
+          }),
+        }),
+      ).rejects.toThrow(/the agent's session hit its .* deadline/);
+
+      // The work is on the branch, under a message that says what it is.
+      const log = await gitOutput(["log", "--oneline", workBranch(42)], {
+        cwd: fixture.repo,
+        env: fixture.env,
+      });
+      expect(log).toContain("wip: the work a run that did not finish left behind");
+      const kept = await gitOutput(["show", `${workBranch(42)}:half-done.txt`], {
+        cwd: fixture.repo,
+        env: fixture.env,
+      });
+      expect(kept).toContain("the half of it");
+
+      // And the record says where it is: a reader must not have to guess.
+      const record = await readFile(
+        join(
+          fixture.repo,
+          "build",
+          "diagnostics",
+          "issue-42",
+          "2026-10-30T09-00-00-000Z-abcdef12.md",
+        ),
+        "utf8",
+      );
+      expect(record).toContain(`the unfinished work is on ${workBranch(42)}`);
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("test_the_next_run_continues_the_work_the_failed_run_left", async () => {
+    // The point of keeping the work: the next run starts from it.
+    const fixture = await fixtureWithSetupScript();
+    try {
+      const { gh } = stubGh([{ number: 42, title: "an issue" }]);
+
+      // The first run is cut off with half the work done.
+      await expect(
+        runOnce({
+          ...runOptions(fixture, gh),
+          deadlineMs: 2000,
+          session: async ({ cwd }) => ({
+            async prompt() {
+              await writeFile(join(cwd, "half-done.txt"), "the half of it\n", "utf8");
+              await new Promise<void>(() => {
+                // never settles on its own
+              });
+            },
+            async abort() {},
+            dispose() {},
+          }),
+        }),
+      ).rejects.toThrow();
+
+      // The second run works the issue again, and its work goes on top of what
+      // the first run left.
+      await runOnce({
+        ...runOptions(fixture, gh),
+        session: async ({ cwd, tools }) => {
+          if (isReviewer(tools)) {
+            return {
+              async prompt() {
+                const tool = tools?.[0] as unknown as {
+                  execute: (id: string, params: unknown) => Promise<unknown>;
+                };
+                await tool.execute("call-1", { verdict: "pass", findings: [] });
+              },
+              async abort() {},
+              dispose() {},
+            };
+          }
+          let committed = false;
+          return {
+            async prompt() {
+              if (!committed) {
+                committed = true;
+                await writeFile(join(cwd, "finished.txt"), "the rest of it\n", "utf8");
+                await runGit(["add", "-A"], { cwd });
+                await runGit(
+                  [
+                    "-c",
+                    "user.name=Fixture",
+                    "-c",
+                    "user.email=fixture@example.com",
+                    "commit",
+                    "-q",
+                    "-m",
+                    "the rest of the work",
+                  ],
+                  { cwd },
+                );
+              }
+            },
+            async abort() {},
+            dispose() {},
+          };
+        },
+      });
+
+      // The branch carries both: the earlier run's work and the later run's.
+      const files = await gitOutput(["ls-tree", "--name-only", workBranch(42)], {
+        cwd: fixture.repo,
+        env: fixture.env,
+      });
+      expect(files).toContain("half-done.txt");
+      expect(files).toContain("finished.txt");
+    } finally {
+      await fixture.dispose();
+    }
   });
 
   it("test_one_invocation_acts_on_one_issue", async () => {

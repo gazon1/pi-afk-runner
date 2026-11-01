@@ -38,8 +38,8 @@ repository's gates — `./check.sh`, `just tcheck-evals`, `just docs-audit` — 
 the worktree, so `just` and whatever those gates call have to be on the machine
 the timer runs on, and on the PATH the unit gives it. A gate that could not run
 says so and ends the run (`45`); it does not look like a gate that refused the
-change. The run's budget is divided into three shares: the session keeps an
-hour, the gates keep an hour each — the same the merge door gives the same
+change. The run's budget is divided into three shares: the session keeps two
+hours, the gates keep an hour each — the same the merge door gives the same
 gate — and the review keeps what is left. A sweep that works several issues
 takes several hours — the timer fires hourly, and the lock keeps the ticks
 from overlapping.
@@ -82,7 +82,8 @@ takes that issue's lock while it is being worked, so a hand-started `--issue
 
 `TimeoutStartSec` is `infinity`. A sweep has no fixed length, so any finite
 value is a kill in the middle of one. Each issue's turn is still bounded by the
-runner's own one-hour deadline. The cost of the backstop being gone: a genuinely
+runner's own budget: the session's share of it. The cost of the backstop being
+gone: a genuinely
 hung `gh` or `git` call is not stopped by systemd, and the timer will not start
 a second instance while this one runs. The runner's own bounds are what stop it:
 a command is killed after fifteen minutes, and the run stops waiting for it
@@ -138,8 +139,9 @@ out of the queue. The next run that finds the claim stale takes it over: the
 stale claim's ref is deleted, the issue is claimed again, and the work is redone
 — the session that made it is gone with the process that died.
 
-`--stale-after-ms` is how long a claim may sit before that happens. It is two
-hours here: a run is capped at the deadline, and the issue's lock means no
+`--stale-after-ms` is how long a claim may sit before that happens. It is eight
+hours here: a run is capped at the runner's own budget — the three shares added
+up, five and a half hours — and the issue's lock means no
 second runner on this machine can be working that issue. So a claim a killed sweep left
 behind is taken over a tick or two later, not after a week. A human who comments
 on the issue moves its last-update time, and the comment defers the take-over
