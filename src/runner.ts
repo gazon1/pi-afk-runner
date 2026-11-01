@@ -35,10 +35,12 @@ import { GUARD_POLICY } from "./guard.js";
 import {
   UNTRUSTED_INPUT_RULE,
   UNTRUSTED_INPUT_SECTION,
+  addUsage,
   createVerdictTool,
   runPromptArray,
   startAgent,
   type ReviewVerdict,
+  type RunUsage,
   type Scheduler,
   type SessionFactory,
 } from "./session.js";
@@ -498,6 +500,8 @@ export interface ReviewOutcome {
   readonly comment: string;
   /** The CI line, when the runner read one. */
   readonly ciVerdict: string | null;
+  /** The tokens and the cost of the review, when the provider reported them. */
+  readonly usage?: RunUsage;
 }
 
 /**
@@ -533,12 +537,18 @@ export async function reviewPullRequest(options: {
   readonly schedule?: Scheduler;
 }): Promise<ReviewOutcome> {
   const holder: { value?: ReviewVerdict } = {};
+  // What the review cost, when the provider said: the session's events carry
+  // the numbers, and the factory is the one that sees them.
+  let usage: RunUsage | undefined;
   const session = await options.factory({
     cwd: options.cwd,
     systemPromptSections: {
       [UNTRUSTED_INPUT_SECTION]: UNTRUSTED_INPUT_RULE,
     },
     tools: [createVerdictTool(holder)],
+    onUsage: (reported) => {
+      usage = addUsage(usage, reported);
+    },
   });
 
   // The session belongs to `runPromptArray` once it is given one: it disposes
@@ -590,6 +600,7 @@ export async function reviewPullRequest(options: {
     verdict: verdict.verdict,
     comment,
     ciVerdict: ciLine === null ? null : `${CI_BEFORE_RECOUNT}: ${ciLine}`,
+    ...(usage === undefined ? {} : { usage }),
   };
 }
 
@@ -1082,6 +1093,21 @@ export interface RunResult {
   readonly record: string;
   /** The derived state that made a named issue unworkable. */
   readonly derivedState?: DerivedState;
+  /** The issue's title, when the run knows it. */
+  readonly title?: string;
+  /** The pull request the run opened, or found. */
+  readonly pullRequest?: number;
+  /**
+   * The verdict the review reached.
+   *
+   * Absent when there was no review — a run that was cut short before the
+   * reviewer answered has no verdict, and saying `pass` would be a lie.
+   */
+  readonly verdict?: "pass" | "fail";
+  /** How long the run took, in milliseconds. */
+  readonly durationMs?: number;
+  /** The tokens and the cost, when the provider reported them. */
+  readonly usage?: RunUsage;
 }
 
 /** The commit the worktree is at. */
@@ -1362,6 +1388,7 @@ async function runPlan(
 ): Promise<RunResult> {
   const issue = plan.issue;
   options.onIssue?.(issue);
+  const startedAt = Date.now();
   const state = {
     claimed: false,
     base: "",
@@ -1369,7 +1396,10 @@ async function runPlan(
     pullRequest: plan.pullRequest?.number ?? 0,
     reviewedSha: "",
     slug: null as string | null,
-    verdict: "pass" as "pass" | "fail",
+    // The verdict is null until a review states one: a run that never got one
+    // has no verdict, and the re-count falls back to the pass it always wrote.
+    verdict: null as "pass" | "fail" | null,
+    usage: undefined as RunUsage | undefined,
   };
 
   const works = plan.kind === "work" || plan.kind === "reclaim";
@@ -1426,6 +1456,9 @@ async function runPlan(
       name: "session",
       run: async () => {
         workSessionStartedAt = Date.now();
+        // What the work cost, when the provider said what it cost: the
+        // session's events carry the numbers, and the factory reports them.
+        let usage: RunUsage | undefined;
         const result = await startAgent({
           factory: options.session,
           cwd: state.worktreePath,
@@ -1435,8 +1468,12 @@ async function runPlan(
           gh: options.gh,
           deadlineMs: options.deadlineMs,
           ...(options.stopped === undefined ? {} : { stopped: options.stopped }),
+          onUsage: (reported) => {
+            usage = addUsage(usage, reported);
+          },
         });
         const workElapsedMs = workSessionStartedAt === undefined ? 0 : Date.now() - workSessionStartedAt;
+        state.usage = addUsage(state.usage, usage);
         if (workElapsedMs >= options.deadlineMs) {
           reviews = false;
         }
@@ -1545,6 +1582,8 @@ async function runPlan(
           ...(options.stopped === undefined ? {} : { stopped: options.stopped }),
         });
         state.verdict = outcome.verdict;
+        // And what the review cost, on top of the work's own.
+        state.usage = addUsage(state.usage, outcome.usage);
         return outcome.ciVerdict === null
           ? outcome.verdict
           : `${outcome.verdict} — ${outcome.ciVerdict}`;
@@ -1578,7 +1617,7 @@ async function runPlan(
         join(directory, `${state.slug}.md`),
         verdictFile({
           slug: state.slug,
-          verdict: state.verdict,
+          verdict: state.verdict ?? "pass",
           date: now.toISOString().slice(0, 10),
           pullRequest: state.pullRequest,
           reviewed: state.reviewedSha,
@@ -1648,5 +1687,10 @@ async function runPlan(
     outcome: "completed",
     steps: outcome.steps,
     record: outcome.record,
+    title: issue.title,
+    ...(state.pullRequest === 0 ? {} : { pullRequest: state.pullRequest }),
+    ...(state.verdict === null ? {} : { verdict: state.verdict }),
+    durationMs: Date.now() - startedAt,
+    ...(state.usage === undefined ? {} : { usage: state.usage }),
   };
 }

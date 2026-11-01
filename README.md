@@ -209,6 +209,23 @@ The **exit code says which step the run reached**, because a scheduler has nothi
 another runner holds the lock and `76` says the lock could not be taken. The unit and the codes are
 in [systemd/](systemd/README.md).
 
+A finished run ends with a **summary** — the facts a reader wants, one per line, because a journal
+reads lines and a table wraps:
+
+```
+issue 42 — Fix the thing
+pull request: #1040
+review: pass
+duration: 3m 12s
+tokens: 12345
+cost: $0.42
+record: /path/to/the/checkout/build/diagnostics/issue-42/2026-10-30T09-00-00-000Z-abcdef12.md
+```
+
+The tokens and the cost are **absent** when the provider reported none — a zero is a number, and a
+number a reader would trust. With `--all`, every issue gets one line and the sweep ends with its
+total.
+
 The lock is a real `flock`, held for the whole run: a lock file a killed runner leaves behind would
 block the next one for ever, and a marker is not a lock — adding a label is idempotent. It needs
 `flock(1)`, so the host is a Linux workstation; elsewhere the runner says the lock is unusable

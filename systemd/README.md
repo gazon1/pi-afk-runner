@@ -66,6 +66,20 @@ runner's own one-hour deadline. The cost of the backstop being gone: a genuinely
 hung `gh` or `git` call is not stopped by systemd, and the timer will not start
 a second instance while this one runs.
 
+## What the journal says
+
+The unit's output is the journal, and it says what the sweep did: one line per
+issue, and the sweep's total at the end.
+
+```
+issue 42 — Fix the thing — pr #1040 — review pass — 3m 12s — 12345 tokens — $0.42 — record /path/to/the/checkout/build/diagnostics/issue-42/2026-10-30T09-00-00-000Z-abcdef12.md
+issue 43 — Fix the other thing — pr #1041 — review pass — 1m 5s — 6789 tokens — $0.21 — record /path/to/the/checkout/build/diagnostics/issue-43/2026-10-30T10-12-44-901Z-b2c4f6a1.md
+total: 2 of 2 issues worked — 4m 17s — 19134 tokens — $0.63
+```
+
+The tokens and the cost are absent when the provider reported none — a zero is
+a number, and a number a reader would trust.
+
 ## `--no-verify`
 
 The runner pushes through the target repository's own pre-push hook, which is

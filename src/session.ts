@@ -199,6 +199,89 @@ export interface TurnMessage {
   readonly errorMessage?: string;
 }
 
+/**
+ * The tokens and the cost of a run, when the provider reported them.
+ *
+ * Absent means the provider reported nothing: a run whose tokens are unknown
+ * must not claim zero tokens, because zero is a number a reader would trust.
+ */
+export interface RunUsage {
+  readonly totalTokens: number;
+  /** The cost, when a provider reported one. */
+  readonly cost?: number;
+}
+
+/**
+ * The usage an assistant message carries, when the provider reported any.
+ *
+ * The numbers live on the message the session's **events** carry — the same
+ * `message_end` event the CLI already handles — and a provider that reports
+ * no token counts leaves them at zero. So **zero is not a report**: a turn
+ * that reads zero has nothing to say, and a summary that says "0 tokens"
+ * would be a number a reader would trust.
+ */
+export function usageFromMessage(message: unknown): RunUsage | undefined {
+  const usage = (
+    message as
+      | {
+          readonly usage?: {
+            readonly totalTokens?: unknown;
+            readonly cost?: { readonly total?: unknown };
+          };
+        }
+      | null
+      | undefined
+  )?.usage;
+  const tokens = reportedNumber(usage?.totalTokens);
+  const cost = reportedNumber(usage?.cost?.total);
+  if (tokens <= 0 && cost <= 0) {
+    // The provider said nothing about this turn.
+    return undefined;
+  }
+  return {
+    totalTokens: tokens,
+    ...(cost > 0 ? { cost } : {}),
+  };
+}
+
+/**
+ * A number a provider reported, or zero.
+ *
+ * The SDK's usage is read structurally — the runner does not depend on the
+ * SDK's package — so the numbers arrive as `unknown`, and a number that is
+ * not one is no number at all.
+ */
+function reportedNumber(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+/**
+ * Two runs' usage, added.
+ *
+ * The cost is added only when one of them reported one: a run whose work
+ * session reported no cost and whose review reported one has a cost, and a
+ * run whose neither reported one has none.
+ */
+export function addUsage(
+  first: RunUsage | undefined,
+  second: RunUsage | undefined,
+): RunUsage | undefined {
+  if (first === undefined) {
+    return second;
+  }
+  if (second === undefined) {
+    return first;
+  }
+  const cost =
+    first.cost === undefined && second.cost === undefined
+      ? undefined
+      : (first.cost ?? 0) + (second.cost ?? 0);
+  return {
+    totalTokens: first.totalTokens + second.totalTokens,
+    ...(cost === undefined ? {} : { cost }),
+  };
+}
+
 /** The error a settled turn ended on, or null. */
 function turnFailure(message: TurnMessage | undefined): Error | null {
   if (message?.role !== "assistant" || message.stopReason !== "error") {
@@ -246,6 +329,14 @@ export type SessionFactory = (options: {
   readonly systemPromptSections: Record<string, string>;
   /** The tools the session is given — the verdict tool, for a review. */
   readonly tools?: readonly ToolDefinition[];
+  /**
+   * Told what a turn cost, when the provider reported it.
+   *
+   * The **events** the session emits carry the usage, and the factory is the
+   * one that sees them: the runner asks for the report here, and the factory
+   * answers with what the events said.
+   */
+  readonly onUsage?: (usage: RunUsage) => void;
 }) => Promise<AgentSession>;
 
 /** Schedules an action, and returns the way to cancel it. */
@@ -404,6 +495,13 @@ export async function startAgent(options: {
   /** Whether somebody has stopped the run. */
   readonly stopped?: () => boolean;
   readonly schedule?: Scheduler;
+  /**
+   * Told what a turn cost, when the provider reported it.
+   *
+   * The session's events carry the numbers, and the factory is the one that
+   * sees them: it reports what the events said, and the run adds it up.
+   */
+  readonly onUsage?: (usage: RunUsage) => void;
 }): Promise<PromptArrayResult> {
   const prompts = await readPrompts(options.promptsDirectory ?? promptsDirectory());
   // The issue's body and its comments are read here, because the brief is
@@ -435,6 +533,7 @@ export async function startAgent(options: {
         gh: options.gh ?? runGh,
       }),
     ],
+    ...(options.onUsage === undefined ? {} : { onUsage: options.onUsage }),
   });
   return runPromptArray({
     session,

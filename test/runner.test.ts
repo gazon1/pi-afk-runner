@@ -9,6 +9,7 @@ import {
   BRIEF_MARKER,
   BRIEF_SECTION,
   VERDICT_TOOL_NAME,
+  addUsage,
   fenceIssueBody,
   fenceIssueComments,
   findBrief,
@@ -16,10 +17,18 @@ import {
   readPrompts,
   runPromptArray,
   startAgent,
+  usageFromMessage,
   type AgentSession,
   type SessionFactory,
 } from "../src/session.js";
-import { assistantTextLines, repoFromRemoteUrl, resolveRepo } from "../src/cli.js";
+import {
+  assistantTextLines,
+  formatCost,
+  formatDuration,
+  repoFromRemoteUrl,
+  resolveRepo,
+  runSummary,
+} from "../src/cli.js";
 import { createLeftoverTool, LEFTOVER_TOOL_NAME, MAX_LEFTOVERS_PER_RUN } from "../src/leftovers.js";
 import { pullRequestArgs } from "../src/gh.js";
 import {
@@ -1100,6 +1109,46 @@ describe("the agent's session", () => {
     expect(prompts).toHaveLength(4);
     expect(prompts[0]).toContain("## Agent Brief");
     expect(promptsDirectory()).toContain("prompts");
+  });
+
+  it("reads the tokens and the cost off a message", () => {
+    // The provider's numbers ride on the assistant message that the session's
+    // events carry — the same `message_end` event the CLI already handles.
+    expect(
+      usageFromMessage({
+        role: "assistant",
+        usage: { totalTokens: 100, cost: { total: 0.1 } },
+      }),
+    ).toEqual({ totalTokens: 100, cost: 0.1 });
+    // A provider that says nothing about its tokens has nothing to report:
+    // a zero is a number, and a number a reader would trust.
+    expect(
+      usageFromMessage({
+        role: "assistant",
+        usage: { totalTokens: 0, cost: { total: 0 } },
+      }),
+    ).toBeUndefined();
+    expect(usageFromMessage({ role: "assistant" })).toBeUndefined();
+    expect(usageFromMessage(undefined)).toBeUndefined();
+    // And a cost is reported only when a provider reported one.
+    expect(
+      usageFromMessage({ role: "assistant", usage: { totalTokens: 10 } }),
+    ).toEqual({ totalTokens: 10 });
+  });
+
+  it("adds two runs' usage", () => {
+    // The work session's cost and the review's, added up.
+    expect(addUsage({ totalTokens: 100, cost: 0.5 }, { totalTokens: 20, cost: 0.1 })).toEqual({
+      totalTokens: 120,
+      cost: 0.6,
+    });
+    // A cost one of them did not report is still a cost.
+    expect(addUsage({ totalTokens: 100 }, { totalTokens: 20, cost: 0.1 })).toEqual({
+      totalTokens: 120,
+      cost: 0.1,
+    });
+    // And two runs that reported nothing have no usage to add.
+    expect(addUsage(undefined, undefined)).toBeUndefined();
   });
 });
 
@@ -2201,7 +2250,7 @@ describe("the CLI's run", () => {
         return JSON.stringify({
           body: "**What this is:** the work\n\n**Fix:** 1. do it",
           comments: [{ body: "a comment" }],
-          title: "an issue",
+          title: issue?.title ?? "an issue",
           labels: [],
           updatedAt: "",
           state: issue?.state ?? "OPEN",
@@ -3159,6 +3208,261 @@ describe("the CLI's run", () => {
         ).toBe(false);
         expect(calls.some((call) => call.includes("--add-label agent-in-progress"))).toBe(false);
       } finally {
+        await fixture.dispose();
+      }
+    }, 60_000);
+  });
+
+  describe("the summary a run ends with", () => {
+    /** What the run wrote to the output stream, and a way to stop watching. */
+    function captureStdout(): { readonly lines: string[]; readonly restore: () => void } {
+      const lines: string[] = [];
+      const spy = vi
+        .spyOn(process.stdout, "write")
+        .mockImplementation(((chunk: string | Uint8Array) => {
+          lines.push(String(chunk));
+          return true;
+        }) as typeof process.stdout.write);
+      return { lines, restore: () => spy.mockRestore() };
+    }
+
+    /** The lines the run printed, without the empty ones. */
+    function printed(lines: readonly string[]): string[] {
+      return lines
+        .join("")
+        .split("\n")
+        .filter((line) => line.trim() !== "");
+    }
+
+    /**
+     * A session whose turns report what they cost.
+     *
+     * The report comes the way the real one comes: the session's events carry
+     * the numbers, and the factory passes them on. The work session and the
+     * review session report different amounts, so that a summary which adds
+     * them up is distinguishable from one that reports only the last of them.
+     */
+    function sessionWithUsage(): SessionFactory {
+      const work = workingSession();
+      return async (options) => {
+        const session = await work(options);
+        options.onUsage?.(
+          isReviewer(options.tools)
+            ? { totalTokens: 400, cost: 0.2 }
+            : { totalTokens: 1600, cost: 0.8 },
+        );
+        return session;
+      };
+    }
+
+    /** The command that works one issue in a fixture. */
+    function oneIssue(
+      fixture: Awaited<ReturnType<typeof createFixtureRepository>>,
+      gh: (args: readonly string[]) => Promise<string>,
+      session: SessionFactory,
+    ): Promise<number> {
+      return main(
+        [
+          "--repo",
+          "gazon1/sing",
+          "--checkout",
+          fixture.repo,
+          "--worktree-root",
+          join(fixture.root, "worktrees"),
+          "--lock-dir",
+          join(fixture.root, "afk-runner"),
+          "--issue",
+          "42",
+        ],
+        {
+          gh,
+          session,
+          run: async () => JSON.stringify({ verdict: "ci.yml  run 1  success" }),
+        },
+      );
+    }
+
+    it("test_a_duration_says_the_seconds_and_the_larger_units", () => {
+      // The seconds are always there: a duration without them is a duration a
+      // reader has to guess at.
+      expect(formatDuration(0)).toBe("0s");
+      expect(formatDuration(1_500)).toBe("2s");
+      expect(formatDuration(65_000)).toBe("1m 5s");
+      expect(formatDuration(3_725_000)).toBe("1h 2m 5s");
+    });
+
+    it("test_a_cost_under_a_cent_keeps_its_digits", () => {
+      expect(formatCost(0.42)).toBe("$0.42");
+      // Rounded to two decimals this would read as zero, and zero is a number
+      // a reader would trust.
+      expect(formatCost(0.004)).toBe("$0.004000");
+    });
+
+    it("test_a_summary_says_the_tokens_and_the_cost_it_has", () => {
+      // A provider that reported tokens and no cost: the tokens are said and
+      // the cost is absent — not zero.
+      const lines = runSummary({
+        issue: 42,
+        outcome: "completed",
+        steps: [],
+        record: "/tmp/record.md",
+        title: "the first",
+        pullRequest: 1040,
+        verdict: "pass",
+        durationMs: 65_000,
+        usage: { totalTokens: 12345 },
+      });
+      expect(lines).toEqual([
+        "issue 42 — the first",
+        "pull request: #1040",
+        "review: pass",
+        "duration: 1m 5s",
+        "tokens: 12345",
+        "record: /tmp/record.md",
+      ]);
+    });
+
+    it("test_a_finished_run_ends_with_a_summary", async () => {
+      const fixture = await fixtureWithSetupScript();
+      const stdout = captureStdout();
+      try {
+        const { gh } = stubGh([{ number: 42, title: "the first" }]);
+
+        const code = await oneIssue(fixture, gh, workingSession());
+
+        expect(code).toBe(0);
+        const said = stdout.lines.join("");
+        // The issue and its title.
+        expect(said).toContain("issue 42 — the first");
+        // The pull request the run opened, and the review's verdict.
+        expect(said).toContain("pull request: #1040");
+        expect(said).toContain("review: pass");
+        // How long it took, and where the record is.
+        expect(said).toMatch(/duration: \d+s/);
+        expect(said).toContain("record: ");
+        expect(said).toContain(join("build", "diagnostics", "issue-42"));
+      } finally {
+        stdout.restore();
+        await fixture.dispose();
+      }
+    }, 60_000);
+
+    it("test_the_summary_is_one_fact_per_line", async () => {
+      const fixture = await fixtureWithSetupScript();
+      const stdout = captureStdout();
+      try {
+        const { gh } = stubGh([{ number: 42, title: "the first" }]);
+
+        await oneIssue(fixture, gh, workingSession());
+
+        // The summary is the tail of the output: the steps came before it.
+        const lines = printed(stdout.lines);
+        const first = lines.findIndex((line) => line.startsWith("issue 42"));
+        expect(first).toBeGreaterThan(-1);
+        const summary = lines.slice(first);
+        // Every line is one fact, and every fact is named — a table would
+        // wrap, and a line that says two things is two facts on one line.
+        expect(summary.length).toBeGreaterThan(3);
+        for (const line of summary) {
+          expect(line).toMatch(
+            /^(issue|pull request|review|duration|tokens|cost|record)\b/,
+          );
+        }
+        // And it carries no colour: a pipe reads the same lines a terminal
+        // does.
+        for (const line of summary) {
+          expect(line).not.toContain("\u001b[");
+        }
+      } finally {
+        stdout.restore();
+        await fixture.dispose();
+      }
+    }, 60_000);
+
+    it("test_the_tokens_and_the_cost_are_absent_when_the_provider_reports_none", async () => {
+      const fixture = await fixtureWithSetupScript();
+      const stdout = captureStdout();
+      try {
+        const { gh } = stubGh([{ number: 42, title: "the first" }]);
+
+        // The session reports nothing: no tokens, and no cost.
+        await oneIssue(fixture, gh, workingSession());
+
+        const said = stdout.lines.join("");
+        expect(said).not.toContain("tokens:");
+        expect(said).not.toContain("cost:");
+        // And not a zero either: a zero is a number a reader would trust.
+        expect(said).not.toContain("tokens: 0");
+        expect(said).not.toContain("cost: $0.00");
+      } finally {
+        stdout.restore();
+        await fixture.dispose();
+      }
+    }, 60_000);
+
+    it("test_the_tokens_and_the_cost_are_reported_when_the_provider_reports_them", async () => {
+      const fixture = await fixtureWithSetupScript();
+      const stdout = captureStdout();
+      try {
+        const { gh } = stubGh([{ number: 42, title: "the first" }]);
+
+        await oneIssue(fixture, gh, sessionWithUsage());
+
+        const said = stdout.lines.join("");
+        // The work session's tokens and the review's, added up.
+        expect(said).toContain("tokens: 2000");
+        expect(said).toContain("cost: $1.00");
+      } finally {
+        stdout.restore();
+        await fixture.dispose();
+      }
+    }, 60_000);
+
+    it("test_a_sweep_says_one_line_per_issue_and_a_total", async () => {
+      const fixture = await fixtureWithSetupScript();
+      const stdout = captureStdout();
+      const lockDirectory = join(fixture.root, "afk-runner");
+      try {
+        const { gh } = stubGh([
+          { number: 42, title: "the first" },
+          { number: 43, title: "the second" },
+        ]);
+
+        const code = await main(
+          [
+            "--repo",
+            "gazon1/sing",
+            "--checkout",
+            fixture.repo,
+            "--worktree-root",
+            join(fixture.root, "worktrees"),
+            "--lock-dir",
+            lockDirectory,
+            "--all",
+          ],
+          {
+            gh,
+            session: workingSession(),
+            run: async () => JSON.stringify({ verdict: "ci.yml  run 1  success" }),
+          },
+        );
+
+        expect(code).toBe(0);
+        const lines = printed(stdout.lines);
+        // One line per issue, and a total at the end.
+        const issues = lines.filter((line) => line.startsWith("issue "));
+        expect(issues).toHaveLength(2);
+        expect(issues[0]).toContain("the first");
+        expect(issues[1]).toContain("the second");
+        expect(issues[0]).toContain("pr #1040");
+        expect(issues[0]).toContain("pass");
+        const total = lines[lines.length - 1] ?? "";
+        expect(total).toContain("total: 2 of 2 issues worked");
+        // The tokens and the cost are absent: this provider reported none.
+        expect(total).not.toContain("tokens");
+        expect(total).not.toContain("cost");
+      } finally {
+        stdout.restore();
         await fixture.dispose();
       }
     }, 60_000);

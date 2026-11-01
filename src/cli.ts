@@ -37,8 +37,14 @@ import { readClaimed, readQueue, runGh, type GhRunner } from "./gh.js";
 import { guardExtensionPath, installGuardPolicy } from "./guard.js";
 import { runCommand, runGit, type CommandRunner, type GitRunner } from "./git.js";
 import { LockHeld, LockUnusable, takeLock } from "./lock.js";
-import { RunFailed, runOnce, type RunOptions } from "./runner.js";
-import type { AgentSession, SessionFactory } from "./session.js";
+import { RunFailed, runOnce, type RunOptions, type RunResult } from "./runner.js";
+import {
+  addUsage,
+  usageFromMessage,
+  type AgentSession,
+  type RunUsage,
+  type SessionFactory,
+} from "./session.js";
 
 /** The run finished, or the queue was empty. */
 export const EXIT_OK = 0;
@@ -346,7 +352,7 @@ export function piSessionFactory(options: {
   /** Told what the agent is doing, as it does it. */
   readonly onEvent?: (line: string) => void;
 }): SessionFactory {
-  return async ({ cwd, systemPromptSections, tools }) => {
+  return async ({ cwd, systemPromptSections, tools, onUsage }) => {
     useProxyFromEnvironment();
     await installGuardPolicy({ cwd });
     const loader = new DefaultResourceLoader({
@@ -373,6 +379,12 @@ export function piSessionFactory(options: {
               const message = event?.message;
               if (!message || message.role !== "assistant") {
                 return;
+              }
+              // What the turn cost, when the provider said what it cost. The
+              // message this event carries is the one that holds the numbers.
+              const usage = usageFromMessage(message);
+              if (usage !== undefined) {
+                onUsage?.(usage);
               }
               const content = Array.isArray(message.content)
                 ? message.content
@@ -575,6 +587,132 @@ export interface CliDependencies {
 }
 
 /**
+ * A duration, as a reader reads it.
+ *
+ * The seconds are always there: a duration without them is a duration a
+ * reader has to guess at. The larger units come when they are worth saying —
+ * a run that took hours is a run that says so.
+ */
+export function formatDuration(ms: number): string {
+  const seconds = Math.max(0, Math.round(ms / 1000));
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const rest = seconds % 60;
+  if (hours > 0) {
+    return `${hours}h ${minutes}m ${rest}s`;
+  }
+  if (minutes > 0) {
+    return `${minutes}m ${rest}s`;
+  }
+  return `${rest}s`;
+}
+
+/**
+ * A cost, as money.
+ *
+ * A cost under a cent keeps its digits: rounded to two decimals it would
+ * read as zero, and zero is a number a reader would trust.
+ */
+export function formatCost(cost: number): string {
+  if (Math.abs(cost) < 0.01) {
+    return `$${cost.toFixed(6)}`;
+  }
+  return `$${cost.toFixed(2)}`;
+}
+
+/**
+ * The lines that say what a run did.
+ *
+ * **One fact per line.** A journal reads lines, and a table wraps: a summary
+ * a terminal folds is a summary a pipe cannot be read out of. So there is no
+ * table here — the lines are the facts, and a pipe gets the same lines a
+ * terminal does.
+ *
+ * The tokens and the cost are **absent** when the provider reported none: a
+ * zero is a number, and a number a reader would trust.
+ */
+export function runSummary(result: RunResult): string[] {
+  const lines: string[] = [];
+  const title = result.title ?? "";
+  lines.push(title === "" ? `issue ${result.issue}` : `issue ${result.issue} — ${title}`);
+  if (result.pullRequest !== undefined) {
+    lines.push(`pull request: #${result.pullRequest}`);
+  }
+  lines.push(`review: ${result.verdict ?? "none"}`);
+  if (result.durationMs !== undefined) {
+    lines.push(`duration: ${formatDuration(result.durationMs)}`);
+  }
+  if (result.usage !== undefined) {
+    lines.push(`tokens: ${result.usage.totalTokens}`);
+    if (result.usage.cost !== undefined) {
+      lines.push(`cost: ${formatCost(result.usage.cost)}`);
+    }
+  }
+  if (result.record !== "") {
+    lines.push(`record: ${result.record}`);
+  }
+  return lines;
+}
+
+/**
+ * The one line a sweep says about an issue.
+ *
+ * A sweep is a journal: one line per issue, in the order the issues were
+ * worked. The facts are the run's own, separated so that a reader — or a
+ * pipe — can take them one at a time.
+ */
+export function sweepIssueLine(result: RunResult): string {
+  const parts: string[] = [`issue ${result.issue}`];
+  const title = result.title ?? "";
+  if (title !== "") {
+    parts.push(title);
+  }
+  if (result.pullRequest !== undefined) {
+    parts.push(`pr #${result.pullRequest}`);
+  }
+  parts.push(`review ${result.verdict ?? "none"}`);
+  if (result.durationMs !== undefined) {
+    parts.push(formatDuration(result.durationMs));
+  }
+  if (result.usage !== undefined) {
+    parts.push(`${result.usage.totalTokens} tokens`);
+    if (result.usage.cost !== undefined) {
+      parts.push(formatCost(result.usage.cost));
+    }
+  }
+  if (result.record !== "") {
+    parts.push(`record ${result.record}`);
+  }
+  return parts.join(" — ");
+}
+
+/**
+ * The line that says what a sweep did in all.
+ *
+ * The tokens and the cost are the sweep's own — the sum of what the issues
+ * cost — and they are absent when none of them reported any.
+ */
+export function sweepTotal(
+  results: readonly RunResult[],
+  issues: number,
+): string {
+  const parts = [`total: ${results.length} of ${issues} issues worked`];
+  const duration = results.reduce((sum, result) => sum + (result.durationMs ?? 0), 0);
+  parts.push(formatDuration(duration));
+  const usage = results.reduce<RunUsage | undefined>(
+    (sum, result) => addUsage(sum, result.usage),
+    undefined,
+  );
+  if (usage !== undefined) {
+    parts.push(`${usage.totalTokens} tokens`);
+    if (usage.cost !== undefined) {
+      parts.push(formatCost(usage.cost));
+    }
+  }
+  return parts.join(" — ");
+}
+
+/**
  * Run once, and say what happened through the exit code.
  *
  * One issue, or the whole queue with `--all`. The lock is taken for the whole
@@ -667,8 +805,11 @@ export async function main(
     if (resolved.all === true) {
       return await sweep(run, resolved.repo);
     }
-    const result = await work(run, resolved.issue);
-    return result;
+    const outcome = await work(run, resolved.issue);
+    if (outcome.result !== undefined) {
+      process.stdout.write(`${runSummary(outcome.result).join("\n")}\n`);
+    }
+    return outcome.code;
   } finally {
     process.off("SIGINT", interrupt);
     process.off("SIGTERM", interrupt);
@@ -708,22 +849,25 @@ async function sweep(runOptions: RunOptions, repo: string): Promise<number> {
   }
 
   let firstFailure = 0;
-  let worked = 0;
   let stoppedEarly = false;
+  const results: RunResult[] = [];
   for (const issueNumber of numbers) {
     // A human who stopped the run stopped the sweep, not one issue of it.
     if (runOptions.stopped?.() === true) {
       stoppedEarly = true;
       break;
     }
-    const code = await work({ ...runOptions, issueNumber }, issueNumber);
-    if (code === EXIT_OK) {
-      worked += 1;
-    } else if (firstFailure === 0) {
-      firstFailure = code;
+    const outcome = await work({ ...runOptions, issueNumber }, issueNumber);
+    if (outcome.result !== undefined) {
+      // One line per issue: a sweep is a journal.
+      results.push(outcome.result);
+      process.stdout.write(`${sweepIssueLine(outcome.result)}\n`);
+    }
+    if (outcome.code !== EXIT_OK && firstFailure === 0) {
+      firstFailure = outcome.code;
     }
   }
-  process.stdout.write(`the sweep worked ${worked} of ${numbers.length} issues\n`);
+  process.stdout.write(`${sweepTotal(results, numbers.length)}\n`);
   // Issues were left in the queue, so this is not the success the zero would
   // claim; a stop that did not fail a step reports the code a cut session has.
   if (stoppedEarly && firstFailure === 0) {
@@ -732,13 +876,26 @@ async function sweep(runOptions: RunOptions, repo: string): Promise<number> {
   return firstFailure;
 }
 
+/** What one issue's run did, and what it says about it. */
+interface WorkOutcome {
+  /** The exit code the run reached. */
+  readonly code: number;
+  /** The result of a run that finished, when there was one. */
+  readonly result?: RunResult;
+}
+
 /** Work one issue, and say what happened through the exit code. */
-async function work(runOptions: RunOptions, namedIssue: number | undefined): Promise<number> {
+async function work(
+  runOptions: RunOptions,
+  namedIssue: number | undefined,
+): Promise<WorkOutcome> {
   try {
     const result = await runOnce(runOptions);
     if (result.outcome === "empty") {
       process.stdout.write("the queue is empty — there was nothing to work\n");
-    } else if ((result.outcome as string) === "unworkable") {
+      return { code: EXIT_OK };
+    }
+    if ((result.outcome as string) === "unworkable") {
       const issueNum = result.issue ?? namedIssue;
       const derivedState = (result as { derivedState?: string }).derivedState;
       let reason: string;
@@ -754,20 +911,17 @@ async function work(runOptions: RunOptions, namedIssue: number | undefined): Pro
       process.stderr.write(
         `issue ${issueNum} could not be worked — ${reason}\n`,
       );
-      return 1;
-    } else {
-      process.stdout.write(
-        `worked issue ${result.issue} — the record is at ${result.record}\n`,
-      );
+      return { code: 1 };
     }
-    return EXIT_OK;
+    // The run finished: the caller says what it did.
+    return { code: EXIT_OK, result };
   } catch (failure) {
     if (failure instanceof RunFailed) {
       process.stderr.write(`${failure.message}\n`);
-      return STEP_EXIT_CODES[failure.step] ?? 1;
+      return { code: STEP_EXIT_CODES[failure.step] ?? 1 };
     }
     process.stderr.write(`${errorMessage(failure)}\n`);
-    return 1;
+    return { code: 1 };
   }
 }
 
