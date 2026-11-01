@@ -6,6 +6,13 @@ fresh eyes, because you wrote it and cannot see it clearly. Activate the
 repository's own review skill — and apply its self-review checklist to your
 own diff.
 
+**The work is the tree's.** The run keeps what is in the tree — it commits it
+on the branch, and the next run continues that branch — so the work you are
+making stays in the tree. A stash is not part of what the next run continues:
+it lives in the repository's own stash, where nothing says which entry is
+whose, and the runner does not read it. A stash of your own, for your own
+reasons, is yours to keep; the work is not in it.
+
 1. **Read the diff.** `git diff main...HEAD`. Every line of it is yours now.
 
 2. **Check it against the brief's acceptance criteria.** One by one. Not "does

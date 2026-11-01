@@ -3292,6 +3292,49 @@ describe("the CLI's run", () => {
     }
   });
 
+  it("test_the_runner_leaves_the_repository_s_stash_alone", async () => {
+    // A stash belongs to the repository, not to an issue: nothing says which
+    // one is whose. The runner keeps the tree, and it does not read the
+    // stash — so a stash that is there when the run starts is there when it
+    // ends, untouched.
+    const fixture = await fixtureWithSetupScript();
+    try {
+      const { gh } = stubGh([{ number: 42, title: "an issue" }]);
+
+      // A stash the runner did not make.
+      await writeFile(join(fixture.repo, "README.md"), "# changed\n", "utf8");
+      await gitOutput(["stash", "push", "-m", "someone else's work"], {
+        cwd: fixture.repo,
+        env: fixture.env,
+      });
+      const before = await gitOutput(["stash", "list"], {
+        cwd: fixture.repo,
+        env: fixture.env,
+      });
+      expect(before).toContain("someone else's work");
+
+      const gitCalls: string[] = [];
+      await runOnce({
+        ...runOptions(fixture, gh),
+        git: async (args, options) => {
+          gitCalls.push(`git ${args.join(" ")}`);
+          return runGit(args, options);
+        },
+      });
+
+      // The runner never went near the stash: it did not read it, and it did
+      // not move or drop it.
+      expect(gitCalls.filter((call) => call.includes("stash"))).toEqual([]);
+      const after = await gitOutput(["stash", "list"], {
+        cwd: fixture.repo,
+        env: fixture.env,
+      });
+      expect(after).toBe(before);
+    } finally {
+      await fixture.dispose();
+    }
+  }, 60_000);
+
   it("test_the_next_run_continues_the_work_the_failed_run_left", async () => {
     // The point of keeping the work: the next run starts from it.
     const fixture = await fixtureWithSetupScript();
@@ -4941,6 +4984,18 @@ describe("the leftovers a run files", () => {
 
     expect(implement).toContain("The runner runs the whole list again");
     expect(implement).toContain("`./check.sh` only");
+  });
+
+  it("test_the_verify_prompt_says_the_work_is_the_tree_s", async () => {
+    // The work the next run continues is the tree's. A stash is not part of
+    // it, so the verify turn says so where the agent reads it — and the rule
+    // about a long suite on a stashed tree stays.
+    const prompts = await readPrompts();
+    const verify = prompts[4] ?? "";
+
+    expect(verify).toContain("The work is the tree's");
+    expect(verify).toContain("not part of what the next run continues");
+    expect(verify).toContain("stashed tree");
   });
 
   it("test_the_work_session_is_given_the_tool_that_files_a_leftover", async () => {
