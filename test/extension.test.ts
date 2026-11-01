@@ -778,8 +778,11 @@ describe("the run the front door owns", () => {
 
       await vi.waitFor(() => expect(existsSync(worktreePath)).toBe(true));
       expect(await git(["worktree", "list", "--porcelain"])).toContain("detached");
-      // A detached worktree is prepared as well: it is the same tree.
-      await vi.waitFor(() => expect(existsSync(join(worktreePath, ".env"))).toBe(true));
+      // A detached worktree is prepared as well: it is the same tree. The
+      // fixture writes the `.env` first and the log a line later, so the log
+      // is what says the preparation is done — the teardown must not race it.
+      await vi.waitFor(() => expect(existsSync(join(worktreeRoot, "prepared.log"))).toBe(true));
+      expect(await readFile(join(worktreePath, ".env"), "utf8")).toBe("prepared\n");
     } finally {
       await fixture.dispose();
     }
