@@ -383,12 +383,32 @@ export async function runWorkSession(options: {
   });
 }
 
+/**
+ * The error a fix raises when it changed nothing.
+ *
+ * The review loop stops on it: a fix that moved nothing has nothing to push
+ * and nothing to review again, and the loop would spend a review on the same
+ * diff to hear the same verdict.
+ *
+ * It is a `WorkflowError` that is **not recoverable**, like the run's cut-off:
+ * the engine's `gate` has no break, so the only way out of the loop is a
+ * failure the engine stops the run on.
+ */
+export class FixChangedNothing extends WorkflowError {
+  constructor(message = "the fix changed nothing") {
+    super(message, WorkflowErrorCode.AGENT_EXECUTION_ERROR, { recoverable: false });
+    this.name = "FixChangedNothing";
+  }
+}
+
 /** What the review loop did. */
 export interface ReviewGateResult {
   /** Whether the review finally passed. */
   readonly passed: boolean;
   /** How many reviews the engine asked for. */
   readonly reviews: number;
+  /** Whether the loop stopped because a fix changed nothing. */
+  readonly noChange: boolean;
 }
 
 /**
@@ -398,6 +418,10 @@ export interface ReviewGateResult {
  * `review` returns the verdict; `fix` gets the feedback the failed verdict
  * produced and does the correcting. The number of attempts bounds the loop, and
  * the caller's own deadline bounds each turn.
+ *
+ * A `fix` that raises {@link FixChangedNothing} stops the loop: there is
+ * nothing to push and nothing to review again, and the loop comes back with
+ * `noChange` set.
  */
 export async function runReviewGate(options: {
   readonly attempts: number;
@@ -428,6 +452,8 @@ export async function runReviewGate(options: {
               { recoverable: false, details: error },
             );
           }
+          // A fix that changed nothing carries its own way out: it is not
+          // recoverable, so the engine stops the run on it and the loop ends.
           throw error;
         }
         return "ok";
@@ -440,12 +466,21 @@ export async function runReviewGate(options: {
     },
   };
 
-  const run = await runWorkflow<{ ok?: boolean }>(REVIEW_SCRIPT, {
-    args: { attempts: options.attempts },
-    agent,
-    agentTimeoutMs: null,
-    agentRetries: 0,
-    persistLogs: false,
-  });
-  return { passed: run.result?.ok === true, reviews };
+  try {
+    const run = await runWorkflow<{ ok?: boolean }>(REVIEW_SCRIPT, {
+      args: { attempts: options.attempts },
+      agent,
+      agentTimeoutMs: null,
+      agentRetries: 0,
+      persistLogs: false,
+    });
+    return { passed: run.result?.ok === true, reviews, noChange: false };
+  } catch (error) {
+    // The fix that changed nothing stops the loop, and the loop's verdict is
+    // a failure: the review did not pass, and the fix did not answer it.
+    if (error instanceof FixChangedNothing) {
+      return { passed: false, reviews, noChange: true };
+    }
+    throw error;
+  }
 }

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { PROMPT_FILES, readPrompts, runPromptArray, type AgentSession } from "../src/session.js";
 import {
   cutOffError,
+  FixChangedNothing,
   isCutOff,
   runReviewGate,
   runStates,
@@ -368,5 +369,37 @@ describe("the review loop", () => {
 
     expect(result.passed).toBe(false);
     expect(result.reviews).toBe(3);
+  });
+
+  it("stops when the fix changes nothing", async () => {
+    // A fix that moved nothing has nothing to push and nothing to review
+    // again: the loop stops rather than spend a review on the same diff.
+    const calls: string[] = [];
+    const result = await runReviewGate({
+      attempts: 4,
+      review: async () => {
+        calls.push("review");
+        return "fail";
+      },
+      fix: async () => {
+        calls.push("fix");
+        throw new FixChangedNothing();
+      },
+    });
+
+    expect(result.passed).toBe(false);
+    expect(result.noChange).toBe(true);
+    expect(result.reviews).toBe(1);
+    expect(calls).toEqual(["review", "fix"]);
+  });
+
+  it("does not stop on a fix that changed something", async () => {
+    const result = await runReviewGate({
+      attempts: 3,
+      review: async () => "fail",
+      fix: async () => {},
+    });
+
+    expect(result.noChange).toBe(false);
   });
 });
