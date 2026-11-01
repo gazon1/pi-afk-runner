@@ -5673,21 +5673,18 @@ describe("the dependencies an issue declares", () => {
       parent: "no pull request" | "open" | "closed unmerged" | "merged",
     ): GhRunner =>
       async (args: readonly string[]): Promise<string> => {
-        if (args[0] === "issue") {
+        if (args[0] === "issue" && args[1] === "view" && args[2] === "2") {
+          // The parent's merged pull request, if any closed the parent.
+          return parent === "merged"
+            ? JSON.stringify({ closedByPullRequestsReferences: [{ number: 7 }] })
+            : JSON.stringify({ closedByPullRequestsReferences: [] });
+        }
+        if (args[0] === "issue" && args[1] === "view") {
           return JSON.stringify({
             body: "**Depends on:** #2",
             comments: [],
             state: "OPEN",
           });
-        }
-        if (args[0] === "pr") {
-          // The runner asks for the parent's merged pull request, on the
-          // parent's own work branch. An open or closed one is not there: the
-          // work has not landed.
-          const head = args[args.indexOf("--head") + 1];
-          return head === "agent/issue-2" && parent === "merged"
-            ? JSON.stringify([{ number: 7 }])
-            : "[]";
         }
         return "";
       };
@@ -5740,19 +5737,14 @@ describe("the dependencies an issue declares", () => {
   });
 
   it("asks for the parent's merged pull request", () => {
-    expect(mergedPullRequestArgs("gazon1/sing", "agent/issue-2")).toEqual([
-      "pr",
-      "list",
+    expect(mergedPullRequestArgs("gazon1/sing", 2)).toEqual([
+      "issue",
+      "view",
+      "2",
       "--repo",
       "gazon1/sing",
-      "--head",
-      "agent/issue-2",
-      "--state",
-      "merged",
-      "--limit",
-      "1",
       "--json",
-      "number",
+      "closedByPullRequestsReferences",
     ]);
   });
 });

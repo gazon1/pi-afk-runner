@@ -1913,7 +1913,7 @@ async function hasLanded(
   gh: GhRunner,
 ): Promise<boolean> {
   try {
-    return (await readMergedPullRequest(repo, workBranch(parent), gh)) !== null;
+    return (await readMergedPullRequest(repo, parent, gh)) !== null;
   } catch {
     return false;
   }
