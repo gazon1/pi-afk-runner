@@ -299,7 +299,8 @@ async function mergeOne(
           // conflict, and the agent's commit step stages whatever the tree
           // holds — so an agent run against a broken tree commits the
           // breakage. The index is the test: unmerged entries mean a conflict
-          // is waiting to be resolved.
+          // is waiting to be resolved, and a check that cannot be made is not
+          // a conflict either.
           const conflicted = await hasUnmergedEntries(options.git, worktreePath).catch(
             () => false,
           );

@@ -505,6 +505,21 @@ describe("the merge pipeline", () => {
       expect(result.failed[0]?.step).toBe("merge-sync");
       expect(result.failed[0]?.message).toContain("unrelated histories");
 
+      // And the record says why the merge failed, at the step that failed.
+      const record = await readFile(
+        join(
+          fixture.repo,
+          "build",
+          "diagnostics",
+          "merge",
+          "pr-7",
+          "2026-11-02T09-00-00-000Z-abcdef12.md",
+        ),
+        "utf8",
+      );
+      expect(record).toContain("merge-sync");
+      expect(record).toContain("unrelated histories");
+
       // And no agent was started: there was no conflict to resolve.
       expect(sessions).toEqual([]);
       expect(merged).toEqual([]);
