@@ -155,7 +155,7 @@ again, because an agent that skipped them is not a gate. The list is written dow
 A review's **fix** changes the tree, so the gates run again on it: a fix that does not pass them
 is not pushed, and the tree on the remote is the tree the gates judged.
 
-The run's budget is divided into three **reserved** shares: the session keeps an hour, the gates
+The run's budget is divided into three **reserved** shares: the session keeps two hours, the gates
 keep an hour each — the same the merge door gives the same gate — and the review keeps what is
 left. A session that spends its whole budget cannot leave the gates nothing to run with, and a
 gate that is killed half-way through leaves a run that pushes nothing. A smaller ceiling
@@ -327,6 +327,10 @@ Each pull request's record goes under `build/diagnostics/merge/pr-<N>/`. A faile
 with its name and the pull request stays open; a skipped pull request is not a failure. A merge takes
 its own lock — `merge.lock` — and not the work lock, so a merge and the work runs do not wait for each
 other.
+
+The sweep has one wall-clock, the same `--deadline-ms` the work run has: the conflict resolution, the
+gate and the fresh review take shares of what is left when their turn comes, and a pull request it
+does not start before the clock is gone is left for the next run, with that reason.
 
 The decision is recorded in
 [docs/decisions/2026-11-02-the-merge-pipeline-is-separate.md](docs/decisions/2026-11-02-the-merge-pipeline-is-separate.md).

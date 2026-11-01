@@ -105,10 +105,16 @@ resolved by an agent, gated with `./check.sh`, pushed and reviewed, and lands on
 the **next** tick, once CI has judged the new commit. That is deliberate: a merge
 never lands a commit CI has not seen, and the interval is the cost of it.
 
+The sweep has one budget, the same `--deadline-ms` the work run has: the
+resolution, the gate and the review take shares of what is left when their turn
+comes, and a pull request it does not start before the clock is gone is left for
+the next tick with that reason.
+
 Its status is simpler than the work sweep's: `0` when every step that ran
 succeeded, `1` when a pull request stopped at a step — the step and the pull
 request are in the message and in `build/diagnostics/merge/pr-<N>/`. A skipped
-pull request is `0`: the review or the CI has not cleared it yet.
+pull request is `0`: the review or the CI has not cleared it yet, and so is one
+the run's clock left no budget for.
 
 ## `--no-verify`
 

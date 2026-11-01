@@ -18,6 +18,7 @@
 
 import { join } from "node:path";
 
+import { budgetShares } from "./budget.js";
 import { errorMessage } from "./cli.js";
 import {
   RECOUNT_LABEL,
@@ -53,9 +54,10 @@ import {
   type StepRecord,
 } from "./runner.js";
 import {
+  cutOffMessage,
+  runPromptArray,
   UNTRUSTED_INPUT_RULE,
   UNTRUSTED_INPUT_SECTION,
-  runPromptArray,
   type SessionFactory,
 } from "./session.js";
 
@@ -133,6 +135,13 @@ export interface MergeOptions {
   readonly run: CommandRunner;
   /** The agent that resolves a conflict or a gate failure. */
   readonly session: SessionFactory;
+  /**
+   * The wall-clock the whole sweep may spend.
+   *
+   * It is one budget, divided as a work run's is: the resolution, the gate and
+   * the review take shares of what is left when their turn comes, and a
+   * candidate that would start with nothing left is left for the next run.
+   */
   readonly deadlineMs: number;
   /** Whether the target repository's pre-push hook may gate the push. */
   readonly verifyPushes?: boolean;
@@ -164,6 +173,12 @@ export async function mergeReviewedPullRequests(
   options: MergeOptions,
 ): Promise<MergeResult> {
   const runId = options.runId ?? newRunId(options.now);
+  // The sweep has one wall-clock, the same rule a work run follows: the
+  // sessions, the gate and the review take what is left when their turn comes,
+  // so a sweep can no longer outlive its budget by a gate-hour per pull request.
+  const startedAt = Date.now();
+  const remainingMs = (): number =>
+    Math.max(0, options.deadlineMs - (Date.now() - startedAt));
   const candidates = await readOpenPullRequests(
     options.repo,
     options.baseBranch,
@@ -183,6 +198,16 @@ export async function mergeReviewedPullRequests(
       // Another author's pull request. The pipeline lands only its own.
       continue;
     }
+    if (remainingMs() <= 0) {
+      // Asking what a pull request would need is a `gh` call of its own, and a
+      // run whose clock is gone must not spend it. The candidate is left whole
+      // for the next run, and the reason says whose clock it was.
+      skipped.push({
+        pullRequest: candidate.number,
+        reason: "the run's deadline left no budget",
+      });
+      continue;
+    }
     const reason = await skipReason(options, candidate);
     if (reason !== null) {
       skipped.push({ pullRequest: candidate.number, reason });
@@ -191,7 +216,7 @@ export async function mergeReviewedPullRequests(
 
     options.onSubject?.({ pullRequest: candidate.number, title: candidate.title });
     try {
-      const outcome = await mergeOne(options, candidate, issueNumber, runId);
+      const outcome = await mergeOne(options, candidate, issueNumber, runId, remainingMs);
       if (outcome.merged) {
         merged.push(candidate.number);
       } else {
@@ -247,12 +272,16 @@ async function skipReason(
  * the branch changed — an unchanged branch is the commit CI already judged.
  * A change is pushed and reviewed, and then deliberately **not** merged: the
  * next run lands it once CI has judged the new commit.
+ *
+ * Every step that spends time takes its share of what the run has left, so the
+ * sweep's clock bounds all of them.
  */
 async function mergeOne(
   options: MergeOptions,
   candidate: OpenPullRequest,
   issueNumber: number,
   runId: string,
+  remainingMs: () => number,
 ): Promise<{ readonly merged: true } | { readonly merged: false; readonly reason: string }> {
   const worktreePath = join(options.worktreeRoot, `pull-request-${candidate.number}`);
   const branch = candidate.headRefName;
@@ -316,7 +345,11 @@ async function mergeOne(
             // is the reason the step fails with.
             throw failure;
           }
-          await resolveWithAgent(options, worktreePath);
+          await resolveWithAgent(
+            options,
+            worktreePath,
+            budgetShares(remainingMs()).sessionMs,
+          );
         }
         state.after = await headSha(options.git, worktreePath);
         state.changed = state.after !== state.before;
@@ -329,7 +362,7 @@ async function mergeOne(
         if (!state.changed) {
           return "not needed — CI judged this commit";
         }
-        return await verifyGate(options, worktreePath);
+        return await verifyGate(options, worktreePath, remainingMs);
       },
     },
     {
@@ -365,7 +398,7 @@ async function mergeOne(
           factory: options.session,
           gh: options.gh,
           run: options.run,
-          deadlineMs: options.deadlineMs,
+          deadlineMs: budgetShares(remainingMs()).reviewMs,
           ...(options.stopped === undefined ? {} : { stopped: options.stopped }),
         });
         if (outcome.verdict !== "pass") {
@@ -449,15 +482,30 @@ async function mergeOne(
  * Run the gate, and let the agent fix a failure once.
  *
  * A second failure is the pull request's, not the agent's: it is thrown, the
- * step is recorded as failed, and the pull request stays open.
+ * step is recorded as failed, and the pull request stays open. The gate takes
+ * the gates' share of what the run has left, and the fix takes the session's —
+ * one wall-clock, the same rule a work run follows.
  */
-async function verifyGate(options: MergeOptions, worktreePath: string): Promise<string> {
+async function verifyGate(
+  options: MergeOptions,
+  worktreePath: string,
+  remainingMs: () => number,
+): Promise<string> {
+  const startedAt = Date.now();
+  const budgetMs = budgetShares(remainingMs()).gatesMs;
+  const left = (): number => Math.max(0, budgetMs - (Date.now() - startedAt));
   const run = async (): Promise<void> => {
+    const remaining = left();
+    if (remaining <= 0) {
+      throw new Error("the run's deadline left no budget for the gate");
+    }
     await options.run({
       command: "bash",
       args: [GATE_SCRIPT],
       cwd: worktreePath,
-      timeoutMs: options.gateTimeoutMs ?? GATE_TIMEOUT_MS,
+      // The gate's own budget, and no more than the run has left: a timeout the
+      // gate never chose is not a verdict.
+      timeoutMs: Math.min(options.gateTimeoutMs ?? GATE_TIMEOUT_MS, remaining),
       // The tail of the output is the evidence; the rest is noise neither the
       // runner nor the record has to hold.
       maxOutputBytes: GATE_OUTPUT_LIMIT_BYTES,
@@ -469,8 +517,17 @@ async function verifyGate(options: MergeOptions, worktreePath: string): Promise<
   try {
     await run();
     return "passed";
-  } catch {
-    await resolveWithAgent(options, worktreePath);
+  } catch (failure) {
+    // A gate the run's own clock killed is not a failure for the agent to fix:
+    // there is nothing left to spend on the fix either.
+    if (left() <= 0) {
+      throw failure;
+    }
+    await resolveWithAgent(
+      options,
+      worktreePath,
+      budgetShares(remainingMs()).sessionMs,
+    );
     await run();
     return "passed after the agent's fix";
   }
@@ -480,9 +537,14 @@ async function verifyGate(options: MergeOptions, worktreePath: string): Promise<
  * Let the merge agent resolve the worktree, and refuse to go on with markers.
  *
  * The agent is told not to commit; the runner commits, so the identity and the
- * push stay its own. A marker left behind is a resolution that is not one.
+ * push stay its own. A marker left behind is a resolution that is not one. The
+ * budget it is given is the session's share of what the run has left.
  */
-async function resolveWithAgent(options: MergeOptions, worktreePath: string): Promise<void> {
+async function resolveWithAgent(
+  options: MergeOptions,
+  worktreePath: string,
+  deadlineMs: number,
+): Promise<void> {
   const session = await options.session({
     cwd: worktreePath,
     systemPromptSections: { [UNTRUSTED_INPUT_SECTION]: UNTRUSTED_INPUT_RULE },
@@ -492,11 +554,20 @@ async function resolveWithAgent(options: MergeOptions, worktreePath: string): Pr
     prompts: [MERGE_PROMPT],
     // The resolution is one state: the conflict, resolved in one turn.
     states: [{ name: "resolve", phase: "Resolve" }],
-    deadlineMs: options.deadlineMs,
+    deadlineMs,
     ...(options.stopped === undefined ? {} : { stopped: options.stopped }),
   });
   if (result.aborted) {
-    throw new Error("the merge session was cut off before it resolved the worktree");
+    // The deadline and a human's stop are both a cut session; the record has to
+    // say which one it was, the same way the work session's record does.
+    throw new Error(
+      cutOffMessage({
+        what: "the merge session",
+        deadlineMs,
+        reason: result.cutReason,
+        progress: { completed: result.completed, total: result.total },
+      }),
+    );
   }
 
   const marked = await options

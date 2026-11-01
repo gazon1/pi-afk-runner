@@ -26,6 +26,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -656,6 +657,7 @@ export async function reviewPullRequest(options: {
         what: "the review's session",
         deadlineMs: options.deadlineMs,
         reason: result.cutReason,
+        progress: { completed: result.completed, total: result.total },
       }),
     );
   }
@@ -813,6 +815,7 @@ export async function fixWorktree(options: {
         what: "the fix's session",
         deadlineMs: options.deadlineMs,
         reason: result.cutReason,
+        progress: { completed: result.completed, total: result.total },
       }),
     );
   }
@@ -1044,6 +1047,36 @@ export function recordDirectory(root: string, issue: number): string {
   return join(root, "build", "diagnostics", `issue-${issue}`);
 }
 
+/**
+ * The runner's own build, as the record names it.
+ *
+ * It is the package's version and the commit the build came from. The version
+ * sits beside this module whether the runner runs from `src/` or `dist/`; the
+ * commit is written next to the built module, so a run from `src/` — the tests —
+ * has none, and says so by leaving it out.
+ */
+const RUNNER_STAMP = ((): string => {
+  let version = "unknown";
+  try {
+    const pkg = JSON.parse(
+      readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+    ) as { readonly version?: string };
+    version = pkg.version ?? version;
+  } catch {
+    // A record must not fail over what it says about itself.
+  }
+  let sha: string | null = null;
+  try {
+    const built = JSON.parse(
+      readFileSync(new URL("./build-info.json", import.meta.url), "utf8"),
+    ) as { readonly sha?: string | null };
+    sha = built.sha ?? null;
+  } catch {
+    // No build stamp: the module is running from `src/`.
+  }
+  return sha === null ? version : `${version} ${sha}`;
+})();
+
 /** The record's own text. */
 function renderRecord(options: {
   readonly issue: number;
@@ -1060,6 +1093,7 @@ function renderRecord(options: {
     "",
     `- ${options.subject ?? "issue"}: ${options.issue}`,
     `- run: ${options.runId}`,
+    `- runner: ${RUNNER_STAMP}`,
     `- outcome: ${options.outcome}`,
     "",
     "## Steps",
@@ -2193,6 +2227,7 @@ async function runPlan(
               what: "the agent's session",
               deadlineMs: sessionBudgetMs,
               reason: result.cutReason,
+              progress: { completed: result.completed, total: result.total },
             }),
           );
         }

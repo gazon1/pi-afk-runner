@@ -3252,6 +3252,10 @@ describe("the CLI's run", () => {
       expect(record).toContain("session — failed");
       expect(record).toContain("the agent's session hit its");
       expect(record).toContain("deadline");
+      // Where it stopped, not only why: the first turn never finished.
+      expect(record).toContain("after 0 of 6 turns");
+      // And which build wrote the record, so a stale binary is visible.
+      expect(record).toMatch(/^- runner: \d+\.\d+\.\d+/m);
     } finally {
       await fixture.dispose();
     }
