@@ -149,6 +149,43 @@ async function pushBranch(
   return sha;
 }
 
+/**
+ * Push `agent/issue-42` with no history in common with the base.
+ *
+ * The merge of the base into such a branch is refused by git outright: it
+ * fails, and it leaves no conflict behind.
+ */
+async function pushOrphanBranch(
+  fixture: Awaited<ReturnType<typeof createFixtureRepository>>,
+): Promise<string> {
+  await gitOutput(["checkout", "-q", "--orphan", "agent/issue-42"], {
+    cwd: fixture.repo,
+    env: fixture.env,
+  });
+  await writeFile(join(fixture.repo, "work.txt"), "the work\n", "utf8");
+  await gitOutput(["add", "-A"], { cwd: fixture.repo, env: fixture.env });
+  await gitOutput(
+    [
+      "-c",
+      "user.name=Fixture",
+      "-c",
+      "user.email=fixture@example.com",
+      "commit",
+      "-q",
+      "-m",
+      "the work",
+    ],
+    { cwd: fixture.repo, env: fixture.env },
+  );
+  const sha = await gitOutput(["rev-parse", "HEAD"], { cwd: fixture.repo, env: fixture.env });
+  await gitOutput(["push", "-q", fixture.remote, `${sha}:refs/heads/agent/issue-42`], {
+    cwd: fixture.repo,
+    env: fixture.env,
+  });
+  await gitOutput(["checkout", "-q", "main"], { cwd: fixture.repo, env: fixture.env });
+  return sha;
+}
+
 /** Move `main`: a commit on the checked-out branch, pushed. */
 async function moveMain(
   fixture: Awaited<ReturnType<typeof createFixtureRepository>>,
@@ -437,6 +474,41 @@ describe("the merge pipeline", () => {
           env: fixture.env,
         }),
       ).toBe("both sides");
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("test_a_merge_that_fails_without_a_conflict_does_not_start_the_agent", async () => {
+    const fixture = await createFixtureRepository({ files: { "scripts/setup-worktree.sh": SETUP } });
+    try {
+      // The branch has no history in common with the base: `git merge` refuses
+      // it outright, and there is no conflict to resolve.
+      await pushOrphanBranch(fixture);
+
+      const sessions: string[] = [];
+      const countingSession: SessionFactory = async ({ tools }) => {
+        sessions.push(isReviewer(tools) ? "review" : "agent");
+        return {
+          async prompt() {},
+          async abort() {},
+          dispose() {},
+        };
+      };
+
+      const { gh, merged } = stubGh([reviewedPullRequest()]);
+      const result = await mergeReviewedPullRequests(
+        options(fixture, gh, { session: countingSession }),
+      );
+
+      // The merge failed and the step failed with git's own reason.
+      expect(result.failed[0]?.step).toBe("merge-sync");
+      expect(result.failed[0]?.message).toContain("unrelated histories");
+
+      // And no agent was started: there was no conflict to resolve.
+      expect(sessions).toEqual([]);
+      expect(merged).toEqual([]);
+      expect(result.merged).toEqual([]);
     } finally {
       await fixture.dispose();
     }

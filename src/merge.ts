@@ -31,6 +31,7 @@ import { GATE_OUTPUT_LIMIT_BYTES, GATE_TIMEOUT_MS } from "./gates.js";
 import {
   CommandFailed,
   fetchCommit,
+  hasUnmergedEntries,
   headRef,
   pushWorkBranch,
   readRemoteSha,
@@ -291,6 +292,20 @@ async function mergeOne(
           );
         } catch (failure) {
           if (!(failure instanceof CommandFailed)) {
+            throw failure;
+          }
+          // A merge can fail without a conflict: unrelated histories, a locked
+          // index, a base commit that is not there. The agent is for a
+          // conflict, and the agent's commit step stages whatever the tree
+          // holds — so an agent run against a broken tree commits the
+          // breakage. The index is the test: unmerged entries mean a conflict
+          // is waiting to be resolved.
+          const conflicted = await hasUnmergedEntries(options.git, worktreePath).catch(
+            () => false,
+          );
+          if (!conflicted) {
+            // Nothing to resolve: the merge's own error is the reason, and it
+            // is the reason the step fails with.
             throw failure;
           }
           await resolveWithAgent(options, worktreePath);
