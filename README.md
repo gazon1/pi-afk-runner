@@ -206,8 +206,8 @@ pi-afk-runner --checkout ~/work/singularity          # --repo defaults to that c
 ```
 
 A systemd timer runs it every hour; the unit passes `--all`, so one invocation drains the queue — it
-works every eligible issue in turn, each one to the end of its journey (claim, worktree, agent,
-push, pull request, review, re-count) — and then stops.
+works every eligible issue in turn, each one to the end of its journey (claim, worktree, triage,
+scope, agent, push, pull request, review, re-count) — and then stops.
 
 The **exit code says which step the run reached**, because a scheduler has nothing else to read:
 `0` is a finished run, `1` says an issue could not be worked, `10`..`80` are the steps, `75` says
@@ -222,6 +222,34 @@ and then each issue's own lock as it works it.
 It needs `flock(1)`, so the host is a Linux workstation; elsewhere the runner says the lock is
 unusable rather than running two of itself.
 
+### The run's branches
+
+The work session is a graph, and two of its nodes decide whether the rest runs:
+
+- **Triage.** The first turn decides whether the issue should be worked at all.
+  `skip` closes it with the reason and the queue moves on. A decision the agent
+  did not make is `work`, because the issue was labelled `ready-for-agent`.
+- **Scope.** When the issue is being worked, the second turn decides whether it
+  fits one run. `split` files two to eight smaller issues, chains each to the
+  one before it (`**Depends on:** #N`), links them from the original and closes
+  it. A parent issue that is still open holds its children out of the queue.
+
+A `skip` or a `split` is a finished run: no branch is pushed and no pull request
+is opened. The decisions are tools, `agent_issue_decision` and
+`agent_scope_decision`; the graph is the workflow engine's, with `phase`,
+`agent` and plain `if`.
+
+The review is a loop, not a single pass. A `fail` verdict buys a fix turn (a
+fresh session) and a push, and the fixed diff is reviewed again, up to three
+times or until the run's deadline leaves no budget — the engine's own `gate`
+block. A review that still fails leaves its finding on the issue and fails the
+run: the claim is released, the branch and the pull request stay, and the next
+run continues them.
+
+A **small change** — a few files, a few dozen lines — skips the repository's
+pre-push hook; an explicit `--no-verify`, or its absence, decides the rest. CI
+still gates landing in the merge mode.
+
 ### What a run leaves behind
 
 - a branch `agent/issue-<N>` and a pull request on it, carrying a review that opens with
@@ -230,6 +258,8 @@ unusable rather than running two of itself.
 - the issues the run filed for the work that follows from its own: each labelled `ready-for-agent`,
   each with a brief opening with `## Agent Brief`, so the next run picks them up. At most three a
   run, and never a second copy of something that is already open;
+- or, for a split, the two to eight smaller issues it filed instead of working the original,
+  chained by `**Depends on:**` so they run in order;
 - a record under `build/diagnostics/issue-<N>/` in the checkout.
 
 The worktree itself is scratch and is removed when the run finishes, successful or not: the branch

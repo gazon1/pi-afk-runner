@@ -43,7 +43,7 @@ import {
   type MergeOptions,
   type MergeResult,
 } from "./merge.js";
-import { RunFailed, runOnce, type RunOptions, unworkableReason } from "./runner.js";
+import { RunFailed, blockedReason, runOnce, type RunOptions, unworkableReason } from "./runner.js";
 import { skillsDirectory, type AgentSession, type SessionFactory } from "./session.js";
 
 /** The run finished, or the queue was empty. */
@@ -821,11 +821,19 @@ async function work(runOptions: RunOptions, namedIssue: number | undefined): Pro
       process.stdout.write("the queue is empty — there was nothing to work\n");
     } else if (result.outcome === "unworkable") {
       const issueNum = result.issue ?? namedIssue;
-      const reason = unworkableReason(result.derivedState);
+      const reason =
+        blockedReason(result.blockedBy) ?? unworkableReason(result.derivedState);
       process.stderr.write(
         `issue ${issueNum} could not be worked — ${reason}\n`,
       );
       return 1;
+    } else if (result.outcome === "skipped" || result.outcome === "split") {
+      const what =
+        result.outcome === "skipped"
+          ? "closed as not needed"
+          : "split into smaller issues";
+      const why = result.reason === "" ? "" : ` — ${result.reason}`;
+      process.stdout.write(`issue ${result.issue} was ${what}${why}\n`);
     } else {
       process.stdout.write(
         `worked issue ${result.issue} — the record is at ${result.record}\n`,
