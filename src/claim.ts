@@ -24,7 +24,6 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { join } from "node:path";
 
 import { CLAIM_LABEL, type GhRunner, type IssueSummary } from "./gh.js";
 import {
@@ -36,6 +35,7 @@ import {
   deleteRemoteBranch,
   fetchRef,
   headRef,
+  issueWorktreePath,
   pushClaim,
   readRemoteSha,
   removeWorktree,
@@ -219,7 +219,7 @@ export async function reclaimClaim(
     await removeWorktree(
       options.git,
       options.cwd,
-      join(options.worktreeRoot, `issue-${options.issue.number}`),
+      issueWorktreePath(options.worktreeRoot, options.issue.number),
     );
   }
   await deleteLocalBranch(options.git, options.cwd, {
