@@ -31,8 +31,9 @@ import { join } from "node:path";
 
 import { claimIssue, reclaimClaim, releaseClaim } from "./claim.js";
 import { errorMessage } from "./cli.js";
+import { budgetShares } from "./budget.js";
 import { GUARD_POLICY } from "./guard.js";
-import { GATE_TIMEOUT_MS, GateFailed, runGates } from "./gates.js";
+import { GateFailed, runGates } from "./gates.js";
 import {
   UNTRUSTED_INPUT_RULE,
   UNTRUSTED_INPUT_SECTION,
@@ -1169,7 +1170,13 @@ export async function runSteps(options: {
       };
       steps.push(record);
       options.onStep?.(record);
-      failure = { step: step.name, error: cause };
+      // A gate that failed belongs to the gates step, wherever it happened:
+      // the review's fix path runs the gates too, and a failure there is the
+      // gates' failure, not the review's.
+      failure = {
+        step: cause instanceof GateFailed ? "gates" : step.name,
+        error: cause,
+      };
       break;
     }
     steps.push(record);
@@ -1539,22 +1546,6 @@ export async function commitAll(
     ],
     { cwd },
   );
-}
-
-/**
- * The share of the run's budget the gates keep.
- *
- * The gates are the runner's own work and they run after the session: a
- * session that may spend the whole budget leaves the gates nothing to run
- * with, and a run whose gates never ran pushes nothing. The session is
- * therefore given the budget minus this share, and the gates are given what
- * the session leaves behind.
- *
- * A third of the budget, capped at the merge pipeline's own gate budget: the
- * two doors must not disagree about how long a build may take.
- */
-export function gatesBudget(deadlineMs: number): number {
-  return Math.min(GATE_TIMEOUT_MS, Math.floor(deadlineMs / 3));
 }
 
 /**
@@ -1965,11 +1956,11 @@ async function runPlan(
   let workSessionStartedAt: number | undefined;
 
   // The run's budget is one wall-clock for everything it does: the session,
-  // the gates and the review. The gates keep a share of it out of the
-  // session's, because they run after the session and a session that may
-  // spend everything leaves them nothing to run with.
-  const gateReserveMs = gatesBudget(options.deadlineMs);
-  const sessionBudgetMs = Math.max(0, options.deadlineMs - gateReserveMs);
+  // the gates and the review. Each keeps a share of it, and the share is
+  // reserved: a session that may spend the whole budget must not leave the
+  // gates nothing to run with.
+  const shares = budgetShares(options.deadlineMs);
+  const sessionBudgetMs = shares.sessionMs;
   const runStartedAt = Date.now();
   /**
    * What is left of the run's budget.
@@ -1979,6 +1970,27 @@ async function runPlan(
    */
   const remaining = (): number =>
     options.deadlineMs - (Date.now() - (workSessionStartedAt ?? runStartedAt));
+  /** What the gates have spent of their share. */
+  let gatesSpentMs = 0;
+  /**
+   * The gates run on the tree the agent left, and again on the tree a
+   * review's fix left. Both sets come out of the one share, so a fix loop
+   * that runs the suite on every iteration cannot spend the run's whole
+   * budget on gates.
+   */
+  const runTheGates = async (): Promise<string> => {
+    const startedAt = Date.now();
+    try {
+      return await gateTheTree({
+        git: options.git,
+        run: options.run,
+        cwd: state.worktreePath,
+        budgetMs: Math.max(0, shares.gatesMs - gatesSpentMs),
+      });
+    } finally {
+      gatesSpentMs += Date.now() - startedAt;
+    }
+  };
 
   const steps: Step[] = [];
 
@@ -2109,15 +2121,7 @@ async function runPlan(
         //
         // A gate that does not pass ends the run here: the claim is released
         // and nothing is pushed.
-        return await gateTheTree({
-          git: options.git,
-          run: options.run,
-          cwd: state.worktreePath,
-          // What is left of the run's budget: the gates share it with the
-          // session and the review, so a run cannot outlive its ceiling by
-          // three gate-hours.
-          budgetMs: remaining(),
-        });
+        return await runTheGates();
       },
     });
     steps.push({
@@ -2202,10 +2206,15 @@ async function runPlan(
 
         // `gate` is the engine's retry-until-pass block: review, and when the
         // verdict failed, fix what it found and review the fixed diff again.
+        //
+        // The review keeps its own share of the budget: the gates have theirs,
+        // and a review that is given what the gates left is a review that
+        // never gets to answer.
+        const reviewBudget = (): number => Math.min(shares.reviewMs, remaining());
         const outcome = await runReviewGate({
           attempts: MAX_FIX_ITERATIONS + 1,
           review: async () => {
-            const budget = remaining();
+            const budget = reviewBudget();
             if (budget <= 0) {
               exhausted = true;
               return "fail";
@@ -2228,7 +2237,7 @@ async function runPlan(
             return reviewed.verdict;
           },
           fix: async () => {
-            const budget = remaining();
+            const budget = reviewBudget();
             if (budget <= 0) {
               exhausted = true;
               return;
@@ -2252,12 +2261,12 @@ async function runPlan(
             // the tree that would be pushed: the gates run again, and a fix
             // that does not pass them is not pushed. The tree on the remote
             // is the tree the gates judged.
-            await gateTheTree({
-              git: options.git,
-              run: options.run,
-              cwd: state.worktreePath,
-              budgetMs: remaining(),
-            });
+            //
+            // The commit comes first, because the restore puts the worktree
+            // back to the tree the gates judged — and that tree is the
+            // commit. The build the gates leave is what the restore takes
+            // away, and the next commit is what it keeps out of.
+            await runTheGates();
             const sha = await headSha(options.git, state.worktreePath);
             const size = await changedSize(options.git, state.worktreePath, {
               base: state.base,
@@ -2270,6 +2279,12 @@ async function runPlan(
               verify: verifyPush({ verifyPushes: options.verifyPushes, size }),
             });
           },
+        }).catch((error: unknown) => {
+          // A gate that refused the fix is under the workflow's error: the
+          // engine stops on it, and the failure itself is what the record
+          // and the exit code must name.
+          const cause = (error as { readonly details?: unknown }).details;
+          throw cause instanceof Error ? cause : error;
         });
 
         if (outcome.passed) {

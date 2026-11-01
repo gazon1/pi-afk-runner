@@ -22,7 +22,13 @@ import {
   type AgentSession,
   type SessionFactory,
 } from "../src/session.js";
-import { assistantTextLines, repoFromRemoteUrl, resolveRepo } from "../src/cli.js";
+import {
+  assistantTextLines,
+  DEFAULT_DEADLINE_MS,
+  repoFromRemoteUrl,
+  resolveRepo,
+} from "../src/cli.js";
+import { budgetShares } from "../src/budget.js";
 import { type StateName } from "../src/workflow.js";
 import { createLeftoverTool, LEFTOVER_TOOL_NAME, MAX_LEFTOVERS_PER_RUN } from "../src/leftovers.js";
 import { pullRequestArgs } from "../src/gh.js";
@@ -84,7 +90,6 @@ import {
   computeDocumentsDigest,
   deriveState,
   fixPrompt,
-  gatesBudget,
   isSmallChange,
   verifyPush,
   ensureRegistryEntry,
@@ -2534,6 +2539,88 @@ describe("the CLI's run", () => {
     }
   });
 
+  it("test_the_fix_commits_carry_no_artifact_of_the_gates_that_judged_them", async () => {
+    // The gates build in the worktree, and the runner's own commits are made
+    // with `git add -A`: the artifact would go to the remote with the next
+    // fix. The restore puts the worktree back to the tree the gates judged,
+    // and the build they left is not in it.
+    const fixture = await fixtureWithSetupScript();
+    try {
+      const { gh } = stubGh([{ number: 42, title: "an issue" }]);
+      const run: CommandRunner = async (spec) => {
+        if (spec.command === "bash" && spec.args[0] === "./check.sh") {
+          await writeFile(join(spec.cwd, "build-output.txt"), "the build\n", "utf8");
+        }
+        return JSON.stringify({ verdict: "ci.yml  run 1  success" });
+      };
+
+      // The review never passes, so the fix runs again and again: the second
+      // fix's commit is the one that would carry the first fix's artifact.
+      const failure = await runOnce({
+        ...runOptions(fixture, gh),
+        run,
+        session: async ({ cwd, tools }) => {
+          if (isReviewer(tools)) {
+            return {
+              async prompt() {
+                const tool = tools?.[0] as unknown as {
+                  execute: (id: string, params: unknown) => Promise<unknown>;
+                };
+                await tool.execute("call-1", {
+                  verdict: "fail",
+                  findings: ["the fix is missing"],
+                });
+              },
+              async abort() {},
+              dispose() {},
+            };
+          }
+          // The fix session is the one without tools.
+          if (tools === undefined) {
+            return {
+              async prompt() {
+                await writeFile(join(cwd, "fix.txt"), "the fix\n", "utf8");
+              },
+              async abort() {},
+              dispose: () => {},
+            };
+          }
+          return {
+            async prompt() {
+              await writeFile(join(cwd, "work.txt"), "the work\n", "utf8");
+            },
+            async abort() {},
+            dispose: () => {},
+          };
+        },
+      }).then(
+        () => null,
+        (error: unknown) => error,
+      );
+
+      expect(failure).toBeInstanceOf(RunFailed);
+
+      const pushed = (
+        await gitOutput(["ls-remote", fixture.remote, workBranch(42)], {
+          cwd: fixture.repo,
+          env: fixture.env,
+        })
+      ).trim();
+      const sha = pushed.split(/\s+/)[0] ?? "";
+      const files = (
+        await gitOutput(["ls-tree", "-r", "--name-only", sha], {
+          cwd: fixture.repo,
+          env: fixture.env,
+        })
+      ).split("\n");
+      // The fix is there, and the build the gates left is not.
+      expect(files).toContain("fix.txt");
+      expect(files).not.toContain("build-output.txt");
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
   it("test_the_gates_run_between_the_session_and_the_push", async () => {
     // The order is the contract: the gates judge the tree, and the push
     // sends it. A gate that ran after the push would be a gate about the
@@ -2602,6 +2689,103 @@ describe("the CLI's run", () => {
       expect(record).toContain("gates — failed");
       expect(record).toContain("./check.sh");
       expect(record).toContain("detekt found a problem");
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("test_a_gate_that_fails_in_the_fix_path_stops_the_run_even_when_the_review_passes", async () => {
+    // The gates refused the fix, and the review of the fixed tree passed.
+    // The run must still stop: a run that carried on would say it worked, and
+    // the fix that did not pass the gates would never be pushed — with
+    // nothing in the record naming the gate.
+    const fixture = await fixtureWithSetupScript();
+    try {
+      const { gh } = stubGh([{ number: 42, title: "an issue" }]);
+      let gateRuns = 0;
+      let reviews = 0;
+      const run: CommandRunner = async (spec) => {
+        if (spec.command === "bash" && spec.args[0] === "./check.sh") {
+          gateRuns += 1;
+          if (gateRuns > 1) {
+            throw new CommandFailed(1, "bash", [...spec.args], "", "the fix broke the build");
+          }
+        }
+        return JSON.stringify({ verdict: "ci.yml  run 1  success" });
+      };
+
+      const failure = await runOnce({
+        ...runOptions(fixture, gh),
+        run,
+        session: async ({ cwd, tools }) => {
+          if (isReviewer(tools)) {
+            reviews += 1;
+            return {
+              async prompt() {
+                const tool = tools?.[0] as unknown as {
+                  execute: (id: string, params: unknown) => Promise<unknown>;
+                };
+                // The first review finds something, so the fix runs. The
+                // second one would pass: the tree it looks at is the local
+                // one, and the fix never passed the gates.
+                await tool.execute(
+                  "call-1",
+                  reviews === 1
+                    ? { verdict: "fail", findings: ["the fix is missing"] }
+                    : { verdict: "pass", findings: [] },
+                );
+              },
+              async abort() {},
+              dispose() {},
+            };
+          }
+          // The fix session is the one without tools.
+          if (tools === undefined) {
+            return {
+              async prompt() {
+                await writeFile(join(cwd, "fix.txt"), "the fix\n", "utf8");
+              },
+              async abort() {},
+              dispose: () => {},
+            };
+          }
+          return {
+            async prompt() {
+              await writeFile(join(cwd, "work.txt"), "the work\n", "utf8");
+            },
+            async abort() {},
+            dispose: () => {},
+          };
+        },
+      }).then(
+        () => null,
+        (error: unknown) => error,
+      );
+
+      expect(failure).toBeInstanceOf(RunFailed);
+      expect((failure as RunFailed).step).toBe("gates");
+
+      // The record names the gate and carries what it said.
+      const record = await readFile((failure as RunFailed).record, "utf8");
+      expect(record).toContain("./check.sh");
+      expect(record).toContain("the fix broke the build");
+
+      // And the fix was never pushed.
+      const pushed = (
+        await gitOutput(["ls-remote", fixture.remote, workBranch(42)], {
+          cwd: fixture.repo,
+          env: fixture.env,
+        })
+      ).trim();
+      const sha = pushed.split(/\s+/)[0] ?? "";
+      const files = (
+        await gitOutput(["ls-tree", "-r", "--name-only", sha], {
+          cwd: fixture.repo,
+          env: fixture.env,
+        })
+      ).split("\n");
+      expect(files).toContain("work.txt");
+      expect(files).not.toContain("fix.txt");
     } finally {
       await fixture.dispose();
     }
@@ -2747,7 +2931,10 @@ describe("the CLI's run", () => {
       );
 
       expect(failure).toBeInstanceOf(RunFailed);
-      expect((failure as RunFailed).step).toBe("review");
+      // The gate that failed is the gates' failure, wherever it happened: the
+      // exit code says the gates failed, not that the review did.
+      expect((failure as RunFailed).step).toBe("gates");
+      expect((failure as RunFailed).message).toContain("./check.sh");
 
       // The fix was never pushed: the branch on the remote carries the work
       // the gates judged, and not the fix that did not pass them.
@@ -2771,14 +2958,25 @@ describe("the CLI's run", () => {
     }
   });
 
-  it("test_the_gates_keep_a_share_of_the_runs_budget", () => {
-    // The gates run after the session, so the session may not spend the whole
-    // budget: a run whose gates never ran pushes nothing.
-    expect(gatesBudget(60 * 60 * 1000)).toBe(20 * 60 * 1000);
-    expect(gatesBudget(60_000)).toBe(20_000);
-    // And never more than the merge pipeline's own gate budget: the two doors
-    // must not disagree about how long a build may take.
-    expect(gatesBudget(10 * 60 * 60 * 1000)).toBe(GATE_TIMEOUT_MS);
+  it("test_the_gates_keep_their_own_share_of_the_runs_budget", () => {
+    // The gates keep what the merge door gives the same gate — an hour each,
+    // because the gate has the same work to do there — and the session and
+    // the review keep what is left. The shares are reserved: a session that
+    // spends its whole budget must not leave the gates nothing to run with.
+    const shares = budgetShares(DEFAULT_DEADLINE_MS);
+    expect(shares.gatesMs).toBe(3 * GATE_TIMEOUT_MS);
+    expect(shares.sessionMs).toBe(60 * 60 * 1000);
+    expect(shares.reviewMs).toBeGreaterThan(0);
+    expect(shares.sessionMs + shares.gatesMs + shares.reviewMs).toBe(DEFAULT_DEADLINE_MS);
+
+    // A smaller ceiling is a smaller run all the way through, and not a run
+    // whose gates are the part that starves.
+    const small = budgetShares(DEFAULT_DEADLINE_MS / 10);
+    expect(small.gatesMs).toBe(Math.floor((3 * GATE_TIMEOUT_MS) / 10));
+    expect(small.gatesMs).toBeGreaterThan(0);
+    expect(small.sessionMs + small.gatesMs + small.reviewMs).toBeLessThanOrEqual(
+      DEFAULT_DEADLINE_MS / 10,
+    );
   });
 
   it("test_one_invocation_acts_on_one_issue", async () => {

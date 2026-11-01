@@ -73,13 +73,15 @@ the repository's own gate checks. Created in the push step it would arrive after
 judged a tree the pull request never carries: the gates would judge a tree that is not the one
 that gets pushed.
 
-**The budget is shared, and the gates are inside it.** The run's ceiling is one hour for
-everything it does. The session may not spend all of it — the gates run after the session, and a
-session that spends everything leaves them nothing to run with — so the session keeps two thirds of
-the budget and the gates are given the rest. Each gate is capped at the merge pipeline's own gate
-budget, so the two doors do not disagree about how long a build may take. A gate that is killed, or
-that never started, has no exit code, and the record does not claim one — "exit 1" would say the
-gate refused the change when it never got to answer.
+**The budget is shared, and the gates are inside it.** The run's ceiling is divided into three
+**reserved** shares: the session keeps an hour, the gates keep an hour each, and the review keeps
+what is left. The gates' share is the same the merge pipeline gives the same gate, because the
+gate has the same work to do there — and a share that is only what is left over is a share a
+session can starve, and a gate that is killed half-way through leaves a run that pushes nothing.
+Each gate is capped at the merge pipeline's own gate budget, so the two doors do not disagree
+about how long a build may take. A smaller ceiling is a smaller run all the way through. A gate
+that is killed, or that never started, has no exit code, and the record does not claim one —
+"exit 1" would say the gate refused the change when it never got to answer.
 
 **The worktree goes back to the tree the gates judged.** A gate that builds leaves its build in the
 worktree, and the runner's later commits are made with `git add -A`: the artifacts would go to the

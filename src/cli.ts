@@ -34,6 +34,7 @@ import {
 import chalk from "chalk";
 import { EnvHttpProxyAgent, fetch as undiciFetch, setGlobalDispatcher } from "undici";
 
+import { DEFAULT_DEADLINE_MS } from "./budget.js";
 import { readClaimed, readQueue, runGh, type GhRunner } from "./gh.js";
 import { guardExtensionPath, installGuardPolicy } from "./guard.js";
 import { runCommand, runGit, type CommandRunner, type GitRunner } from "./git.js";
@@ -80,13 +81,13 @@ export const STEP_EXIT_CODES: Readonly<Record<string, number>> = {
 export const DEFAULT_STALE_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
 
 /**
- * One hour — the wall-clock ceiling on the run.
+ * The wall-clock ceiling on the run.
  *
- * The budget is shared by the work session, the gates and the review session;
- * none of them may exceed the remainder, and a run that spends it all does
- * not start the next one.
+ * The budget is shared by the work session, the gates and the review session:
+ * each keeps a share of it, and none of them may exceed its share. The shares
+ * and the default that adds them up live in `src/budget.ts`.
  */
-export const DEFAULT_DEADLINE_MS = 60 * 60 * 1000;
+export { DEFAULT_DEADLINE_MS };
 
 /** What the command line says. */
 export interface CliOptions {
@@ -143,7 +144,7 @@ export const USAGE = [
   "  --agent-dir <path>      Pi's agent directory (default: ~/.pi/agent)",
   "  --model <provider/id>   the model the agent runs on (default: the provider's first)",
   "  --no-verify             skip the target repository's pre-push hook when pushing",
-  "  --deadline-ms <n>       the ceiling on the run (default: 3600000)",
+  `  --deadline-ms <n>       the ceiling on the run (default: ${DEFAULT_DEADLINE_MS})`,
   "  --stale-after-ms <n>    how long a claim may sit (default: 604800000 — a week)",
   "  --help                  this text",
 ].join("\n");

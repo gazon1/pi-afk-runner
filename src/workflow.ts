@@ -25,6 +25,8 @@ import {
 } from "@quintinshaw/pi-dynamic-workflows";
 import type { TSchema } from "typebox";
 
+import { GateFailed } from "./gates.js";
+
 /** What a node of the graph is: a turn of the session, or work the runner does. */
 export type NodeKind = "turn" | "action";
 
@@ -411,7 +413,23 @@ export async function runReviewGate(options: {
         return await options.review();
       }
       if (label === "fix") {
-        await options.fix(prompt === "" ? undefined : prompt);
+        try {
+          await options.fix(prompt === "" ? undefined : prompt);
+        } catch (error) {
+          if (error instanceof GateFailed) {
+            // A gate that refused the fix is not a failure the engine may
+            // swallow: it would carry on to the next review, and the review
+            // would pass on a tree that was never pushed — the run would say
+            // it worked, and nothing would name the gate. The failure under
+            // it is kept, so the record and the exit code can name it.
+            throw new WorkflowError(
+              error.message,
+              WorkflowErrorCode.AGENT_EXECUTION_ERROR,
+              { recoverable: false, details: error },
+            );
+          }
+          throw error;
+        }
         return "ok";
       }
       throw new WorkflowError(

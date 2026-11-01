@@ -155,9 +155,12 @@ again, because an agent that skipped them is not a gate. The list is written dow
 A review's **fix** changes the tree, so the gates run again on it: a fix that does not pass them
 is not pushed, and the tree on the remote is the tree the gates judged.
 
-The gates share the run's budget: the session keeps two thirds of it, the gates what is left of
-the rest, and the review what the gates leave. A gate that is killed, or that never started, has
-no exit code, and the record does not claim one.
+The run's budget is divided into three **reserved** shares: the session keeps an hour, the gates
+keep an hour each — the same the merge door gives the same gate — and the review keeps what is
+left. A session that spends its whole budget cannot leave the gates nothing to run with, and a
+gate that is killed half-way through leaves a run that pushes nothing. A smaller ceiling
+(`--deadline-ms`) is a smaller run all the way through. A gate that is killed, or that never
+started, has no exit code, and the record does not claim one.
 
 **The host needs the repository's own tools.** `just` and whatever the target's gates call —
 `bash`, `python3`, the target's build — have to be on the machine the run works on. A gate that
