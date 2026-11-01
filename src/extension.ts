@@ -46,10 +46,17 @@ import {
 import { existsSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 
-import { runGit, workBranch } from "./git.js";
+import { runCommand, runGit, workBranch, type CommandRunner } from "./git.js";
 import { RUN_STATUS_ENTRY, statusFromEntries, statusLine, type RunStatus } from "./live.js";
 import { takeLock } from "./lock.js";
-import { RunFailed, newRunId, runOnce, type RunOptions, type RunResult } from "./runner.js";
+import {
+  RunFailed,
+  SETUP_SCRIPT,
+  newRunId,
+  runOnce,
+  type RunOptions,
+  type RunResult,
+} from "./runner.js";
 import type { AgentSession, SessionFactory } from "./session.js";
 import { PINNED_PI_RANGE, assertInstalledPiVersion, installedPiVersion } from "./version.js";
 
@@ -224,6 +231,16 @@ export interface LiveDependencies {
   readonly session?: SessionFactory;
   /** The run itself. One issue, worked to its end; `runOnce` when it is absent. */
   readonly work?: (options: RunOptions) => Promise<RunResult>;
+  /** How the repository's own setup script is run in a worktree the door puts back. */
+  readonly run?: CommandRunner;
+}
+
+/** What the restore of a worktree did. */
+interface Restored {
+  /** The worktree did not come back — why. */
+  readonly problem: string | null;
+  /** The worktree came back, but the repository's setup script did not run in it — why. */
+  readonly unprepared: string | null;
 }
 
 /** The run in flight, as the host session sees it. */
@@ -281,6 +298,8 @@ export function liveFrontDoor(
   let live: LiveRun | null = null;
   let session: SteerableSession | null = null;
   let workSession: SteerableSession | null = null;
+  /** How the door runs a command: the real one, or the one a test gives it. */
+  const command = dependencies.run ?? runCommand;
   /** Whether the agent has a turn running: an abort only means something then. */
   let working = false;
   /** Whether the human stopped this run: the prompt array asks before every turn. */
@@ -469,7 +488,7 @@ export function liveFrontDoor(
     );
 
     const runOptions: RunOptions = {
-      ...runOptionsFrom(options, factory),
+      ...runOptionsFrom(options, factory, { run: command }),
       stopped: () => stopped,
       onIssue: (issue) => {
         run.status = { issue: issue.number, title: issue.title, stage: "" };
@@ -553,12 +572,18 @@ export function liveFrontDoor(
         if (autoAttach !== null) {
           await autoAttach;
           if (last !== null) {
-            const problem = await restoreWorktree(last);
-            if (problem !== null) {
+            const restored = await restoreWorktree(last);
+            if (restored.problem !== null) {
               talk(
                 ctx,
-                `afk-runner: the worktree this chat is in would not come back: ${problem}`,
+                `afk-runner: the worktree this chat is in would not come back: ${restored.problem}`,
                 "error",
+              );
+            } else if (restored.unprepared !== null) {
+              talk(
+                ctx,
+                `afk-runner: the worktree this chat is in came back unprepared — ${SETUP_SCRIPT} did not run in it: ${restored.unprepared}`,
+                "warning",
               );
             }
           }
@@ -652,14 +677,24 @@ export function liveFrontDoor(
 
   /**
    * Put the worktree back where the run had it, so a session whose working
-   * directory is that path can read again. Returns why it could not, or null.
+   * directory is that path can read again.
+   *
+   * A worktree that comes back is **prepared**: the repository's own setup
+   * script runs in it, the same way it runs in a worktree the runner makes. A
+   * worktree without it holds tracked files only — no `.env`, no per-worktree
+   * hooks, no private Gradle home — and the gates fail in a way that is not
+   * about the work.
+   *
+   * A worktree that is still there is left as it is: the runner prepared it
+   * when it made it, and preparing it again would be the runner's own step
+   * done twice.
    */
   const restoreWorktree = async (target: {
     readonly worktreePath: string;
     readonly branch: string;
     readonly remote: string;
     readonly checkout: string;
-  }): Promise<string | null> => {
+  }): Promise<Restored> => {
     const targetPath = resolve(target.worktreePath);
     const prune = async (): Promise<void> => {
       try {
@@ -671,8 +706,9 @@ export function liveFrontDoor(
         const list = await runGit(["worktree", "list", "--porcelain"], { cwd: target.checkout });
         return list.split("\n").some((line) => {
           if (!line.startsWith("worktree ")) return false;
-          const p = line.slice("worktree ".length).trim();
-          return resolve(p) === targetPath || p === target.worktreePath || p === targetPath;
+          // Git prints absolute paths, so one comparison of resolved paths is
+          // the whole question.
+          return resolve(line.slice("worktree ".length).trim()) === targetPath;
         });
       } catch {
         return false;
@@ -698,11 +734,28 @@ export function liveFrontDoor(
       }).catch(() => {});
       return add(["worktree", "add", "--detach", targetPath, tracking]);
     };
+    /**
+     * The repository's own preparation, run from the worktree's own copy of the
+     * script — the script works on the checkout it lives in.
+     */
+    const prepare = async (): Promise<string | null> => {
+      try {
+        await command({
+          command: "bash",
+          args: [SETUP_SCRIPT],
+          cwd: targetPath,
+        });
+        return null;
+      } catch (failure) {
+        return errorMessage(failure);
+      }
+    };
 
     await prune();
     if (existsSync(targetPath)) {
       if (await registered()) {
-        return null;
+        // It is still there, and the runner prepared it when it made it.
+        return { problem: null, unprepared: null };
       }
       // A directory git does not know would make `worktree add` refuse.
       try {
@@ -712,7 +765,7 @@ export function liveFrontDoor(
     }
     const first = await addBranch();
     if (first === null) {
-      return null;
+      return { problem: null, unprepared: await prepare() };
     }
     if (first.includes("already exists")) {
       // A registration prune missed: forget the tree and try once more.
@@ -722,10 +775,14 @@ export function liveFrontDoor(
       await prune();
       const second = await addBranch();
       if (second === null) {
-        return null;
+        return { problem: null, unprepared: await prepare() };
       }
     }
-    return addDetached();
+    const detached = await addDetached();
+    if (detached !== null) {
+      return { problem: detached, unprepared: null };
+    }
+    return { problem: null, unprepared: await prepare() };
   };
 
   /**
@@ -751,14 +808,21 @@ export function liveFrontDoor(
       return;
     }
     const target = last;
-    const problem = await restoreWorktree(target);
-    if (problem !== null) {
+    const restored = await restoreWorktree(target);
+    if (restored.problem !== null) {
       talk(
         ctx,
-        `afk-runner: the worktree would not come back, so the session would have nowhere to work: ${problem}`,
+        `afk-runner: the worktree would not come back, so the session would have nowhere to work: ${restored.problem}`,
         "error",
       );
       return;
+    }
+    if (restored.unprepared !== null) {
+      talk(
+        ctx,
+        `afk-runner: the worktree came back unprepared — ${SETUP_SCRIPT} did not run in it: ${restored.unprepared}`,
+        "warning",
+      );
     }
     try {
       const switched = await ctx.switchSession(target.transcript as string);

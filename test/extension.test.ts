@@ -31,7 +31,9 @@ import {
   installGuardPolicy,
 } from "../src/guard.js";
 import { RUN_STATUS_ENTRY, statusFromEntries, statusLine } from "../src/live.js";
+import { takeLock } from "../src/lock.js";
 import type { RunOptions, RunResult } from "../src/runner.js";
+import { runCommand } from "../src/git.js";
 import { createFixtureRepository, gitOutput } from "./git-sandbox.js";
 
 
@@ -113,6 +115,21 @@ function fakeContext(
 
 /** Where the fake session says its transcript is. */
 const TRANSCRIPT = "/tmp/afk-e2e/transcript.jsonl";
+
+/**
+ * The repository's own setup script, as a fixture.
+ *
+ * It stands in for the real one: it writes the `.env` a worktree does not
+ * have on its own, and it records that it ran next to the worktree, so a test
+ * can count the preparations.
+ */
+const SETUP_SCRIPT_BODY = [
+  "#!/usr/bin/env bash",
+  "set -eu",
+  'printf "prepared\\n" > .env',
+  'printf "prepared\\n" >> "$(dirname "$PWD")/prepared.log"',
+  "",
+].join("\n");
 
 /** A picture the human pasted, as the queue carries it. */
 const IMAGE = { type: "image" as const, data: "iVBORw0KGgo=", mimeType: "image/png" };
@@ -436,7 +453,9 @@ describe("the run the front door owns", () => {
   });
 
   it("puts back the worktree the auto-attach left this chat in, after the run's cleanup", async () => {
-    const fixture = await createFixtureRepository();
+    const fixture = await createFixtureRepository({
+      files: { "scripts/setup-worktree.sh": SETUP_SCRIPT_BODY },
+    });
     const worktreeRoot = join(fixture.root, "worktrees");
     const worktreePath = join(worktreeRoot, "issue-42");
     try {
@@ -484,13 +503,79 @@ describe("the run the front door owns", () => {
       expect(await git(["worktree", "list", "--porcelain"])).toContain(
         `branch refs/heads/agent/issue-42`,
       );
+
+      // The worktree that comes back is prepared: the repository's own script
+      // ran in it, so the gates work in it the way they work in a worktree the
+      // runner made. One run of the script, not two.
+      await vi.waitFor(() => expect(existsSync(join(worktreePath, ".env"))).toBe(true));
+      expect(await readFile(join(worktreeRoot, "prepared.log"), "utf8")).toBe("prepared\n");
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("does not prepare a worktree the run did not remove a second time", async () => {
+    const fixture = await createFixtureRepository({
+      files: { "scripts/setup-worktree.sh": SETUP_SCRIPT_BODY },
+    });
+    const worktreeRoot = join(fixture.root, "worktrees");
+    const worktreePath = join(worktreeRoot, "issue-42");
+    try {
+      const git = (args: readonly string[]) =>
+        gitOutput(args, { cwd: fixture.repo, env: fixture.env });
+      await git(["branch", "agent/issue-42"]);
+      await mkdir(worktreeRoot, { recursive: true });
+      await git(["worktree", "add", worktreePath, "agent/issue-42"]);
+      // What the runner does when it makes a worktree: it prepares it.
+      await runCommand({
+        command: "bash",
+        args: ["scripts/setup-worktree.sh"],
+        cwd: worktreePath,
+      });
+
+      const host = fakePi();
+      const fake = fakeSession();
+      const created = deferred();
+      const release = deferred();
+      const lockDirectory = join(fixture.root, "lock");
+      const work = async (options: RunOptions): Promise<RunResult> => {
+        options.onIssue?.({ number: 42, title: "Fix the thing" });
+        await options.session({ cwd: worktreePath, systemPromptSections: {} });
+        created.resolve();
+        await release.promise;
+        // The worktree is still there: this run did not remove it.
+        return { issue: 42, outcome: "completed", steps: [], record: "" };
+      };
+
+      const door = liveFrontDoor(host.pi, { session: async () => fake.session, work });
+      const { ctx } = fakeContext();
+      await door.start(
+        `--repo gazon1/cardinalfish --checkout ${fixture.repo} --worktree-root ${worktreeRoot} --lock-dir ${lockDirectory}`,
+        ctx,
+      );
+      await created.promise;
+      release.resolve();
+      // The lock is given back at the very end of the run, after the worktree
+      // has been dealt with: taking it means the run is over.
+      await vi.waitFor(async () => {
+        const lock = await takeLock(lockDirectory).catch(() => null);
+        expect(lock).not.toBeNull();
+        await lock?.release();
+      });
+
+      // The worktree is still there, and it was prepared when it was made. The
+      // door does not prepare it again.
+      await door.attach(ctx);
+      expect(await readFile(join(worktreeRoot, "prepared.log"), "utf8")).toBe("prepared\n");
     } finally {
       await fixture.dispose();
     }
   });
 
   it("restores a review-only worktree that has no local branch, detached", async () => {
-    const fixture = await createFixtureRepository();
+    const fixture = await createFixtureRepository({
+      files: { "scripts/setup-worktree.sh": SETUP_SCRIPT_BODY },
+    });
     const worktreeRoot = join(fixture.root, "worktrees");
     const worktreePath = join(worktreeRoot, "issue-42");
     try {
@@ -533,6 +618,8 @@ describe("the run the front door owns", () => {
 
       await vi.waitFor(() => expect(existsSync(worktreePath)).toBe(true));
       expect(await git(["worktree", "list", "--porcelain"])).toContain("detached");
+      // A detached worktree is prepared as well: it is the same tree.
+      await vi.waitFor(() => expect(existsSync(join(worktreePath, ".env"))).toBe(true));
     } finally {
       await fixture.dispose();
     }
