@@ -31,6 +31,9 @@ const execFileAsync = promisify(execFile);
 /** The label a human applies to say "this issue is specified and may be taken". */
 export const QUEUE_LABEL = "ready-for-agent";
 
+/** The marker a brief comment has to open with. */
+export const BRIEF_MARKER = "## Agent Brief";
+
 /** The runner's claim on an issue. */
 export const CLAIM_LABEL = "agent-in-progress";
 
@@ -46,11 +49,12 @@ export const GH_DEFAULT_PAGE_SIZE = 30;
 /**
  * The page size the runner asks for.
  *
- * The queue is larger than `gh`'s default, so the default silently truncates
- * it. Five hundred is far above any queue this repository has, and the cost of
- * asking for more than you need is one request.
+ * The runner's issue reads are larger than `gh`'s default, and the default
+ * silently truncates them: the queue, the claimed set, and the open issues a
+ * duplicate check reads. Five hundred is far above any of them, and the cost
+ * of asking for more than you need is one request.
  */
-export const QUEUE_PAGE_SIZE = 500;
+export const ISSUE_PAGE_SIZE = 500;
 
 /** An issue, as far as the runner cares. */
 export interface IssueSummary {
@@ -87,7 +91,7 @@ export function queueArgs(repo: string): string[] {
     "--search",
     `-label:${CLAIM_LABEL}`,
     "--limit",
-    String(QUEUE_PAGE_SIZE),
+    String(ISSUE_PAGE_SIZE),
     "--json",
     "number,title,updatedAt,labels",
   ];
@@ -114,7 +118,30 @@ export function claimedArgs(repo: string): string[] {
     "--label",
     CLAIM_LABEL,
     "--limit",
-    String(QUEUE_PAGE_SIZE),
+    String(ISSUE_PAGE_SIZE),
+    "--json",
+    "number,title,updatedAt,labels",
+  ];
+}
+
+/**
+ * The arguments that read the open issues — every one of them, whatever labels it carries.
+ *
+ * The queue read asks for the issues a human judged specified; this one asks for
+ * everything that is open, and it is the read a duplicate check needs: an issue that
+ * another run is already working is not in the queue — the queue excludes the
+ * claimed issues — and filing a second copy of it would be filing it twice.
+ */
+export function openIssuesArgs(repo: string): string[] {
+  return [
+    "issue",
+    "list",
+    "--repo",
+    repo,
+    "--state",
+    "open",
+    "--limit",
+    String(ISSUE_PAGE_SIZE),
     "--json",
     "number,title,updatedAt,labels",
   ];
@@ -253,6 +280,14 @@ export async function readQueue(repo: string, gh: GhRunner = runGh): Promise<Iss
   return parseIssues(await gh(queueArgs(repo)));
 }
 
+/** Read the open issues — the duplicate check's read. */
+export async function readOpenIssues(
+  repo: string,
+  gh: GhRunner = runGh,
+): Promise<IssueSummary[]> {
+  return parseIssues(await gh(openIssuesArgs(repo)));
+}
+
 /** Read the issues somebody has claimed — including a run that died holding one. */
 export async function readClaimed(
   repo: string,
@@ -330,6 +365,55 @@ export async function readIssue(
     updatedAt: typeof record.updatedAt === "string" ? record.updatedAt : "",
     state: typeof record.state === "string" ? record.state : "",
   };
+}
+
+/** The arguments that create an issue. */
+export function createIssueArgs(options: {
+  readonly repo: string;
+  readonly title: string;
+  readonly body: string;
+  readonly labels?: readonly string[];
+}): string[] {
+  const args = [
+    "issue",
+    "create",
+    "--repo",
+    options.repo,
+    "--title",
+    options.title,
+    "--body",
+    options.body,
+  ];
+  for (const label of options.labels ?? []) {
+    args.push("--label", label);
+  }
+  return args;
+}
+
+/**
+ * The number of an issue, from the URL `gh issue create` prints.
+ */
+export function issueNumberFromUrl(url: string): number | null {
+  const match = /\/issues\/(\d+)/.exec(url.trim());
+  return match === null ? null : Number(match[1]);
+}
+
+/** Create an issue and return its number. */
+export async function createIssue(
+  options: {
+    readonly repo: string;
+    readonly title: string;
+    readonly body: string;
+    readonly labels?: readonly string[];
+  },
+  gh: GhRunner = runGh,
+): Promise<number> {
+  const output = await gh(createIssueArgs(options));
+  const number = issueNumberFromUrl(output.trim());
+  if (number === null) {
+    throw new Error(`gh did not say which issue it opened: ${output.trim()}`);
+  }
+  return number;
 }
 
 /**

@@ -8,6 +8,7 @@ import {
   UNTRUSTED_INPUT_SECTION,
   BRIEF_MARKER,
   BRIEF_SECTION,
+  VERDICT_TOOL_NAME,
   fenceIssueBody,
   fenceIssueComments,
   findBrief,
@@ -19,6 +20,7 @@ import {
   type SessionFactory,
 } from "../src/session.js";
 import { assistantTextLines, repoFromRemoteUrl, resolveRepo } from "../src/cli.js";
+import { createLeftoverTool, LEFTOVER_TOOL_NAME, MAX_LEFTOVERS_PER_RUN } from "../src/leftovers.js";
 import { pullRequestArgs } from "../src/gh.js";
 import {
   CommandFailed,
@@ -353,6 +355,19 @@ function valueAfter(args: readonly string[], flag: string): string {
     throw new Error(`\`${flag}\` is the last argument and has no value`);
   }
   return value;
+}
+
+/**
+ * Whether the session is the reviewer's.
+ *
+ * The reviewer is the session that ends on the verdict tool. It used to be the
+ * only session with tools at all; the work session carries the tool that files
+ * a leftover now, so the name is what tells the two apart.
+ */
+function isReviewer(tools: readonly unknown[] | undefined): boolean {
+  return (tools ?? []).some(
+    (tool) => (tool as { readonly name?: string }).name === VERDICT_TOOL_NAME,
+  );
 }
 
 const execFileAsync = promisify(execFile);
@@ -999,6 +1014,56 @@ describe("the agent's session", () => {
     expect(result.aborted).toBe(true);
   });
 
+  it("test_the_fourth_turn_comes_out_of_the_array's_budget", async () => {
+    // The deadline is one wall-clock for the whole array, so the last turn is
+    // not a share of its own: it is what the earlier turns left behind.
+    const turns: string[] = [];
+    let release: (() => void) | undefined;
+    let thirdStarted: (() => void) | undefined;
+    const onThird = new Promise<void>((resolve) => {
+      thirdStarted = resolve;
+    });
+    const session: AgentSession = {
+      async prompt(text) {
+        turns.push(text);
+        if (turns.length === 3) {
+          thirdStarted?.();
+          // The third turn never settles on its own: the deadline ends it.
+          await new Promise<void>((resolve) => {
+            release = resolve;
+          });
+        }
+      },
+      async abort() {
+        release?.();
+      },
+      dispose() {},
+    };
+
+    let fire: (() => void) | undefined;
+    const schedule = (action: () => void): (() => void) => {
+      fire = action;
+      return () => {
+        fire = undefined;
+      };
+    };
+
+    const run = runPromptArray({
+      session,
+      prompts: ["one", "two", "three", "four"],
+      deadlineMs: 60_000,
+      schedule,
+    });
+
+    await onThird;
+    fire?.();
+
+    const result = await run;
+    expect(result.aborted).toBe(true);
+    // The fourth turn never started: the budget was gone.
+    expect(turns).toEqual(["one", "two", "three"]);
+  });
+
   it("stops on a turn whose model call failed", async () => {
     const turns: string[] = [];
     const session: AgentSession = {
@@ -1032,7 +1097,7 @@ describe("the agent's session", () => {
     // The directory is resolved next to the module, so it is the same
     // directory whether the package runs from src/ or from the built dist/.
     const prompts = await readPrompts();
-    expect(prompts).toHaveLength(3);
+    expect(prompts).toHaveLength(4);
     expect(prompts[0]).toContain("## Agent Brief");
     expect(promptsDirectory()).toContain("prompts");
   });
@@ -2186,11 +2251,11 @@ describe("the CLI's run", () => {
       run: async () => JSON.stringify({ verdict: "ci.yml  run 1  success" }),
       session: async ({ cwd, tools, systemPromptSections }) => {
         sections.push(systemPromptSections);
-        if (tools !== undefined) {
+        if (isReviewer(tools)) {
           // The reviewer: it answers with a verdict and nothing else.
           return {
             async prompt() {
-              const tool = tools[0] as unknown as {
+              const tool = tools?.[0] as unknown as {
                 execute: (id: string, params: unknown) => Promise<unknown>;
               };
               await tool.execute("call-1", { verdict: "pass", findings: [] });
@@ -2249,11 +2314,11 @@ describe("the CLI's run", () => {
       await runOnce({
         ...runOptions(fixture, gh),
         session: async ({ cwd, tools }) => {
-          if (tools !== undefined) {
+          if (isReviewer(tools)) {
             // The reviewer still answers with its verdict.
             return {
               async prompt() {
-                const tool = tools[0] as unknown as {
+                const tool = tools?.[0] as unknown as {
                   execute: (id: string, params: unknown) => Promise<unknown>;
                 };
                 await tool.execute("call-1", { verdict: "pass", findings: [] });
@@ -2323,10 +2388,10 @@ describe("the CLI's run", () => {
   function workingSession(): SessionFactory {
     const worked = new Set<string>();
     return async ({ cwd, tools }) => {
-      if (tools !== undefined) {
+      if (isReviewer(tools)) {
         return {
           async prompt() {
-            const tool = tools[0] as unknown as {
+            const tool = tools?.[0] as unknown as {
               execute: (id: string, params: unknown) => Promise<unknown>;
             };
             await tool.execute("call-1", { verdict: "pass", findings: [] });
@@ -2494,7 +2559,7 @@ describe("the CLI's run", () => {
         {
           gh,
           session: async (options) => {
-            if (options.tools === undefined) {
+            if (!isReviewer(options.tools)) {
               return work(options);
             }
             // The reviewer: it is cut off before it can state a verdict.
@@ -3097,5 +3162,260 @@ describe("the CLI's run", () => {
         await fixture.dispose();
       }
     }, 60_000);
+  });
+});
+
+describe("the leftovers a run files", () => {
+  /** A brief in the target repository's own format. */
+  const BRIEF = [
+    "## Agent Brief",
+    "",
+    "**Category:** enhancement",
+    "**Summary:** the name does not say what it holds",
+    "",
+    "**Acceptance criteria:**",
+    "- [ ] the name says what it holds",
+  ].join("\n");
+
+  /** The values of every occurrence of a flag. */
+  function valuesAfter(args: readonly string[], flag: string): string[] {
+    const values: string[] = [];
+    args.forEach((value, index) => {
+      if (value === flag) {
+        const next = args[index + 1];
+        if (next !== undefined) {
+          values.push(next);
+        }
+      }
+    });
+    return values;
+  }
+
+  interface TargetIssue {
+    readonly number: number;
+    readonly title: string;
+    readonly body: string;
+    readonly labels: readonly string[];
+  }
+
+  /**
+   * The target repository, as `gh` answers it.
+   *
+   * The label filter is honoured, because the claim that a filed issue is
+   * picked up by the next run is a claim about the **queue** read — and a stub
+   * that ignored the label would prove nothing.
+   *
+   * The issues this stub files come back in its reads, the way a real
+   * repository answers: an issue that is open is in the list, so filing the
+   * same title twice is refused.
+   */
+  function fakeTarget(open: readonly TargetIssue[] = []): {
+    gh: (args: readonly string[]) => Promise<string>;
+    created: TargetIssue[];
+  } {
+    const created: TargetIssue[] = [];
+    const gh = async (args: readonly string[]): Promise<string> => {
+      if (args[0] === "issue" && args[1] === "view") {
+        return JSON.stringify({
+          body: "the brief",
+          comments: [],
+          title: "an issue",
+          labels: [],
+          updatedAt: "",
+          state: "OPEN",
+        });
+      }
+      if (args[0] === "issue" && args[1] === "list") {
+        const labels = valuesAfter(args, "--label");
+        const all = [...open, ...created];
+        return JSON.stringify(
+          all
+            .filter((issue) => labels.every((label) => issue.labels.includes(label)))
+            .map((issue) => ({
+              number: issue.number,
+              title: issue.title,
+              updatedAt: "",
+              labels: issue.labels,
+            })),
+        );
+      }
+      if (args[0] === "issue" && args[1] === "create") {
+        const issue: TargetIssue = {
+          number: 100 + created.length,
+          title: valueAfter(args, "--title"),
+          body: valueAfter(args, "--body"),
+          labels: valuesAfter(args, "--label"),
+        };
+        created.push(issue);
+        return `https://github.com/gazon1/sing/issues/${issue.number}\n`;
+      }
+      return "[]";
+    };
+    return { gh, created };
+  }
+
+  /** The tool's own call, without the SDK's arguments around it. */
+  async function file(
+    tool: ReturnType<typeof createLeftoverTool>,
+    params: { readonly title: string; readonly brief: string },
+  ): Promise<{
+    content: { readonly type: string; readonly text: string }[];
+    details: { readonly filed: boolean; readonly number: number; readonly reason: string };
+    isError?: boolean;
+  }> {
+    const execute = tool.execute as unknown as (
+      id: string,
+      params: { readonly title: string; readonly brief: string },
+    ) => Promise<{
+      content: { readonly type: string; readonly text: string }[];
+      details: { readonly filed: boolean; readonly number: number; readonly reason: string };
+      isError?: boolean;
+    }>;
+    return await execute("call-1", params);
+  }
+
+  it("test_the_prompt_array_asks_what_follows_the_work", async () => {
+    // Four turns now: the last one asks the question the work leaves open.
+    expect(PROMPT_FILES).toHaveLength(4);
+    expect(PROMPT_FILES[3]).toBe("04-next.md");
+
+    const prompts = await readPrompts();
+    expect(prompts).toHaveLength(4);
+
+    const last = prompts[3] ?? "";
+    expect(last).toContain("improvement and refactoring");
+    expect(last).toContain("## Agent Brief");
+    expect(last).toContain(LEFTOVER_TOOL_NAME);
+    // The cheap ones are fixed in the run, and the gates run again.
+    expect(last).toContain("gates again");
+    // And the bound is in the prompt, not only in the tool.
+    expect(last).toContain("three");
+  });
+
+  it("test_the_work_session_is_given_the_tool_that_files_a_leftover", async () => {
+    const turns: string[] = [];
+    let tools: readonly { readonly name: string }[] = [];
+    const factory: SessionFactory = async (options) => {
+      tools = options.tools ?? [];
+      return {
+        async prompt(text) {
+          turns.push(text);
+        },
+        async abort() {},
+        dispose() {},
+      };
+    };
+
+    await startAgent({
+      factory,
+      cwd: process.cwd(),
+      repo: "gazon1/sing",
+      issueNumber: 42,
+      gh: fakeTarget().gh,
+      deadlineMs: 60_000,
+    });
+
+    // The tool is there, and the array ran all four turns.
+    expect(tools.map((tool) => tool.name)).toContain(LEFTOVER_TOOL_NAME);
+    expect(turns).toHaveLength(PROMPT_FILES.length + 1);
+  });
+
+  it("test_a_leftover_is_filed_as_an_issue_the_queue_can_take", async () => {
+    const target = fakeTarget();
+    const tool = createLeftoverTool({ repo: "gazon1/sing", gh: target.gh });
+
+    const result = await file(tool, { title: "The name does not say what it holds", brief: BRIEF });
+
+    expect(result.isError).toBeUndefined();
+    expect(result.details.filed).toBe(true);
+    expect(target.created).toHaveLength(1);
+
+    const filed = target.created[0];
+    // The label is the queue's label, and the brief opens with the marker —
+    // that is where the next run looks for it.
+    expect(filed?.labels).toContain(QUEUE_LABEL);
+    expect(filed?.body.startsWith(BRIEF_MARKER)).toBe(true);
+    expect(filed?.title).toBe("The name does not say what it holds");
+  });
+
+  it("test_a_filed_leftover_is_picked_up_by_the_next_run", async () => {
+    const target = fakeTarget();
+    const tool = createLeftoverTool({ repo: "gazon1/sing", gh: target.gh });
+
+    await file(tool, { title: "The name does not say what it holds", brief: BRIEF });
+
+    // The queue read finds it: the label is the one the queue asks for.
+    const queue = await readQueue("gazon1/sing", target.gh);
+    expect(queue.map((issue) => issue.number)).toContain(target.created[0]?.number);
+    expect(queue[0]?.labels).toContain(QUEUE_LABEL);
+  });
+
+  it("test_a_run_files_at_most_three_leftovers", async () => {
+    const target = fakeTarget();
+    const tool = createLeftoverTool({ repo: "gazon1/sing", gh: target.gh });
+
+    for (let index = 0; index < MAX_LEFTOVERS_PER_RUN; index += 1) {
+      const result = await file(tool, { title: `leftover ${index}`, brief: BRIEF });
+      expect(result.details.filed).toBe(true);
+    }
+
+    // The fourth is refused: the queue grows for ever otherwise.
+    const refused = await file(tool, { title: "one too many", brief: BRIEF });
+    expect(refused.isError).toBe(true);
+    expect(refused.details.filed).toBe(false);
+    expect(target.created).toHaveLength(MAX_LEFTOVERS_PER_RUN);
+  });
+
+  it("test_a_leftover_that_is_already_open_is_not_filed_again", async () => {
+    const target = fakeTarget([
+      {
+        number: 7,
+        title: "The name does not say what it holds",
+        body: BRIEF,
+        labels: [QUEUE_LABEL],
+      },
+    ]);
+    const tool = createLeftoverTool({ repo: "gazon1/sing", gh: target.gh });
+
+    const result = await file(tool, { title: "The name does not say what it holds", brief: BRIEF });
+
+    expect(result.isError).toBe(true);
+    expect(result.details.filed).toBe(false);
+    expect(target.created).toHaveLength(0);
+  });
+
+  it("test_the_same_leftover_is_not_filed_twice_in_one_run", async () => {
+    const target = fakeTarget();
+    const tool = createLeftoverTool({ repo: "gazon1/sing", gh: target.gh });
+
+    const first = await file(tool, { title: "The name does not say what it holds", brief: BRIEF });
+    expect(first.details.filed).toBe(true);
+
+    // The same leftover again — and the same one in another spelling. The
+    // words are what make two leftovers the same leftover.
+    for (const title of [
+      "The name does not say what it holds",
+      "the name does not   say what it holds",
+    ]) {
+      const again = await file(tool, { title, brief: BRIEF });
+      expect(again.isError).toBe(true);
+      expect(again.details.filed).toBe(false);
+    }
+
+    expect(target.created).toHaveLength(1);
+  });
+
+  it("test_a_brief_that_does_not_open_with_the_marker_is_refused", async () => {
+    const target = fakeTarget();
+    const tool = createLeftoverTool({ repo: "gazon1/sing", gh: target.gh });
+
+    const result = await file(tool, {
+      title: "a leftover without a brief",
+      brief: "the name does not say what it holds",
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.details.filed).toBe(false);
+    expect(target.created).toHaveLength(0);
   });
 });

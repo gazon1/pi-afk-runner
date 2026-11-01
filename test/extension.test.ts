@@ -774,6 +774,12 @@ describe("the guard's policy", () => {
     // Without a bash entry the guard reports a configuration issue and the shell
     // inherits the allow silently.
     expect(GUARD_POLICY.bash["*"]).toBe("allow");
+    // The leftovers go through the runner's tool, which holds the bounds on the
+    // queue. A shell command is a way around them.
+    expect(GUARD_POLICY.bash["gh issue create*"]).toEqual({
+      action: "deny",
+      reason: expect.stringContaining("agent_leftover"),
+    });
     // The guard's own wildcards: `*` crosses `/`, and the last matching entry wins.
     expect(GUARD_POLICY.path["*.env"]).toBe("deny");
     expect(GUARD_POLICY.path["*.env.*"]).toBe("deny");

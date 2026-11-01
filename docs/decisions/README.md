@@ -23,6 +23,7 @@ for the rule that the copies follow.
 | `2026-10-31-the-sweep-belongs-to-the-cli.md` | who drains the queue, and what the unit's timeout is sized for |
 | `2026-10-31-an-interrupted-run-releases-its-claim.md` | what a killed run does with its claim, and why the signal releases it |
 | `2026-10-30-the-brief-is-the-body-when-no-comment-carries-the-marker.md` | where the brief is, and what happens when there is none |
+| `2026-11-02-the-fourth-turn-asks-what-follows.md` | the fourth turn, and who files the leftovers |
 | `2026-10-30-the-afk-runner-is-a-pi-extension.md` | why the runner is a separate repository, and the three layers of exclusion |
 | `2026-09-25-git-hooks-worktree-isolation.md` | the worktree and the hooks that go with it |
 | `2026-09-26-writer-reviewer-pattern.md` | the two agents, and the one that writes and the one that reads |

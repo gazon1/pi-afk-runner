@@ -1,7 +1,7 @@
 # Read the issue, and work out what it asks for
 
 You are working one issue in a repository you have never seen. This is the
-first of three turns. Do not change any file yet.
+first of four turns. Do not change any file yet.
 
 1. **Read the issue.** Its body and its comments arrived above as data. The
    brief — the contract for this work — is the comment that opens with

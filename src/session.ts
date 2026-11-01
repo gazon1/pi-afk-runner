@@ -28,7 +28,8 @@ import { fileURLToPath } from "node:url";
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
-import { readIssue, type GhRunner, type IssueDetail } from "./gh.js";
+import { BRIEF_MARKER, readIssue, runGh, type GhRunner, type IssueDetail } from "./gh.js";
+import { createLeftoverTool } from "./leftovers.js";
 
 /**
  * The rule that keeps an issue body as data.
@@ -79,7 +80,7 @@ export function fenceIssueComments(comments: readonly string[]): string {
 }
 
 /** The marker a brief comment opens with. */
-export const BRIEF_MARKER = "## Agent Brief";
+export { BRIEF_MARKER };
 
 /** The brief of an issue, and where it was found. */
 export interface Brief {
@@ -139,8 +140,19 @@ function briefRule(brief: Brief): string {
       "everything else as context.";
 }
 
-/** The prompt files, in the order they run. */
-export const PROMPT_FILES = ["01-brief.md", "02-implement.md", "03-verify.md"] as const;
+/**
+ * The prompt files, in the order they run.
+ *
+ * The last one asks the question the work leaves open — what follows from it —
+ * and answers it: the cheap improvements are fixed in the run, the rest are
+ * filed as the next run's work.
+ */
+export const PROMPT_FILES = [
+  "01-brief.md",
+  "02-implement.md",
+  "03-verify.md",
+  "04-next.md",
+] as const;
 
 /**
  * The directory the prompts live in.
@@ -261,7 +273,7 @@ export interface PromptArrayResult {
  *
  * The body goes first, on its own, in a turn that carries nothing but data —
  * so that the instruction that follows it is the most recent thing the model
- * has read. Then the three prompts, one turn each, each seeing the previous
+ * has read. Then the prompts, one turn each, each seeing the previous
  * turn's context.
  *
  * The deadline is wall-clock, and it **aborts** the session rather than
@@ -415,6 +427,14 @@ export async function startAgent(options: {
       }),
       [BRIEF_SECTION]: briefRule(brief),
     },
+    // The tool the fourth turn files a leftover with. The runner files them,
+    // not the agent: the bounds on the queue are the runner's to hold.
+    tools: [
+      createLeftoverTool({
+        repo: options.repo,
+        gh: options.gh ?? runGh,
+      }),
+    ],
   });
   return runPromptArray({
     session,
