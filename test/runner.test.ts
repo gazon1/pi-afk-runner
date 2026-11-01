@@ -6,6 +6,7 @@ import {
   PROMPT_FILES,
   UNTRUSTED_INPUT_RULE,
   UNTRUSTED_INPUT_SECTION,
+  WORKTREE_SECTION,
   BRIEF_MARKER,
   BRIEF_SECTION,
   ISSUE_DECISION_TOOL_NAME,
@@ -153,6 +154,19 @@ function namedStates(count: number): StateName[] {
     name: `state-${index + 1}`,
     phase: "Test",
   }));
+}
+
+/**
+ * The worktree facts a work session is given, for the tests that do not care
+ * which branch it is on. The tests that do care build their own.
+ */
+function testWorktree(issueNumber: number) {
+  return {
+    branch: workBranch(issueNumber),
+    baseBranch: "main",
+    baseSha: "0".repeat(40),
+    commits: [] as readonly string[],
+  };
 }
 
 /**
@@ -1220,6 +1234,7 @@ describe("the agent's session", () => {
           cwd: empty,
           repo: "gazon1/sing",
           issueNumber: 42,
+          worktree: testWorktree(42),
           gh: async () => "[]",
           promptsDirectory: empty,
           deadlineMs: 60_000,
@@ -1396,6 +1411,9 @@ describe("the agent's session", () => {
     const prompts = await readPrompts();
     expect(prompts).toHaveLength(6);
     expect(prompts[0]).toContain("agent_issue_decision");
+    // The triage judges whether the issue is still needed against the base, not
+    // against the issue's own branch.
+    expect(prompts[0]).toContain("not the base");
     expect(prompts[1]).toContain("agent_scope_decision");
     expect(promptsDirectory()).toContain("prompts");
   });
@@ -2459,6 +2477,7 @@ describe("the brief", () => {
       cwd: "/tmp/does-not-matter",
       repo: "gazon1/sing",
       issueNumber: 42,
+      worktree: testWorktree(42),
       gh,
       deadlineMs: 60_000,
     });
@@ -2484,6 +2503,7 @@ describe("the brief", () => {
         cwd: "/tmp/does-not-matter",
         repo: "gazon1/sing",
         issueNumber: 42,
+        worktree: testWorktree(42),
         gh,
         deadlineMs: 60_000,
       }),
@@ -3363,9 +3383,11 @@ describe("the CLI's run", () => {
 
       // The second run works the issue again, and its work goes on top of what
       // the first run left.
+      const sections: Record<string, string>[] = [];
       await runOnce({
         ...runOptions(fixture, gh),
-        session: async ({ cwd, tools }) => {
+        session: async ({ cwd, tools, systemPromptSections }) => {
+          sections.push(systemPromptSections);
           if (isReviewer(tools)) {
             return {
               async prompt() {
@@ -3413,6 +3435,14 @@ describe("the CLI's run", () => {
       });
       expect(files).toContain("half-done.txt");
       expect(files).toContain("finished.txt");
+
+      // And the second run was told about the first run's commit, so the triage
+      // cannot read it as work that has landed.
+      const worktree = sections.find((entry) => entry[WORKTREE_SECTION] !== undefined);
+      expect(worktree?.[WORKTREE_SECTION]).toContain(
+        "wip: the work a run that did not finish left behind",
+      );
+      expect(worktree?.[WORKTREE_SECTION]).toContain("commit(s) the base does not have");
     } finally {
       await fixture.dispose();
     }
@@ -3441,6 +3471,16 @@ describe("the CLI's run", () => {
 
       // And the agent was told that this issue's brief is its body.
       expect(sections[0]?.[BRIEF_SECTION]).toContain("the issue's body");
+
+      // And which branch it is on, and which base counts: the triage reads a
+      // tree that may carry an earlier run's work, and that work is not a
+      // reason to say the issue is already done.
+      expect(sections[0]?.[WORKTREE_SECTION]).toContain(workBranch(42));
+      expect(sections[0]?.[WORKTREE_SECTION]).toContain("It is not the base.");
+      // The base commit is pinned, so a wrong or empty one is caught here.
+      expect(sections[0]?.[WORKTREE_SECTION]).toMatch(/at commit `[0-9a-f]{40}`/);
+      // A fresh branch says so, rather than leaving the agent to guess.
+      expect(sections[0]?.[WORKTREE_SECTION]).toContain("no commits of its own");
     } finally {
       await fixture.dispose();
     }
@@ -5052,6 +5092,7 @@ describe("the leftovers a run files", () => {
       cwd: process.cwd(),
       repo: "gazon1/sing",
       issueNumber: 42,
+      worktree: testWorktree(42),
       gh: fakeTarget().gh,
       deadlineMs: 60_000,
     });
@@ -5372,6 +5413,7 @@ describe("the work session's decisions", () => {
       cwd: "/tmp/does-not-matter",
       repo: "gazon1/sing",
       issueNumber: 42,
+      worktree: testWorktree(42),
       gh,
       deadlineMs: 60_000,
     });
@@ -5443,6 +5485,7 @@ describe("the work session's decisions", () => {
       cwd: "/tmp/does-not-matter",
       repo: "gazon1/sing",
       issueNumber: 42,
+      worktree: testWorktree(42),
       gh,
       deadlineMs: 60_000,
     });

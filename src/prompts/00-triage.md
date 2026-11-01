@@ -18,6 +18,13 @@ which one this issue has.
    repository's own rules forbid it. Look for those reasons before you look for
    a way to start.
 
+   **The checkout is the issue's own branch, not the base.** The system prompt
+   names the base commit and the commits this branch already carries that the
+   base does not. Those commits never landed: they are the work this run
+   continues, not the issue being done. "Already done" means the **base** has
+   the change — `git show <base>:<path>` is the base's copy of a file. Judge the
+   base, not the tree.
+
 3. **Decide, and say why.** End the turn with the `agent_issue_decision` tool:
    - `work` — the brief describes work that is still needed. Carry on to the
      scope turn.

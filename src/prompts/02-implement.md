@@ -5,7 +5,8 @@ The plan is settled. Now do the work.
 **The tree may carry the unfinished work of an earlier run.** A run that did
 not finish leaves its work on the branch, and this run continues it: read the
 tree and `git log` before you write, and finish what is there rather than
-starting again. A commit that says `wip:` is an earlier run's work.
+starting again. An earlier run's commits are the ones the system prompt names, and
+a commit that says `wip:` or `the agent's work` is one of them.
 
 1. **Make the change.** Small, in the shape the repository already uses. Match
    the surrounding code: its names, its structure, its level of abstraction.

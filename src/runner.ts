@@ -2147,12 +2147,32 @@ async function runPlan(
       name: "session",
       run: async () => {
         workSessionStartedAt = Date.now();
+        // The commits the branch already carries, read here rather than left to
+        // the agent: the triage judges whether the issue is still needed, and
+        // work an earlier run left on this branch must not read as work that
+        // has landed. `git log` and not a two-dot diff: the branch may have
+        // started from a base older than the one this run claimed, and a diff
+        // would show the base's own changes as the branch's.
+        const carried = (
+          await options.git(["log", "--oneline", `${state.base}..HEAD`], {
+            cwd: state.worktreePath,
+          })
+        )
+          .split("\n")
+          .map((line) => line.trim())
+          .filter((line) => line !== "");
         const result = await startAgent({
           factory: options.session,
           cwd: state.worktreePath,
           repo: options.repo,
           issueNumber: issue.number,
           ...(plan.issueDetail === undefined ? {} : { issue: plan.issueDetail }),
+          worktree: {
+            branch: workBranch(issue.number),
+            baseBranch: options.baseBranch,
+            baseSha: state.base,
+            commits: carried,
+          },
           gh: options.gh,
           // The session does not get the whole budget: the gates run after
           // it, and a session that may spend everything leaves them nothing
@@ -2183,9 +2203,16 @@ async function runPlan(
           // The branch closed the issue (skip) or replaced it with smaller ones
           // (split). There is no work to commit, push or review: the run ends
           // where the graph ended, and the sweep moves to the next issue.
-          return result.decision === "skip"
-            ? "closed: the issue does not need work"
-            : "split into smaller issues";
+          if (result.decision === "split") {
+            return "split into smaller issues";
+          }
+          // A skip discards whatever the branch carried. The record says how
+          // much that was, so a human can see it without the transcript.
+          const carriedNote =
+            carried.length === 0
+              ? ""
+              : ` — the branch carried ${carried.length} commit(s) the base does not have`;
+          return `closed: the issue does not need work${carriedNote}`;
         }
         // The prompt asks the agent to commit, and an agent does not always do it.
         // What it left in the worktree is still the work — and the worktree is
