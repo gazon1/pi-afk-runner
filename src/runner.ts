@@ -1436,6 +1436,8 @@ export interface RunOptions {
    * with this change — and it is therefore explicit.
    */
   readonly verifyPushes?: boolean;
+  /** Whether to look for related issues and work them in one batch. */
+  readonly batchRelated?: boolean;
   /** Told about every step, as it finishes. */
   readonly onStep?: (record: StepRecord) => void;
   /** Told about a step as it starts, so a watcher can name the stage it is watching. */
@@ -2296,6 +2298,7 @@ async function runPlan(
             commits: carried,
           },
           gh: options.gh,
+          ...(options.batchRelated === undefined ? {} : { batchRelated: options.batchRelated }),
           // The session does not get the whole budget: the gates run after
           // it, and a session that may spend everything leaves them nothing
           // to run with.

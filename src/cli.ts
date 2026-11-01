@@ -120,6 +120,8 @@ export interface CliOptions {
   readonly model?: string;
   /** Whether the target repository's pre-push hook may gate the pushes. */
   readonly verifyPushes?: boolean;
+  /** Whether to look for related issues and work them in one batch. */
+  readonly batchRelated?: boolean;
   /** The wall-clock ceiling on one turn of the agent. */
   readonly deadlineMs: number;
   /** How long a claim may sit before another run may take it over. */
@@ -144,6 +146,7 @@ export const USAGE = [
   "  --agent-dir <path>      Pi's agent directory (default: ~/.pi/agent)",
   "  --model <provider/id>   the model the agent runs on (default: the provider's first)",
   "  --no-verify             skip the target repository's pre-push hook when pushing",
+  "  --batch-related         look for related ready-for-agent issues and work them in one batch",
   `  --deadline-ms <n>       the ceiling on the run (default: ${DEFAULT_DEADLINE_MS})`,
   "  --stale-after-ms <n>    how long a claim may sit (default: 604800000 — a week)",
   "  --help                  this text",
@@ -174,7 +177,7 @@ export function parseArgs(argv: readonly string[]): CliOptions {
     if (name === "help") {
       throw new Error("help");
     }
-    if (name === "no-verify" || name === "all" || name === "merge") {
+    if (name === "no-verify" || name === "all" || name === "merge" || name === "batch-related") {
       // A flag, not an option with a value.
       values.set(name, "true");
       continue;
@@ -217,6 +220,7 @@ export function parseArgs(argv: readonly string[]): CliOptions {
     join(homedir(), ".pi", "agent");
   const model = values.get("model");
   const noVerify = values.has("no-verify");
+  const batchRelated = values.has("batch-related");
   const deadlineMs = number(values.get("deadline-ms"), DEFAULT_DEADLINE_MS, "--deadline-ms");
   const staleAfterMs = number(values.get("stale-after-ms"), DEFAULT_STALE_AFTER_MS, "--stale-after-ms");
 
@@ -233,6 +237,7 @@ export function parseArgs(argv: readonly string[]): CliOptions {
     agentDirectory,
     ...(model === undefined ? {} : { model }),
     ...(noVerify ? { verifyPushes: false } : {}),
+    ...(batchRelated ? { batchRelated: true } : {}),
     deadlineMs,
     staleAfterMs,
   };
@@ -559,6 +564,7 @@ export function runOptionsFrom(
     deadlineMs: options.deadlineMs,
     staleAfterMs: options.staleAfterMs,
     ...(options.verifyPushes === undefined ? {} : { verifyPushes: options.verifyPushes }),
+    ...(options.batchRelated === undefined ? {} : { batchRelated: options.batchRelated }),
     // A named issue took its lock before the run read anything. A run that lets
     // the queue choose does not know the issue until it has chosen it, so the
     // lock is taken inside the run — one issue at a time, even in a sweep.
