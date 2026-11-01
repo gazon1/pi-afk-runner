@@ -21,10 +21,13 @@ jobs:
       - name: take `agent-in-progress` off the issue the pull request fixed
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The body is the pull request's own text, so it goes in as a value and
+          # not into the script: a body with a quote or a backtick in it is then
+          # a string, and not a command.
+          PR_BODY: ${{ github.event.pull_request.body }}
         run: |
           set -euo pipefail
-          body="${{ github.event.pull_request.body }}"
-          numbers=$(printf '%s\n' "$body" | grep -oE '(Fixes|Closes|Resolves) #[0-9]+' | grep -oE '[0-9]+' | sort -u || true)
+          numbers=$(printf '%s\n' "$PR_BODY" | grep -oE '(Fixes|Closes|Resolves) #[0-9]+' | grep -oE '[0-9]+' | sort -u || true)
           if [ -z "$numbers" ]; then
             echo "no linked issue in the pull request body"
             exit 0
