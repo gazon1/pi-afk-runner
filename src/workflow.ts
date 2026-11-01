@@ -405,6 +405,14 @@ export class FixChangedNothing extends WorkflowError {
   }
 }
 
+/** The error a review raises when it ended without stating a verdict. */
+export class ReviewStatedNoVerdict extends WorkflowError {
+  constructor(message = "the review stated no verdict") {
+    super(message, WorkflowErrorCode.AGENT_EXECUTION_ERROR, { recoverable: false });
+    this.name = "ReviewStatedNoVerdict";
+  }
+}
+
 /** What the review loop did. */
 export interface ReviewGateResult {
   /** Whether the review finally passed. */
@@ -422,6 +430,8 @@ export interface ReviewGateResult {
    * again, so the loop ends where it is.
    */
   readonly cutOff: string | null;
+  /** Whether the loop stopped because a review stated no verdict. */
+  readonly statedNoVerdict: boolean;
 }
 
 /**
@@ -504,12 +514,22 @@ export async function runReviewGate(options: {
       reviews,
       noChange: false,
       cutOff: null,
+      statedNoVerdict: false,
     };
   } catch (error) {
     // The fix that changed nothing stops the loop, and the loop's verdict is
     // a failure: the review did not pass, and the fix did not answer it.
     if (error instanceof FixChangedNothing) {
-      return { passed: false, reviews, noChange: true, cutOff: null };
+      return { passed: false, reviews, noChange: true, cutOff: null, statedNoVerdict: false };
+    }
+    if (error instanceof ReviewStatedNoVerdict) {
+      return {
+        passed: false,
+        reviews,
+        noChange: false,
+        cutOff: null,
+        statedNoVerdict: true,
+      };
     }
     // The run was cut off — the review's session or the fix's. The engine
     // stopped on it: it is the engine's own abort error, and an unknown
@@ -522,6 +542,7 @@ export async function runReviewGate(options: {
         reviews,
         noChange: false,
         cutOff: error instanceof Error ? error.message : String(error),
+        statedNoVerdict: false,
       };
     }
     throw error;
