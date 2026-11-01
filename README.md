@@ -174,7 +174,8 @@ which is the issue, its title, and the step the run has reached. The line is a s
 as a footer: open the session again and the line the run ended on is still there.
 
 Above the editor, six lines of the run itself — the agent's tool calls and the lines it says, as it
-says them — so a run can be watched from the session that started it:
+says them — so a run can be watched from the session that started it. The log follows the session
+the run is driving now: the work session's lines, and then the reviewer's.
 
 ```
 → bash: ./check.sh
@@ -183,9 +184,9 @@ says them — so a run can be watched from the session that started it:
 ```
 
 While a run is under way, anything typed into the host session is **steering**: it is queued, and
-delivered into the work session at its next real boundary — after the assistant turn that is
-running, before the next model call. Images travel with it. Slash commands and `!` shell lines are
-left to the host session. One run at a time; a second `/afk-runner-run` says so.
+delivered into the session the run is driving at its next real boundary — after the assistant turn
+that is running, before the next model call. Images travel with it. Slash commands and `!` shell
+lines are left to the host session. One run at a time; a second `/afk-runner-run` says so.
 
 `/afk-runner-attach` is how a human gets into the work session: it is headless while it runs, but
 its transcript is a Pi session file, and the command switches this chat to it — the whole
@@ -195,9 +196,10 @@ wait for it to settle) and restores the worktree if the run's own cleanup alread
 watched from this chat; when the run's cleanup then removes the worktree the chat is sitting in, the
 run puts it back before it ends.
 
-`/afk-runner-stop` cuts the agent's turn the way the deadline does: the run fails where it stands
-and its failure path releases the claim and the worktree, while the branch keeps the commits it has.
-Killing the process instead leaves the claim to go stale.
+`/afk-runner-stop` stops the run: the turn that is running is cut, and the run ends at its next
+boundary — the next turn or the next step — whatever the agent is doing. It then fails where it
+stands, and its failure path releases the claim and the worktree, while the branch keeps the
+commits it has. Killing the process instead leaves the claim to go stale.
 
 ### From the CLI — unattended
 

@@ -976,6 +976,10 @@ export async function releaseRun(options: {
  * A failure is thrown rather than returned. A caller that ignored a returned
  * failure would exit zero having done nothing, and "looked healthy while
  * selecting nothing" is the one outcome this runner must never have.
+ *
+ * A stopped run ends at the **step boundary**: the flag is asked before every
+ * step, and the step that would have run does not. The stop is a failure like
+ * any other, so the claim is released and the record is written.
  */
 export async function runSteps(options: {
   readonly issue: number;
@@ -993,11 +997,32 @@ export async function runSteps(options: {
   readonly onStep?: (record: StepRecord) => void;
   /** Told about a step as it starts. */
   readonly onStepStart?: (step: string) => void;
+  /**
+   * Whether somebody has stopped the run.
+   *
+   * Asked before every step. A stop that only reached the agent would let the
+   * run carry on to its push and its pull request; this is what ends it at the
+   * next boundary.
+   */
+  readonly stopped?: () => boolean;
 }): Promise<RunOutcome> {
   const steps: StepRecord[] = [];
   let failure: { readonly step: string; readonly error: Error } | null = null;
 
   for (const step of options.steps) {
+    if (options.stopped?.() === true) {
+      // The human stopped the run between two steps: it ends here, and the
+      // release below does what a failed run's does.
+      const halted: StepRecord = {
+        step: step.name,
+        outcome: "failed",
+        detail: "the run was stopped before this step",
+      };
+      steps.push(halted);
+      options.onStep?.(halted);
+      failure = { step: step.name, error: new Error("the run was stopped") };
+      break;
+    }
     let record: StepRecord;
     try {
       options.onStepStart?.(step.name);
@@ -1141,9 +1166,10 @@ export interface RunOptions {
   /**
    * Whether a human has stopped the run.
    *
-   * Asked before every turn of the agent. An abort cuts the turn that is running;
-   * this is what keeps the array from sending the next one — a stop that only cut
-   * a turn would let the run carry on to its push.
+   * Asked before every turn of the agent and before every step of the run. An
+   * abort cuts the turn that is running; this is what keeps the array from
+   * sending the next one, and the run from taking the next step — a stop that
+   * only cut a turn would let the run carry on to its push.
    */
   readonly stopped?: () => boolean;
   /**
@@ -1713,6 +1739,7 @@ async function runPlan(
     steps,
     ...(options.onStep === undefined ? {} : { onStep: options.onStep }),
     ...(options.onStepStart === undefined ? {} : { onStepStart: options.onStepStart }),
+    ...(options.stopped === undefined ? {} : { stopped: options.stopped }),
     release: async () => {
       if (!state.claimed) {
         return;

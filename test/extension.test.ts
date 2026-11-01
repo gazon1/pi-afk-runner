@@ -129,7 +129,7 @@ function withImages(
 }
 
 /** A session that records what was delivered into it, and lets a test drive its lifecycle. */
-function fakeSession(): {
+function fakeSession(transcript: string = TRANSCRIPT): {
   session: SteerableSession;
   delivered: string[];
   aborts: number;
@@ -156,7 +156,7 @@ function fakeSession(): {
       listeners.push(listener);
       return () => {};
     },
-    sessionManager: { getSessionFile: () => TRANSCRIPT },
+    sessionManager: { getSessionFile: () => transcript },
   };
   return {
     session,
@@ -325,15 +325,18 @@ describe("the run the front door owns", () => {
     }
   });
 
-  it("stops the run under way only while the agent is working, and says where it is otherwise", async () => {
+  it("stops the run whatever the agent is doing, and says what it did", async () => {
     const checkout = await mkdtemp(join(tmpdir(), "afk-live-"));
     try {
       const host = fakePi();
       const fake = fakeSession();
       const created = deferred();
       const release = deferred();
+      let stopped: (() => boolean) | undefined;
       const work = async (options: RunOptions): Promise<RunResult> => {
+        stopped = options.stopped;
         options.onIssue?.({ number: 42, title: "Fix the thing" });
+        options.onStepStart?.("session");
         await options.session({ cwd: checkout, systemPromptSections: {} });
         created.resolve();
         await release.promise;
@@ -349,26 +352,102 @@ describe("the run the front door owns", () => {
       await door.start(`--repo gazon1/cardinalfish --checkout ${checkout}`, ctx);
       await created.promise;
 
-      // The agent is idle: there is no turn to cut, and the door says where the run is.
+      // The agent is between its turns: there is no turn to cut, but the stop
+      // reaches the run all the same — it is what the run asks before every
+      // turn and before every step.
       door.stop(ctx);
       expect(fake.aborts).toBe(0);
-      expect(notes.at(-1)?.message).toContain("the agent is not working");
+      expect(stopped?.()).toBe(true);
+      expect(notes.at(-1)?.message).toContain("no turn is running");
+      // And it says where the run is.
+      expect(notes.at(-1)?.message).toContain("session");
 
       // A running turn is cut.
       fake.emit({ type: "agent_start" });
       door.stop(ctx);
       expect(fake.aborts).toBe(1);
-      expect(notes.at(-1)?.message).toContain("stopping");
-
-      // And once the agent settles, the run is past the point a stop can reach.
-      fake.emit({ type: "agent_settled" });
-      door.stop(ctx);
-      expect(fake.aborts).toBe(1);
-      expect(notes.at(-1)?.message).toContain("the agent is not working");
+      expect(notes.at(-1)?.message).toContain("the turn is cut");
 
       release.resolve();
       await vi.waitFor(() => {
         expect(host.entries.length).toBeGreaterThan(0);
+      });
+    } finally {
+      await rm(checkout, { recursive: true, force: true });
+    }
+  });
+
+  it("watches the session in flight: the review's turn is cut, and the log is the review's", async () => {
+    const checkout = await mkdtemp(join(tmpdir(), "afk-live-"));
+    try {
+      const host = fakePi();
+      const workSession = fakeSession();
+      const reviewSession = fakeSession("/tmp/afk-e2e/review.jsonl");
+      const created = deferred();
+      const release = deferred();
+      const reviewed = deferred();
+      const finished = deferred();
+      const work = async (options: RunOptions): Promise<RunResult> => {
+        options.onIssue?.({ number: 42, title: "Fix the thing" });
+        options.onStepStart?.("session");
+        await options.session({ cwd: checkout, systemPromptSections: {} });
+        created.resolve();
+        await release.promise;
+        // The review drives a session of its own, through the same factory.
+        options.onStepStart?.("review");
+        await options.session({ cwd: checkout, systemPromptSections: {} });
+        reviewed.resolve();
+        await finished.promise;
+        return { issue: 42, outcome: "completed", steps: [], record: "" };
+      };
+      let made = 0;
+
+      const door = liveFrontDoor(host.pi, {
+        session: async () => {
+          made += 1;
+          return made === 1 ? workSession.session : reviewSession.session;
+        },
+        work,
+      });
+      const { ctx, notes, widgets } = fakeContext();
+
+      await door.start(`--repo gazon1/cardinalfish --checkout ${checkout}`, ctx);
+      await created.promise;
+
+      // The work session is the one in flight, and its lines are the log.
+      workSession.emit({ type: "agent_start" });
+      workSession.emit({ type: "tool_execution_start", toolName: "read", args: { path: "README.md" } });
+      expect(widgets.get(LOG_KEY)).toEqual(["→ read"]);
+
+      // The work session is over; the review's session takes its place, and the
+      // log is the review's.
+      release.resolve();
+      await reviewed.promise;
+      workSession.emit({ type: "agent_settled" });
+      reviewSession.emit({ type: "agent_start" });
+      reviewSession.emit({ type: "tool_execution_start", toolName: "bash", args: { command: "ls" } });
+      expect(widgets.get(LOG_KEY)).toEqual(["→ bash: ls"]);
+
+      // The door knows the agent is working: the review is running.
+      await door.attach(ctx);
+      expect(notes.at(-1)?.message).toContain("the agent is working");
+
+      // And a stop cuts the review's turn, not the dead work session's.
+      door.stop(ctx);
+      expect(reviewSession.aborts).toBe(1);
+      expect(workSession.aborts).toBe(0);
+      expect(notes.at(-1)?.message).toContain("the turn is cut");
+
+      // The transcript the human attaches to is the work session's, not the
+      // review's.
+      expect(notes.some((note) => note.message.includes(TRANSCRIPT))).toBe(true);
+      expect(
+        notes.some((note) => note.message.includes("/tmp/afk-e2e/review.jsonl")),
+      ).toBe(false);
+
+      finished.resolve();
+      await vi.waitFor(() => {
+        expect(notes.some((note) => note.message.includes("worked issue 42"))).toBe(true);
       });
     } finally {
       await rm(checkout, { recursive: true, force: true });

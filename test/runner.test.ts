@@ -77,6 +77,7 @@ import {
   readCiVerdict,
   releaseRun,
   reviewPullRequest,
+  RunFailed,
   runOnce,
   runSteps,
   verdictFile,
@@ -1979,6 +1980,58 @@ describe("the failure path and the record", () => {
     }
   });
 
+  it("test_a_stopped_run_ends_at_the_next_step_boundary", async () => {
+    const root = await mkdtemp(join(tmpdir(), "afk-stop-"));
+    const ran: string[] = [];
+    let stop = false;
+    try {
+      const failure = await runSteps({
+        issue: 42,
+        runId: "2026-10-30T09-00-00-000Z-abcdef12",
+        root,
+        steps: [
+          {
+            name: "session",
+            run: async () => {
+              ran.push("session");
+              // The human stops the run while the agent is working.
+              stop = true;
+              return "turned";
+            },
+          },
+          { name: "push", run: async () => {
+            ran.push("push");
+            return "pushed";
+          } },
+        ],
+        stopped: () => stop,
+        release: async () => {
+          ran.push("release");
+        },
+      }).then(
+        () => null,
+        (error: unknown) => error,
+      );
+
+      // The run ended before the push: nothing is pushed, and the claim goes.
+      expect(ran).toEqual(["session", "release"]);
+      expect(failure).toBeInstanceOf(RunFailed);
+      expect((failure as RunFailed).step).toBe("push");
+      expect((failure as Error).message).toContain("the push step");
+
+      // And the record says so, without the runner's process.
+      const record = await readFile(
+        join(root, "build", "diagnostics", "issue-42", "2026-10-30T09-00-00-000Z-abcdef12.md"),
+        "utf8",
+      );
+      expect(record).toContain("session — ok");
+      expect(record).toContain("push — failed");
+      expect(record).toContain("the run was stopped before this step");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("test_the_stage_is_named_when_a_step_starts", async () => {
     const root = await mkdtemp(join(tmpdir(), "afk-stage-"));
     const seen: string[] = [];
@@ -2596,6 +2649,51 @@ describe("the CLI's run", () => {
     }
   }, 60_000);
 
+  it("test_a_stop_between_two_turns_ends_the_run_before_the_push", async () => {
+    const fixture = await fixtureWithSetupScript();
+    try {
+      const { gh, calls } = stubGh([{ number: 42, title: "an issue" }]);
+      let stop = false;
+      let turns = 0;
+
+      const failure = await runOnce({
+        ...runOptions(fixture, gh),
+        session: async () => ({
+          async prompt() {
+            turns += 1;
+            // The human stops the run between two of the agent's turns: there
+            // is no turn to cut, and the run must still end.
+            stop = true;
+          },
+          async abort() {},
+          dispose() {},
+        }),
+        stopped: () => stop,
+      }).then(
+        () => null,
+        (error: unknown) => error,
+      );
+
+      // The run ended at the session step: the array sent no further turn.
+      expect(turns).toBe(1);
+      expect(failure).toBeInstanceOf(RunFailed);
+      expect((failure as RunFailed).step).toBe("session");
+
+      // Nothing was pushed and no pull request was opened.
+      expect(calls.some((call) => call.includes("pr create"))).toBe(false);
+      const pushed = await gitOutput(["ls-remote", fixture.remote, workBranch(42)], {
+        cwd: fixture.repo,
+        env: fixture.env,
+      });
+      expect(pushed).toBe("");
+
+      // And the claim is released: the next run can take the issue.
+      expect(calls.some((call) => call.includes("--remove-label agent-in-progress"))).toBe(true);
+    } finally {
+      await fixture.dispose();
+    }
+  }, 60_000);
+
   it("test_a_stopped_sweep_is_not_a_success", async () => {
     const fixture = await fixtureWithSetupScript();
     const lockDirectory = join(fixture.root, "afk-runner");
@@ -2635,7 +2733,9 @@ describe("the CLI's run", () => {
 
       expect(signalled).toBe(true);
       // One issue was worked, one was left in the queue; that is not a zero.
-      expect(code).toBe(STEP_EXIT_CODES.session);
+      // The signal landed in the review, so the run ends at the next step
+      // boundary — the re-count — and the code is the step it stopped at.
+      expect(code).toBe(STEP_EXIT_CODES["re-count"]);
       const claims = calls.filter((call) => call.includes("--add-label agent-in-progress"));
       expect(claims).toHaveLength(1);
       expect(claims[0]).toContain(" 42 ");

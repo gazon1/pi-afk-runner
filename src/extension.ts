@@ -59,7 +59,7 @@ export const STATUS_KEY = "afk-runner";
 /** The key the run's live log is published under. */
 export const LOG_KEY = "afk-runner-log";
 
-/** How many lines of the work session the host shows. */
+/** How many lines of the session in flight the host shows. */
 export const LOG_LINES = 6;
 
 /** One event from the session the runner drives, as far as this module reads it. */
@@ -166,9 +166,9 @@ function assistantLine(message: SessionEvent["message"]): string | null {
 /**
  * What one session event adds to the host's view of the run, or null.
  *
- * The log is a view of the work session — the tools it runs and the lines it
- * says — because a human watching a run cannot otherwise see, from the session
- * they are typing in, what the run is doing.
+ * The log is a view of the session in flight — the tools it runs and the lines
+ * it says — because a human watching a run cannot otherwise see, from the
+ * session they are typing in, what the run is doing.
  */
 export function logLine(event: SessionEvent): string | null {
   switch (event.type) {
@@ -241,9 +241,12 @@ export interface LiveFrontDoor {
   steer(event: InputEvent, ctx: ExtensionContext): Promise<InputEventResult>;
   /** Show the status a session remembered, when somebody opens it again. */
   recall(ctx: ExtensionContext): void;
-  /** Stop the run in flight: abort its session, which lets it release its claim. */
+  /**
+   * Stop the run in flight: it ends at its next boundary, and the turn it is
+   * in is cut. The failure path releases the claim.
+   */
   stop(ctx: ExtensionContext): void;
-  /** The host is going away: abort, best effort, so the run can release its claim. */
+  /** The host is going away: stop the run, best effort, so it releases its claim. */
   abandon(): void;
   /** Open the run's session as this chat: Pi switches to its transcript. */
   attach(ctx: ExtensionCommandContext): Promise<void>;
@@ -279,11 +282,11 @@ export function liveFrontDoor(
   dependencies: LiveDependencies = {},
 ): LiveFrontDoor {
   let live: LiveRun | null = null;
+  /** The session the run is driving now: the work session first, then the review's. */
   let session: SteerableSession | null = null;
-  let workSession: SteerableSession | null = null;
-  /** Whether the agent has a turn running: an abort only means something then. */
-  let working = false;
-  /** Whether the human stopped this run: the prompt array asks before every turn. */
+  /** The session whose turn is running: an abort only means something then. */
+  let turning: SteerableSession | null = null;
+  /** Whether the human stopped this run: the run asks before every turn and step. */
   let stopped = false;
   /**
    * What is needed to open the run's session as a chat, kept after the run ends:
@@ -296,7 +299,7 @@ export function liveFrontDoor(
     readonly remote: string;
     readonly checkout: string;
   } | null = null;
-  /** The last lines of the work session, as the host shows them. */
+  /** The last lines of the session in flight, as the host shows them. */
   const log: string[] = [];
 
   /**
@@ -315,12 +318,26 @@ export function liveFrontDoor(
     }
   };
 
-  /** Add one line of the work session to the log the host shows. */
-  const mirror = (ctx: ExtensionContext, event: SessionEvent): void => {
+  /**
+   * Add one line of the session in flight to the log the host shows, and keep
+   * track of whether a turn is running.
+   *
+   * A session the run has left behind says nothing about what the run is doing
+   * now: the work session is finished before the review's session is made, and
+   * its last events arrive after the review has started.
+   */
+  const mirror = (
+    ctx: ExtensionContext,
+    event: SessionEvent,
+    source: SteerableSession,
+  ): void => {
+    if (source !== session) {
+      return;
+    }
     if (event.type === "agent_start") {
-      working = true;
-    } else if (event.type === "agent_settled") {
-      working = false;
+      turning = source;
+    } else if (event.type === "agent_settled" && turning === source) {
+      turning = null;
     }
     const line = logLine(event);
     if (line === null) {
@@ -418,10 +435,9 @@ export function liveFrontDoor(
     };
     live = run;
     log.length = 0;
-    working = false;
+    turning = null;
     stopped = false;
     last = null;
-    workSession = null;
     autoAttach = null;
     // A run that selects nothing must not leave the previous run's line standing.
     publish(ctx, run);
@@ -433,6 +449,11 @@ export function liveFrontDoor(
       operation: { type: "resume" },
     });
 
+    // The work session is the first session the run creates; the review's
+    // session comes later. The transcript the human attaches to is the work
+    // session's, so the first one is the one that counts.
+    let firstSession = true;
+
     const factory = steeringFactory(
       dependencies.session ??
         piSessionFactory({
@@ -440,20 +461,30 @@ export function liveFrontDoor(
           ...(model === undefined ? {} : { model }),
         }),
       (created) => {
-        if (workSession === null) {
-          workSession = created;
-        }
+        const isWorkSession = firstSession;
+        firstSession = false;
+        // One session in flight: the newest one the run drives. The work
+        // session is the first; the review's session replaces it when the run
+        // reaches the review.
         session = created;
+        // The session before this one is finished, so no turn of it is running.
+        turning = null;
+        // The log is a view of the session in flight: the finished session's
+        // lines are not the run's present.
+        log.length = 0;
+        try {
+          ctx.ui.setWidget(LOG_KEY, [], { placement: "aboveEditor" });
+        } catch {
+          // The session is gone; so is its log.
+        }
         follow(created, run.controller, (event) => {
-          if (workSession !== null && created === workSession) {
-            mirror(ctx, event);
-          }
+          mirror(ctx, event, created);
         });
         // The work session is headless: there is no chat to join. Its transcript is
         // a file, and a human who wants the whole of it reads that file.
         const transcript = created.sessionManager?.getSessionFile();
         if (
-          workSession === created &&
+          isWorkSession &&
           transcript !== null &&
           transcript !== undefined &&
           last !== null &&
@@ -543,8 +574,7 @@ export function liveFrontDoor(
         }
         await run.controller.dispose();
         session = null;
-        workSession = null;
-        working = false;
+        turning = null;
         live = null;
         // The auto-attach moved this chat into the run's session, whose working
         // directory is the worktree the run has just removed as scratch. Put it
@@ -605,12 +635,17 @@ export function liveFrontDoor(
   };
 
   /**
-   * Stop the run the way its own deadline stops it: abort the session.
+   * Stop the run: it ends at the next boundary, and the turn it is in is cut.
    *
-   * The abort is not a kill. The session step sees a cut-off turn, the run fails
-   * where it stands, and the failure path releases the claim and the worktree —
-   * while the branch keeps the commits it has, which is what the next attempt
-   * needs. Killing the process instead leaves the claim to go stale.
+   * The stop is a flag the run reads, not a kill. The prompt array asks it
+   * before every turn, the step loop asks it before every step, and the
+   * failure path releases the claim and the worktree — while the branch keeps
+   * the commits it has, which is what the next attempt needs. Killing the
+   * process instead leaves the claim to go stale.
+   *
+   * A turn is cut only when there is one to cut. A stop typed between two of
+   * the agent's turns has no turn to reach, and the run ends before its next
+   * step instead — which is what the flag is for.
    */
   const stop = (ctx: ExtensionContext): void => {
     const run = live;
@@ -618,21 +653,24 @@ export function liveFrontDoor(
       talk(ctx, "afk-runner: no run is under way", "info");
       return;
     }
-    const targetSession = workSession ?? session;
-    if (targetSession === null || !working) {
-      // The agent is between turns, or done and the run is pushing. There is
-      // nothing to cut, and saying "stopping" would be a lie.
-      const stage = run.status === null ? "selecting" : run.status.stage;
+    stopped = true;
+    const stage = run.status === null ? "selecting" : run.status.stage;
+    const where = stage === "" ? "selecting" : stage;
+    if (turning === null) {
       talk(
         ctx,
-        `afk-runner: the agent is not working — the run is at "${stage === "" ? "selecting" : stage}"`,
-        "info",
+        `afk-runner: stopping — no turn is running; the run is at "${where}" ` +
+          "and ends before its next step",
+        "warning",
       );
       return;
     }
-    stopped = true;
-    talk(ctx, "afk-runner: stopping — the run releases its claim when the turn ends", "warning");
-    void targetSession.abort().catch((failure: unknown) => {
+    talk(
+      ctx,
+      "afk-runner: stopping — the turn is cut, and the run ends before its next step",
+      "warning",
+    );
+    void turning.abort().catch((failure: unknown) => {
       talk(ctx, `afk-runner: the session would not abort: ${errorMessage(failure)}`, "error");
     });
   };
@@ -640,13 +678,12 @@ export function liveFrontDoor(
   /**
    * The session that owns the run is going away — quit, reload, new, resume or
    * fork. Whichever it is, the session with its UI and steering is gone, so the
-   * run is aborted and its own failure path takes over.
+   * run is stopped and its own failure path takes over.
    */
   const abandon = (): void => {
-    const targetSession = workSession ?? session;
-    if (targetSession !== null && working) {
-      stopped = true;
-      void targetSession.abort().catch(() => {});
+    stopped = true;
+    if (turning !== null) {
+      void turning.abort().catch(() => {});
     }
   };
 
@@ -742,7 +779,7 @@ export function liveFrontDoor(
       talk(ctx, "afk-runner: this session has no run to attach to yet", "info");
       return;
     }
-    if (working && !force) {
+    if (turning !== null && !force) {
       talk(
         ctx,
         "afk-runner: the agent is working — /afk-runner-stop first, or /afk-runner-attach when it settles",
@@ -812,7 +849,8 @@ export default function activate(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand("afk-runner-stop", {
-    description: "Stop the run under way: the agent's turn is cut, and the claim is released",
+    description:
+      "Stop the run under way: the turn is cut, and the run ends at its next boundary",
     handler: async (_args, ctx) => door.stop(ctx),
   });
 
