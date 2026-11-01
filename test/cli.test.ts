@@ -101,6 +101,18 @@ describe("the lines the runner prints", () => {
         // And the colour is really there, so the two assertions above are not
         // the same assertion twice.
         expect(run.lines[0]).not.toBe("· Let us look up how tests are structured…");
+
+        // A blank line inside a thinking block carries nothing: the marker on
+        // it would be a line of its own, and it would read as the agent's line.
+        run.lines.length = 0;
+        chalk.level = 0;
+        await run.end({
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "\nLet us look up how tests are structured…" },
+          ],
+        });
+        expect(run.lines).toEqual(["· Let us look up how tests are structured…"]);
       } finally {
         chalk.level = level;
         run.dispose();
