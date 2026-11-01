@@ -84,6 +84,7 @@ import {
   isStale,
   observePullRequest,
   selectIssue,
+  unworkableReason,
   type Observables,
   type RunOptions,
   type Step,
@@ -342,6 +343,23 @@ describe("the state the runner derives", () => {
         recountLabel: true,
       }),
     ).toBe("Claimed");
+  });
+});
+
+describe("the reason an issue could not be worked", () => {
+  it("names the state that stopped the run", () => {
+    expect(unworkableReason("Claimed")).toBe("it is held by another runner");
+    expect(unworkableReason("Reviewed")).toBe("already reviewed");
+    expect(unworkableReason("Counted")).toBe("already counted");
+  });
+
+  it("falls back to the check when the state says nothing", () => {
+    expect(unworkableReason(undefined)).toBe(
+      "check whether it is claimed by another runner, already reviewed, or already counted",
+    );
+    expect(unworkableReason("Queue")).toBe(
+      "check whether it is claimed by another runner, already reviewed, or already counted",
+    );
   });
 });
 

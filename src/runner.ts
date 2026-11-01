@@ -1171,6 +1171,25 @@ export interface RunResult {
   readonly derivedState?: DerivedState;
 }
 
+/**
+ * Why an issue could not be worked, in the words the front doors say.
+ *
+ * One mapping, so the CLI and the live door say the same thing about the
+ * same derived state.
+ */
+export function unworkableReason(derivedState: DerivedState | undefined): string {
+  switch (derivedState) {
+    case "Claimed":
+      return "it is held by another runner";
+    case "Reviewed":
+      return "already reviewed";
+    case "Counted":
+      return "already counted";
+    default:
+      return "check whether it is claimed by another runner, already reviewed, or already counted";
+  }
+}
+
 /** The commit the worktree is at. */
 export async function headSha(git: GitRunner, cwd: string): Promise<string> {
   return (await git(["rev-parse", "HEAD"], { cwd })).trim();
@@ -1286,22 +1305,20 @@ export async function runOnce(options: RunOptions): Promise<RunResult> {
         outcome: "unworkable",
         steps: [],
         record: "",
-      } as RunResult;
+      };
     }
     return { issue: null, outcome: "empty", steps: [], record: "" };
   }
-  if ((planOrUnworkable as any).unworkable === true) {
-    const unworkable = planOrUnworkable as { readonly unworkable: true; readonly derivedState: DerivedState };
+  if ("unworkable" in planOrUnworkable) {
     return {
       issue: options.issueNumber ?? null,
       outcome: "unworkable",
       steps: [],
       record: "",
-      derivedState: unworkable.derivedState,
+      derivedState: planOrUnworkable.derivedState,
     };
   }
-  const plan = planOrUnworkable as Plan;
-  return await runPlan(options, plan, now, runId);
+  return await runPlan(options, planOrUnworkable, now, runId);
 }
 
 /**
