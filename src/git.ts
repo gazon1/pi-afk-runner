@@ -447,6 +447,19 @@ export async function deleteRemoteBranch(
 }
 
 /**
+ * Whether the index holds **unmerged entries** — a conflict that is waiting to
+ * be resolved.
+ *
+ * `git ls-files -u` lists the stages of the files a merge could not reconcile.
+ * An empty listing means the index holds no conflict, whatever else made the
+ * merge fail: unrelated histories, a locked index, a base that is not there.
+ */
+export async function hasUnmergedEntries(git: GitRunner, cwd: string): Promise<boolean> {
+  const listed = await git(["ls-files", "-u"], { cwd });
+  return listed.trim() !== "";
+}
+
+/**
  * The full ref of a branch.
  *
  * `git ls-remote` matches the **tail** of a ref, so `main` would also match
