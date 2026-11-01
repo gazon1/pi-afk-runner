@@ -463,6 +463,8 @@ async function resolveWithAgent(options: MergeOptions, worktreePath: string): Pr
   const result = await runPromptArray({
     session,
     prompts: [MERGE_PROMPT],
+    // The resolution is one state: the conflict, resolved in one turn.
+    states: [{ name: "resolve", phase: "Resolve" }],
     deadlineMs: options.deadlineMs,
     ...(options.stopped === undefined ? {} : { stopped: options.stopped }),
   });

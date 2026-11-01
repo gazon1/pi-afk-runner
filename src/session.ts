@@ -30,6 +30,15 @@ import { Type } from "typebox";
 
 import { BRIEF_MARKER, readIssue, runGh, type GhRunner, type IssueDetail } from "./gh.js";
 import { createLeftoverTool } from "./leftovers.js";
+import {
+  cutOffError,
+  runStates,
+  stateFailure,
+  WORKFLOW_STATES,
+  type StateName,
+  type StateOutcome,
+  type WorkflowState,
+} from "./workflow.js";
 
 /**
  * The rule that keeps an issue body as data.
@@ -143,16 +152,16 @@ function briefRule(brief: Brief): string {
 /**
  * The prompt files, in the order they run.
  *
+ * The list is the workflow's: the four states name the file each of them
+ * runs, so the file and the state cannot drift apart.
+ *
  * The last one asks the question the work leaves open — what follows from it —
  * and answers it: the cheap improvements are fixed in the run, the rest are
  * filed as the next run's work.
  */
-export const PROMPT_FILES = [
-  "01-brief.md",
-  "02-implement.md",
-  "03-verify.md",
-  "04-next.md",
-] as const;
+export const PROMPT_FILES: readonly string[] = WORKFLOW_STATES.map(
+  (state) => state.promptFile,
+);
 
 /**
  * The directory the prompts live in.
@@ -281,12 +290,67 @@ export interface PromptArrayResult {
 }
 
 /**
+ * The states a session runs.
+ *
+ * The data goes first, in turns of its own, and is not counted: only the
+ * prompts are the prompt array. The prompts run as the states they are
+ * declared as — the work session's four, or the single state a review or a
+ * merge resolution runs.
+ */
+function sessionStates(options: {
+  readonly prompts: readonly string[];
+  readonly states: readonly StateName[];
+  readonly issueBody?: string;
+  readonly issueComments?: readonly string[];
+}): WorkflowState[] {
+  const states: WorkflowState[] = [];
+  if (options.issueBody !== undefined) {
+    states.push({
+      name: "issue-body",
+      phase: "Intake",
+      text: fenceIssueBody(options.issueBody),
+      counts: false,
+    });
+  }
+  if (options.issueComments !== undefined && options.issueComments.length > 0) {
+    states.push({
+      name: "issue-comments",
+      phase: "Intake",
+      text: fenceIssueComments(options.issueComments),
+      counts: false,
+    });
+  }
+  const names = options.states;
+  if (names.length !== options.prompts.length) {
+    throw new Error(
+      `the session declares ${names.length} states for ${options.prompts.length} prompts`,
+    );
+  }
+  for (const [index, text] of options.prompts.entries()) {
+    const name = names[index];
+    if (name === undefined) {
+      // The check above ruled this out: the names and the prompts are the
+      // same length. The guard is what the type needs — the index is not
+      // known to be in range.
+      throw new Error(`the session declares no state for prompt ${index + 1}`);
+    }
+    states.push({ ...name, text, counts: true });
+  }
+  return states;
+}
+
+/**
  * Run the prompt array in one session.
  *
  * The body goes first, on its own, in a turn that carries nothing but data —
  * so that the instruction that follows it is the most recent thing the model
  * has read. Then the prompts, one turn each, each seeing the previous
  * turn's context.
+ *
+ * The turns are the session's **states**, and the workflow engine runs them:
+ * it decides what runs next and in which phase, and the runner's own code
+ * runs the turns. The engine's subagents are not used — they are separate
+ * sessions in separate worktrees, and this is one session.
  *
  * The deadline is wall-clock, and it **aborts** the session rather than
  * letting it run on: an agent that has been working for hours has usually
@@ -295,6 +359,13 @@ export interface PromptArrayResult {
 export async function runPromptArray(options: {
   readonly session: AgentSession;
   readonly prompts: readonly string[];
+  /**
+   * The states the prompts run as — one per prompt, in the prompts' order.
+   *
+   * Every session names its states: a state without a name is a turn the
+   * record cannot point at.
+   */
+  readonly states: readonly StateName[];
   readonly issueBody?: string;
   readonly issueComments?: readonly string[];
   readonly deadlineMs: number;
@@ -332,26 +403,6 @@ export async function runPromptArray(options: {
     });
   }, options.deadlineMs);
 
-  /** Send one turn, and give up on it when the deadline arrives. */
-  const send = async (turn: string): Promise<boolean> => {
-    const sent = options.session.prompt(turn);
-    // The turn may reject after the deadline has already won the race. It is
-    // observed here, so it cannot become an unhandled rejection.
-    void sent.catch(() => {});
-    await Promise.race([sent, deadline]);
-    if (stopped() || aborted) {
-      return false;
-    }
-    // A turn whose model call failed settles normally; without this, a session
-    // that answered nothing runs the array to its end and the run fails later
-    // with whatever the empty work looks like.
-    const failure = turnFailure(lastAssistant(options.session.messages));
-    if (failure !== null) {
-      throw failure;
-    }
-    return true;
-  };
-
   /** A stop by a human reads exactly like the deadline: the array does not go on. */
   const stopped = (): boolean => {
     if (options.stopped?.() !== true) {
@@ -361,31 +412,44 @@ export async function runPromptArray(options: {
     return true;
   };
 
-  let completed = 0;
-  try {
-    // The data goes first, in turns of its own, and is not counted: only the
-    // prompts are the prompt array.
+  /** Send one turn, and give up on it when the deadline arrives. */
+  const run = async (state: WorkflowState): Promise<StateOutcome> => {
     if (stopped()) {
-      return { completed, aborted, abortError };
+      throw cutOffError("the run was stopped before its next turn");
     }
-    if (options.issueBody !== undefined) {
-      if (!(await send(fenceIssueBody(options.issueBody)))) {
-        return { completed, aborted, abortError };
-      }
+    const sent = options.session.prompt(state.text);
+    // The turn may reject after the deadline has already won the race. It is
+    // observed here, so it cannot become an unhandled rejection.
+    void sent.catch(() => {});
+    await Promise.race([sent, deadline]);
+    if (stopped() || aborted) {
+      throw cutOffError("the run was cut off before its next turn");
     }
-    if (options.issueComments !== undefined && options.issueComments.length > 0) {
-      if (!(await send(fenceIssueComments(options.issueComments)))) {
-        return { completed, aborted, abortError };
-      }
+    // A turn whose model call failed settles normally; without this, a session
+    // that answered nothing runs the states to their end and the run fails
+    // later with whatever the empty work looks like.
+    const failure = turnFailure(lastAssistant(options.session.messages));
+    if (failure !== null) {
+      return { state: "error", error: failure };
     }
+    return { state: "ok" };
+  };
 
-    for (const prompt of options.prompts) {
-      if (stopped() || !(await send(prompt))) {
-        break;
-      }
-      completed += 1;
+  try {
+    const result = await runStates({
+      states: sessionStates(options),
+      run,
+    });
+    const completed = result.completed.filter((state) => state.counts).length;
+    return { completed, aborted: aborted || result.aborted, abortError };
+  } catch (error) {
+    // The engine wraps a failed turn and says which state it failed in. The
+    // failure underneath it is the cause; the caller reads the message.
+    const cause = stateFailure(error);
+    if (cause === null) {
+      throw error;
     }
-    return { completed, aborted, abortError };
+    throw new Error(error instanceof Error ? error.message : String(error), { cause });
   } finally {
     cancel();
     options.session.dispose();
@@ -451,6 +515,9 @@ export async function startAgent(options: {
   return runPromptArray({
     session,
     prompts,
+    // The work session's four states: the prompts run as the states the
+    // workflow declares, in the workflow's order.
+    states: WORKFLOW_STATES.map((state) => ({ name: state.name, phase: state.phase })),
     issueBody: issue.body,
     issueComments: issue.comments,
     deadlineMs: options.deadlineMs,
