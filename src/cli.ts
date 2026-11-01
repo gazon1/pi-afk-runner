@@ -43,7 +43,7 @@ import {
   type MergeOptions,
   type MergeResult,
 } from "./merge.js";
-import { RunFailed, runOnce, type RunOptions } from "./runner.js";
+import { RunFailed, runOnce, type RunOptions, unworkableReason } from "./runner.js";
 import { skillsDirectory, type AgentSession, type SessionFactory } from "./session.js";
 
 /** The run finished, or the queue was empty. */
@@ -811,19 +811,9 @@ async function work(runOptions: RunOptions, namedIssue: number | undefined): Pro
     const result = await runOnce(runOptions);
     if (result.outcome === "empty") {
       process.stdout.write("the queue is empty — there was nothing to work\n");
-    } else if ((result.outcome as string) === "unworkable") {
+    } else if (result.outcome === "unworkable") {
       const issueNum = result.issue ?? namedIssue;
-      const derivedState = (result as { derivedState?: string }).derivedState;
-      let reason: string;
-      if (derivedState === "Claimed") {
-        reason = "it is held by another runner";
-      } else if (derivedState === "Reviewed") {
-        reason = "already reviewed";
-      } else if (derivedState === "Counted") {
-        reason = "already counted";
-      } else {
-        reason = "check whether it is claimed by another runner, already reviewed, or already counted";
-      }
+      const reason = unworkableReason(result.derivedState);
       process.stderr.write(
         `issue ${issueNum} could not be worked — ${reason}\n`,
       );

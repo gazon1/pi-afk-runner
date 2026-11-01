@@ -49,7 +49,7 @@ import { join, resolve } from "node:path";
 import { runGit, workBranch } from "./git.js";
 import { RUN_STATUS_ENTRY, statusFromEntries, statusLine, type RunStatus } from "./live.js";
 import { takeLock } from "./lock.js";
-import { RunFailed, newRunId, runOnce, type RunOptions, type RunResult } from "./runner.js";
+import { RunFailed, newRunId, runOnce, type RunOptions, type RunResult, unworkableReason } from "./runner.js";
 import type { AgentSession, SessionFactory } from "./session.js";
 import { PINNED_PI_RANGE, assertInstalledPiVersion, installedPiVersion } from "./version.js";
 
@@ -494,19 +494,9 @@ export function liveFrontDoor(
     void (async () => {
       try {
         const result = await (dependencies.work ?? runOnce)(runOptions);
-        if ((result.outcome as string) === "unworkable") {
+        if (result.outcome === "unworkable") {
           const issueNum = result.issue ?? options.issue;
-          const derivedState = (result as { derivedState?: string }).derivedState;
-          let reason: string;
-          if (derivedState === "Claimed") {
-            reason = "it is held by another runner";
-          } else if (derivedState === "Reviewed") {
-            reason = "already reviewed";
-          } else if (derivedState === "Counted") {
-            reason = "already counted";
-          } else {
-            reason = "check whether it is claimed by another runner, already reviewed, or already counted";
-          }
+          const reason = unworkableReason(result.derivedState);
           talk(
             ctx,
             `afk-runner: issue ${issueNum ?? ""} could not be worked — ${reason}`,
