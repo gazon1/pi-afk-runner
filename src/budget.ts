@@ -9,8 +9,16 @@
  */
 import { GATES, GATE_TIMEOUT_MS } from "./gates.js";
 
-/** The work session's share of the run's budget. */
-export const SESSION_SHARE_MS = 60 * 60 * 1000;
+/**
+ * The work session's share of the run's budget.
+ *
+ * Two hours, because that is what the session costs on the target: the
+ * implementation, the gates it runs itself, and — when the change touches a
+ * screen — the desktop suite, which is a quarter of an hour on its own. An
+ * hour cut a run short in the middle of the verification, and a cut turn's
+ * changes are never committed.
+ */
+export const SESSION_SHARE_MS = 2 * 60 * 60 * 1000;
 
 /**
  * The gates' share of the run's budget.

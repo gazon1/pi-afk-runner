@@ -16,9 +16,11 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 WorkingDirectory=%h/work/singularity
-# A run is capped at one hour. Two hours means a claim a killed sweep left
-# behind is taken over within a tick or two, not after a week.
-ExecStart=%h/.local/bin/pi-afk-runner --all --repo gazon1/sing --checkout %h/work/singularity --worktree-root %h/work/afk-worktrees --lock-dir %h/work/singularity/build/afk-runner --stale-after-ms 7200000
+# A run is capped at the runner's own budget: the three shares added up, five
+# and a half hours. The claim a killed sweep left behind is taken over after
+# eight hours — longer than any live run, so a run that is still going keeps
+# its issue.
+ExecStart=%h/.local/bin/pi-afk-runner --all --repo gazon1/sing --checkout %h/work/singularity --worktree-root %h/work/afk-worktrees --lock-dir %h/work/singularity/build/afk-runner --stale-after-ms 28800000
 # A sweep has no fixed length, so any finite timeout is a kill in the middle
 # of one. The runner's own deadline bounds each issue's turn instead.
 TimeoutStartSec=infinity

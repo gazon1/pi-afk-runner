@@ -3174,7 +3174,10 @@ describe("the CLI's run", () => {
     // spends its whole budget must not leave the gates nothing to run with.
     const shares = budgetShares(DEFAULT_DEADLINE_MS);
     expect(shares.gatesMs).toBe(3 * GATE_TIMEOUT_MS);
-    expect(shares.sessionMs).toBe(60 * 60 * 1000);
+    // The session's share is the two hours the target's work costs: it
+    // implements, it runs the gates, and on a screen change it runs the
+    // desktop suite, which is a quarter of an hour on its own.
+    expect(shares.sessionMs).toBe(2 * 60 * 60 * 1000);
     expect(shares.reviewMs).toBeGreaterThan(0);
     expect(shares.sessionMs + shares.gatesMs + shares.reviewMs).toBe(DEFAULT_DEADLINE_MS);
 
