@@ -44,7 +44,8 @@ Read the brief's acceptance criteria and the code they touch.
    The subtasks are listed **in the order they must run**. The runner files
    them as issues labelled `ready-for-agent`, records the dependency from each
    piece to the one before it, links them from this issue, and closes this
-   issue. A later piece does not start until the earlier one is closed.
+   issue. A later piece does not start until the earlier one's pull request
+   is merged.
 
 The brief you write is what the next run reads. Describe behaviour and
 acceptance criteria, not file paths and line numbers.

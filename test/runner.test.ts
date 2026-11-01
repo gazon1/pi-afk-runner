@@ -75,6 +75,7 @@ import {
   createPullRequestArgs,
   dependencyNumbers,
   issueArgs,
+  mergedPullRequestArgs,
   postCommentArgs,
   reviewCommentBody,
   parseIssues,
@@ -87,6 +88,7 @@ import {
   readQueue,
   readPullRequest,
   runGhWithTimeout,
+  type GhRunner,
 } from "../src/gh.js";
 import {
   UNCLAIMED,
@@ -5184,42 +5186,98 @@ describe("the dependencies an issue declares", () => {
     expect(blockedReason(undefined)).toBeNull();
   });
 
-  it("is blocked while a parent is open, and free when it closes", async () => {
-    const gh = async (args: readonly string[]): Promise<string> => {
-      const number = Number(args[2]);
-      if (number === 1) {
+  it("is blocked while the parent's work has not landed, and free once it has", async () => {
+    const child = { number: 1, title: "the child", updatedAt: "", labels: [] };
+
+    /**
+     * The fake `gh`: the child's text, and the pull request of the parent it
+     * names. The parent is #2, and what it has is what the test says.
+     */
+    const fakeGh = (
+      parent: "no pull request" | "open" | "closed unmerged" | "merged",
+    ): GhRunner =>
+      async (args: readonly string[]): Promise<string> => {
+        if (args[0] === "issue") {
+          return JSON.stringify({
+            body: "**Depends on:** #2",
+            comments: [],
+            state: "OPEN",
+          });
+        }
+        if (args[0] === "pr") {
+          // The runner asks for the parent's merged pull request, on the
+          // parent's own work branch. An open or closed one is not there: the
+          // work has not landed.
+          const head = args[args.indexOf("--head") + 1];
+          return head === "agent/issue-2" && parent === "merged"
+            ? JSON.stringify([{ number: 7 }])
+            : "[]";
+        }
+        return "";
+      };
+
+    // A parent that is still open, one that was closed as won't-fix without a
+    // pull request, one whose pull request is open, and one whose pull request
+    // was closed unmerged: none of them has landed.
+    expect(
+      await openDependencies({ repo: "gazon1/sing", gh: fakeGh("no pull request") }, child),
+    ).toEqual([2]);
+    expect(
+      await openDependencies({ repo: "gazon1/sing", gh: fakeGh("open") }, child),
+    ).toEqual([2]);
+    expect(
+      await openDependencies({ repo: "gazon1/sing", gh: fakeGh("closed unmerged") }, child),
+    ).toEqual([2]);
+
+    // A merged pull request is the work landing: the child is free.
+    expect(
+      await openDependencies({ repo: "gazon1/sing", gh: fakeGh("merged") }, child),
+    ).toEqual([]);
+  });
+
+  it("holds the child when the parent's pull request cannot be read", async () => {
+    const child = { number: 1, title: "the child", updatedAt: "", labels: [] };
+    const failing: GhRunner = async (args: readonly string[]): Promise<string> => {
+      if (args[0] === "issue") {
         return JSON.stringify({
           body: "**Depends on:** #2",
           comments: [],
           state: "OPEN",
         });
       }
-      if (number === 2) {
-        return JSON.stringify({ body: "", comments: [], state: "OPEN" });
-      }
-      return "";
+      throw new Error("gh pr list failed");
     };
+
+    // A read that fails is not a landing: the parent keeps the child waiting.
+    expect(await openDependencies({ repo: "gazon1/sing", gh: failing }, child)).toEqual([2]);
+  });
+
+  it("does not hold the child when its own text cannot be read", async () => {
     const child = { number: 1, title: "the child", updatedAt: "", labels: [] };
-
-    expect(await openDependencies({ repo: "gazon1/sing", gh }, child)).toEqual([2]);
-
-    const closedParent = async (args: readonly string[]): Promise<string> => {
-      const number = Number(args[2]);
-      if (number === 1) {
-        return JSON.stringify({
-          body: "Parent: #2",
-          comments: [],
-          state: "OPEN",
-        });
-      }
-      if (number === 2) {
-        return JSON.stringify({ body: "", comments: [], state: "CLOSED" });
-      }
-      return "";
+    const failing: GhRunner = async (): Promise<string> => {
+      throw new Error("gh issue view failed");
     };
-    expect(
-      await openDependencies({ repo: "gazon1/sing", gh: closedParent }, child),
-    ).toEqual([]);
+
+    // The child's own text is read best-effort: the run cannot go on without
+    // the brief either, and it stops there.
+    expect(await openDependencies({ repo: "gazon1/sing", gh: failing }, child)).toEqual([]);
+  });
+
+  it("asks for the parent's merged pull request", () => {
+    expect(mergedPullRequestArgs("gazon1/sing", "agent/issue-2")).toEqual([
+      "pr",
+      "list",
+      "--repo",
+      "gazon1/sing",
+      "--head",
+      "agent/issue-2",
+      "--state",
+      "merged",
+      "--limit",
+      "1",
+      "--json",
+      "number",
+    ]);
   });
 });
 

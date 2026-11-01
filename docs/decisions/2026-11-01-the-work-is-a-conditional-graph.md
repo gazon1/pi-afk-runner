@@ -68,6 +68,11 @@ work is done. A split chains its pieces this way, so they run in order. The
 check is best-effort: a read that fails does not block, because guessing wrong
 in that direction holds an issue out of the queue for ever.
 
+> **Replaced on 2026-11-03.** The rule above settled a dependency on a *closed*
+> parent, which cannot tell a merge from a rejection. The rule now is in
+> `2026-11-03-a-dependency-is-settled-by-a-merge.md`: a dependency is settled
+> when the parent's pull request is **merged**. The rest of this record stands.
+
 **A small change skips the long pre-push checks.** A diff of at most
 `SMALL_CHANGE_MAX_FILES` files and `SMALL_CHANGE_MAX_LINES` lines skips the
 repository's pre-push hook. The hook's detekt verdict over one module takes
