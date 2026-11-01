@@ -403,7 +403,15 @@ export function createResourceLoader(options: {
                 const lines = thinking.split("\n");
                 const shown = lines.slice(0, 3);
                 for (const line of shown) {
-                  options.onEvent?.(chalk.dim(line));
+                  // A blank line carries nothing: the marker on it would be a
+                  // line of its own, and it would read as the agent's line.
+                  if (line.trim() === "") {
+                    continue;
+                  }
+                  // The marker is what says "the agent, not the runner": the
+                  // journal is not a TTY, so the dim is the same text as a
+                  // status line and the shape is all that is left.
+                  options.onEvent?.(chalk.dim(`· ${line}`));
                 }
                 if (lines.length > 3) {
                   options.onEvent?.(chalk.dim(`… (+${lines.length - 3} lines)`));
