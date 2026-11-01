@@ -31,6 +31,9 @@ const execFileAsync = promisify(execFile);
 /** The label a human applies to say "this issue is specified and may be taken". */
 export const QUEUE_LABEL = "ready-for-agent";
 
+/** The marker a brief comment has to open with. */
+export const BRIEF_MARKER = "## Agent Brief";
+
 /** The runner's claim on an issue. */
 export const CLAIM_LABEL = "agent-in-progress";
 
@@ -46,11 +49,12 @@ export const GH_DEFAULT_PAGE_SIZE = 30;
 /**
  * The page size the runner asks for.
  *
- * The queue is larger than `gh`'s default, so the default silently truncates
- * it. Five hundred is far above any queue this repository has, and the cost of
- * asking for more than you need is one request.
+ * The runner's issue reads are larger than `gh`'s default, and the default
+ * silently truncates them: the queue, the claimed set, and the open issues a
+ * duplicate check reads. Five hundred is far above any of them, and the cost
+ * of asking for more than you need is one request.
  */
-export const QUEUE_PAGE_SIZE = 500;
+export const ISSUE_PAGE_SIZE = 500;
 
 /** An issue, as far as the runner cares. */
 export interface IssueSummary {
@@ -87,7 +91,7 @@ export function queueArgs(repo: string): string[] {
     "--search",
     `-label:${CLAIM_LABEL}`,
     "--limit",
-    String(QUEUE_PAGE_SIZE),
+    String(ISSUE_PAGE_SIZE),
     "--json",
     "number,title,updatedAt,labels",
   ];
@@ -114,7 +118,30 @@ export function claimedArgs(repo: string): string[] {
     "--label",
     CLAIM_LABEL,
     "--limit",
-    String(QUEUE_PAGE_SIZE),
+    String(ISSUE_PAGE_SIZE),
+    "--json",
+    "number,title,updatedAt,labels",
+  ];
+}
+
+/**
+ * The arguments that read the open issues — every one of them, whatever labels it carries.
+ *
+ * The queue read asks for the issues a human judged specified; this one asks for
+ * everything that is open, and it is the read a duplicate check needs: an issue that
+ * another run is already working is not in the queue — the queue excludes the
+ * claimed issues — and filing a second copy of it would be filing it twice.
+ */
+export function openIssuesArgs(repo: string): string[] {
+  return [
+    "issue",
+    "list",
+    "--repo",
+    repo,
+    "--state",
+    "open",
+    "--limit",
+    String(ISSUE_PAGE_SIZE),
     "--json",
     "number,title,updatedAt,labels",
   ];
@@ -253,6 +280,14 @@ export async function readQueue(repo: string, gh: GhRunner = runGh): Promise<Iss
   return parseIssues(await gh(queueArgs(repo)));
 }
 
+/** Read the open issues — the duplicate check's read. */
+export async function readOpenIssues(
+  repo: string,
+  gh: GhRunner = runGh,
+): Promise<IssueSummary[]> {
+  return parseIssues(await gh(openIssuesArgs(repo)));
+}
+
 /** Read the issues somebody has claimed — including a run that died holding one. */
 export async function readClaimed(
   repo: string,
@@ -272,6 +307,125 @@ export async function readPullRequest(
     return null;
   }
   return parsePullRequest(JSON.stringify(parsed[0]));
+}
+
+/** An open pull request, as far as the merge pipeline cares. */
+export interface OpenPullRequest {
+  readonly number: number;
+  readonly title: string;
+  /** The branch the pull request comes from. */
+  readonly headRefName: string;
+  readonly isDraft: boolean;
+  readonly labels: readonly string[];
+  readonly comments: readonly string[];
+}
+
+/**
+ * The arguments that read the open pull requests against a base.
+ *
+ * The merge pipeline reads them all and filters by the branch prefix itself:
+ * `gh` cannot be asked for a head pattern, and the branch name is where the
+ * pipeline's own work is recognised.
+ */
+export function openPullRequestsArgs(repo: string, base: string): string[] {
+  return [
+    "pr",
+    "list",
+    "--repo",
+    repo,
+    "--state",
+    "open",
+    "--base",
+    base,
+    "--limit",
+    String(ISSUE_PAGE_SIZE),
+    "--json",
+    "number,title,headRefName,isDraft,labels,comments",
+  ];
+}
+
+/** Parse the JSON `gh pr list --json` produces. */
+export function parseOpenPullRequests(json: string): OpenPullRequest[] {
+  const parsed: unknown = JSON.parse(json);
+  if (!Array.isArray(parsed)) {
+    return [];
+  }
+  return parsed.map((entry) => {
+    const record = entry as Record<string, unknown>;
+    return {
+      number: typeof record.number === "number" ? record.number : 0,
+      title: typeof record.title === "string" ? record.title : "",
+      headRefName: typeof record.headRefName === "string" ? record.headRefName : "",
+      isDraft: record.isDraft === true,
+      labels: labelNames(record.labels),
+      comments: commentBodies(record.comments),
+    };
+  });
+}
+
+/** Read the open pull requests against a base. */
+export async function readOpenPullRequests(
+  repo: string,
+  base: string,
+  gh: GhRunner = runGh,
+): Promise<OpenPullRequest[]> {
+  return parseOpenPullRequests(await gh(openPullRequestsArgs(repo, base)));
+}
+
+/**
+ * The verdict of the newest marked review comment, or null.
+ *
+ * The gate's own rule: the **newest** comment that opens with the marker
+ * decides, a comment that states two verdicts decides nothing, and a newest
+ * comment with no verdict decides nothing rather than falling back to an older
+ * `pass`. A merge gate that guessed would land a change a review had blocked.
+ */
+export function newestReviewVerdict(
+  comments: readonly string[],
+): "pass" | "fail" | null {
+  for (let index = comments.length - 1; index >= 0; index -= 1) {
+    const body = (comments[index] ?? "").trimStart();
+    if (!body.startsWith(REVIEW_MARKER)) {
+      continue;
+    }
+    const stated = [
+      ...body.matchAll(
+        /^\s*\**\s*verdict\s*\**\s*:\s*\**\s*(pass|fail)\s*\**\s*\.?\s*$/gim,
+      ),
+    ];
+    return stated.length === 1 ? (stated[0]?.[1] as "pass" | "fail") : null;
+  }
+  return null;
+}
+
+/**
+ * The arguments that land a pull request: squash it, and remove its branch.
+ *
+ * `head` is the commit the run checked. With it, GitHub refuses the merge if
+ * the branch moved in between — a work run pushing the same branch is not
+ * excluded by any lock, so the check and the landing have to be one step.
+ */
+export function mergePullRequestArgs(repo: string, number: number, head?: string): string[] {
+  return [
+    "pr",
+    "merge",
+    String(number),
+    "--repo",
+    repo,
+    "--squash",
+    "--delete-branch",
+    ...(head === undefined ? [] : ["--match-head-commit", head]),
+  ];
+}
+
+/** Land a pull request, if its head is still the commit the run checked. */
+export async function mergePullRequest(
+  repo: string,
+  number: number,
+  head?: string,
+  gh: GhRunner = runGh,
+): Promise<void> {
+  await gh(mergePullRequestArgs(repo, number, head));
 }
 
 /** The arguments that read one issue's body and its comments. */
@@ -330,6 +484,141 @@ export async function readIssue(
     updatedAt: typeof record.updatedAt === "string" ? record.updatedAt : "",
     state: typeof record.state === "string" ? record.state : "",
   };
+}
+
+/** The arguments that create an issue. */
+export function createIssueArgs(options: {
+  readonly repo: string;
+  readonly title: string;
+  readonly body: string;
+  readonly labels?: readonly string[];
+}): string[] {
+  const args = [
+    "issue",
+    "create",
+    "--repo",
+    options.repo,
+    "--title",
+    options.title,
+    "--body",
+    options.body,
+  ];
+  for (const label of options.labels ?? []) {
+    args.push("--label", label);
+  }
+  return args;
+}
+
+/**
+ * The number of an issue, from the URL `gh issue create` prints.
+ */
+export function issueNumberFromUrl(url: string): number | null {
+  const match = /\/issues\/(\d+)/.exec(url.trim());
+  return match === null ? null : Number(match[1]);
+}
+
+/** Create an issue and return its number. */
+export async function createIssue(
+  options: {
+    readonly repo: string;
+    readonly title: string;
+    readonly body: string;
+    readonly labels?: readonly string[];
+  },
+  gh: GhRunner = runGh,
+): Promise<number> {
+  const output = await gh(createIssueArgs(options));
+  const number = issueNumberFromUrl(output.trim());
+  if (number === null) {
+    throw new Error(`gh did not say which issue it opened: ${output.trim()}`);
+  }
+  return number;
+}
+
+/** The arguments that post a comment on an issue. */
+export function commentIssueArgs(
+  repo: string,
+  issueNumber: number,
+  body: string,
+): string[] {
+  return ["issue", "comment", String(issueNumber), "--repo", repo, "--body", body];
+}
+
+/** Post a comment on an issue. */
+export async function commentIssue(
+  options: {
+    readonly repo: string;
+    readonly issueNumber: number;
+    readonly body: string;
+  },
+  gh: GhRunner = runGh,
+): Promise<void> {
+  await gh(commentIssueArgs(options.repo, options.issueNumber, options.body));
+}
+
+/** The arguments that close an issue, with an optional comment. */
+export function closeIssueArgs(
+  repo: string,
+  issueNumber: number,
+  body?: string,
+): string[] {
+  return [
+    "issue",
+    "close",
+    String(issueNumber),
+    "--repo",
+    repo,
+    ...(body === undefined || body.trim() === "" ? [] : ["--comment", body]),
+  ];
+}
+
+/** Close an issue, saying why when there is a why. */
+export async function closeIssue(
+  options: {
+    readonly repo: string;
+    readonly issueNumber: number;
+    readonly body?: string;
+  },
+  gh: GhRunner = runGh,
+): Promise<void> {
+  await gh(closeIssueArgs(options.repo, options.issueNumber, options.body));
+}
+
+/**
+ * The marker a line that names a dependency opens with.
+ *
+ * A dependency is a line the brief or the body writes as `**Depends on:** #N`
+ * (or `Blocked by:` / `Parent:`). It is the runner's own convention: the
+ * queue is a set of issues, and an issue that waits for another one says so in
+ * the text every run already reads. A line has to start with the marker, so
+ * prose that happens to mention a parent does not block the issue.
+ */
+export const DEPENDENCY_MARKER =
+  /^(?:\*\*)?(?:depends on|blocked by|parent)(?:\*\*)?\s*:/i;
+
+/**
+ * The issue numbers a text says it waits for.
+ *
+ * The whole text is read — the body and every comment — because a brief may be
+ * the body or a comment, and a dependency may be recorded in either.
+ */
+export function dependencyNumbers(texts: readonly string[]): number[] {
+  const found = new Set<number>();
+  for (const text of texts) {
+    for (const raw of text.split("\n")) {
+      const line = raw.trim();
+      if (!DEPENDENCY_MARKER.test(line)) {
+        continue;
+      }
+      for (const match of line.matchAll(/#(\d+)/g)) {
+        const number = Number(match[1]);
+        if (Number.isInteger(number) && number > 0) {
+          found.add(number);
+        }
+      }
+    }
+  }
+  return [...found];
 }
 
 /**

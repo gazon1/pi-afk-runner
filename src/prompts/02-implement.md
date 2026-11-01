@@ -23,6 +23,11 @@ The plan is settled. Now do the work.
    change again with fresh eyes, fixes what it finds, and runs the gates again
    — so a tree you leave red is a tree the run stops on.
 
+   A small change — a few lines in one module — needs `./check.sh` only. The
+   long evals and the docs audit earn their cost on a change that reaches them,
+   and the runner skips the pre-push hook for a small change for the same
+   reason.
+
 3. **Do not commit or push.** The runner commits whatever is left in the
    worktree on your behalf and pushes under its own branch name, so the push
    stays under its control. A commit you make yourself is not lost, but it is

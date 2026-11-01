@@ -7,7 +7,8 @@ carry the detail.
 
 A **Pi extension**: a package Pi loads, written in TypeScript, that takes an issue labelled
 `ready-for-agent`, works it in an isolated worktree, opens a pull request and has a second agent
-review it. It never merges.
+review it. **The work pipeline never merges**; landing is the separate, opt-in `--merge` mode, and
+it only lands what the work pipeline opened and reviewed.
 
 It is a **separate repository** from the one it operates on, on purpose — the target is a Kotlin
 Multiplatform application with its own gates, and a JavaScript toolchain inside it would put the
@@ -44,6 +45,10 @@ repository owns, and the target's copy is the one that counts.
 When the target's contract changes, copy it again. See
 [contract/README.md](contract/README.md) for the rule.
 
+Anything in the **merge** mode binds to [contract/merge.md](contract/merge.md) instead. That
+contract is this repository's own, not a copy: the target's contract describes a pipeline that
+never merges, and landing is the opt-in exception.
+
 ## The practices
 
 The working practices are copied from the target repository and apply here too:
@@ -66,7 +71,16 @@ apply to a TypeScript suite, and the **ban list** names Kotlin tools.
 [skills/](skills/) holds the skills the runner's agent uses — the review, the gates, the change
 workflow, the decision log, the issue triage — and
 [writing-for-agents](skills/writing-for-agents/SKILL.md), which is how this repository's own
-documents are written. When a prompt in `src/prompts/` names a skill, that skill is one of these.
+documents are written.
+
+A prompt in `src/prompts/` may name a skill, and then the skill has to be one **the work session
+has**: a skill of the target repository's `.agents/skills`, or one of these. The runner ships
+these and puts them in the session's skill paths, so a skill the runner depends on is a skill the
+runner carries. A skill that exists only on the host that happens to run the runner is not one a
+prompt may name — the run has to be the same on every host.
+
+A prompt names a skill as `$<name>`, and the suite reads that shape: every `$name` in a prompt is
+a skill the runner carries, and a session on a host with no skills of its own has it anyway.
 
 ## One commit, one thought
 

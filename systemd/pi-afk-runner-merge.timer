@@ -1,0 +1,15 @@
+[Unit]
+Description=Run the AFK runner's merge pipeline every two hours
+
+[Timer]
+# A moved branch lands on the next run once CI has judged it, so the interval
+# is the delay a fixed pull request waits — two hours, not the work timer's one.
+OnBootSec=20min
+OnUnitActiveSec=2h
+# Not exactly on the hour, for the same reason the work timer is not.
+RandomizedDelaySec=10min
+# A merge that was missed while the machine was off happens when it comes back.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

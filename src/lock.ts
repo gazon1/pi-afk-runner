@@ -1,10 +1,16 @@
 /**
  * The host lock.
  *
- * One runner at a time on one machine. The claim on the issue is what excludes
- * a runner **anywhere** — that is the layer that works across hosts — and this
- * is the layer below it: it keeps two runs on one host from fighting over the
- * same worktree root, the same Gradle home and the same record directory.
+ * One runner per issue at a time on one machine, and one sweep at a time. The
+ * claim on the issue is what excludes a runner **anywhere** — that is the layer
+ * that works across hosts — and this is the layer below it: it keeps two runs
+ * on one host from fighting over the same worktree, the same Gradle home and
+ * the same record directory.
+ *
+ * The lock is per issue, so several runners may work different issues on one
+ * host at once. A sweep (`--all`) and a run that picks the queue's first issue
+ * take the one sweep lock; a merge takes its own, so it does not wait for a run
+ * that is working an issue.
  *
  * It is a real `flock`, held by a child process for as long as the run lasts.
  * Two other locks were considered and rejected: a lock *file* that a killed
@@ -29,8 +35,21 @@ import { join } from "node:path";
 /** The exit code `flock` uses when the lock is held and `--conflict-exit-code` says so. */
 const CONFLICT_EXIT_CODE = 75;
 
-/** The name of the lock file inside the lock directory. */
+/** The name of the lock file a sweep — or a queue's first issue — takes. */
 export const LOCK_NAME = "runner.lock";
+
+/** The name of the lock file a merge takes: one merge at a time, beside the work. */
+export const MERGE_LOCK_NAME = "merge.lock";
+
+/** The lock a work run takes: the issue's own when one is named, else the sweep's. */
+export function workLockName(issue: number | undefined): string {
+  return issue === undefined ? LOCK_NAME : `issue-${issue}.lock`;
+}
+
+/** The lock the run takes: merge's own, or the work run's. */
+export function lockNameFor(run: { readonly merge?: boolean; readonly issue?: number }): string {
+  return run.merge === true ? MERGE_LOCK_NAME : workLockName(run.issue);
+}
 
 /** The word the holder prints once the lock is its own. */
 const HELD = "locked";

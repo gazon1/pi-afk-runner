@@ -1,0 +1,22 @@
+# The AFK runner's merge pipeline, as a systemd service.
+#
+# It is the work pipeline's service with `--merge` instead of `--all`: it lands
+# the reviewed, green pull requests the work pipeline opened. Its lock is its
+# own (`merge.lock`), so it does not wait for the runs working issues. The paths
+# are this host's paths and are meant to be edited, exactly as in
+# `pi-afk-runner.service`.
+
+[Unit]
+Description=AFK runner: land the reviewed, green pull requests it opened
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/work/singularity
+# A merge takes `merge.lock`, not the work runner's, so a work run does not
+# hold it out.
+ExecStart=%h/.local/bin/pi-afk-runner --merge --repo gazon1/sing --checkout %h/work/singularity --worktree-root %h/work/afk-worktrees --lock-dir %h/work/singularity/build/afk-runner
+# A merge spends its time in the repository's gate, whose length is the
+# target's business, not the unit's.
+TimeoutStartSec=infinity

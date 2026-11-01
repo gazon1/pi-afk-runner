@@ -17,8 +17,9 @@
  * | 76 | the lock could not be taken |
  * | 2 | the command line was wrong |
  *
- * The runner never merges. A pull request it opens stays open, and a human
- * closes it.
+ * The work pipeline never merges. A pull request it opens stays open, and a
+ * human closes it. `--merge` is the explicit exception: a separate, opt-in
+ * mode that lands the reviewed, green pull requests the work pipeline opened.
  */
 
 import { homedir } from "node:os";
@@ -36,9 +37,14 @@ import { EnvHttpProxyAgent, fetch as undiciFetch, setGlobalDispatcher } from "un
 import { readClaimed, readQueue, runGh, type GhRunner } from "./gh.js";
 import { guardExtensionPath, installGuardPolicy } from "./guard.js";
 import { runCommand, runGit, type CommandRunner, type GitRunner } from "./git.js";
-import { LockHeld, LockUnusable, takeLock } from "./lock.js";
-import { RunFailed, runOnce, type RunOptions } from "./runner.js";
-import type { AgentSession, SessionFactory } from "./session.js";
+import { LockHeld, LockUnusable, lockNameFor, takeLock, workLockName } from "./lock.js";
+import {
+  mergeReviewedPullRequests,
+  type MergeOptions,
+  type MergeResult,
+} from "./merge.js";
+import { RunFailed, blockedReason, runOnce, type RunOptions, unworkableReason } from "./runner.js";
+import { skillsDirectory, type AgentSession, type SessionFactory } from "./session.js";
 
 /** The run finished, or the queue was empty. */
 export const EXIT_OK = 0;
@@ -94,6 +100,8 @@ export interface CliOptions {
   readonly issue?: number;
   /** Work every eligible issue, one after another. Not with `--issue`. */
   readonly all?: boolean;
+  /** Land the reviewed, green pull requests the work pipeline opened. */
+  readonly merge?: boolean;
   /** The checkout the worktree is made from. */
   readonly checkout: string;
   /** The remote the base comes from. */
@@ -125,6 +133,7 @@ export const USAGE = [
   "  --repo <owner/name>    the repository the issue lives in (default: the checkout's origin)",
   "  --issue <number>        the issue to work (default: the queue's first eligible one)",
   "  --all                   work every eligible issue, one after another",
+  "  --merge                 land the reviewed, green pull requests the runner opened",
   "  --checkout <path>       the checkout the worktree is made from (default: the cwd)",
   "  --remote <name>         the remote the base comes from (default: origin)",
   "  --base <branch>         the branch the base is read from (default: main)",
@@ -163,7 +172,7 @@ export function parseArgs(argv: readonly string[]): CliOptions {
     if (name === "help") {
       throw new Error("help");
     }
-    if (name === "no-verify" || name === "all") {
+    if (name === "no-verify" || name === "all" || name === "merge") {
       // A flag, not an option with a value.
       values.set(name, "true");
       continue;
@@ -183,8 +192,12 @@ export function parseArgs(argv: readonly string[]): CliOptions {
 
   const issue = values.get("issue");
   const all = values.has("all");
+  const merge = values.has("merge");
   if (all && issue !== undefined) {
     throw new Error("--all works every issue, so it cannot be combined with --issue");
+  }
+  if (merge && (all || issue !== undefined)) {
+    throw new Error("--merge is its own mode; it cannot be combined with --all or --issue");
   }
   const checkout = resolve(values.get("checkout") ?? process.cwd());
   const remote = values.get("remote") ?? "origin";
@@ -209,6 +222,7 @@ export function parseArgs(argv: readonly string[]): CliOptions {
     ...(repo === undefined ? {} : { repo }),
     ...(issue === undefined ? {} : { issue: positiveNumber(issue, "--issue") }),
     ...(all ? { all: true } : {}),
+    ...(merge ? { merge: true } : {}),
     checkout,
     remote,
     baseBranch,
@@ -324,6 +338,97 @@ export function assistantTextLines(text: string): string[] {
 }
 
 /**
+ * The loader the session's resources come from.
+ *
+ * It is the SDK's own loader, with three things said: the guard's extension is
+ * installed into the session, the runner's own skills are in its skill paths,
+ * and this package's own extension is dropped from the set the loader
+ * discovered.
+ */
+export function createResourceLoader(options: {
+  readonly cwd: string;
+  readonly agentDirectory: string;
+  readonly systemPromptSections: Record<string, string>;
+  /** Told what the agent is doing, as it does it. */
+  readonly onEvent?: (line: string) => void;
+}): DefaultResourceLoader {
+  return new DefaultResourceLoader({
+    cwd: options.cwd,
+    agentDir: options.agentDirectory,
+    additionalExtensionPaths: [guardExtensionPath()],
+    // The runner's own skills, and nothing else: the target repository's
+    // skills and the host user's come from the loader's own discovery. The
+    // host's are not the runner's to depend on — a run has to be the same on
+    // every host — so a skill the runner depends on is a skill the runner
+    // carries.
+    additionalSkillPaths: [skillsDirectory()],
+    extensionsOverride: (loaded) => ({
+      ...loaded,
+      extensions: loaded.extensions.filter((extension) => !isOwnExtension(extension.path)),
+    }),
+    extensionFactories: [
+      {
+        name: "afk-runner-guardrail",
+        factory: (pi) => {
+          pi.on("before_agent_start", (event) => {
+            for (const [name, text] of Object.entries(options.systemPromptSections)) {
+              event.systemPromptOptions.sections[name] = text;
+            }
+          });
+          pi.on("tool_call", (event) => {
+            options.onEvent?.(chalk.dim(`  → ${describeToolCall(event)}`));
+          });
+          pi.on("message_end", (event: any) => {
+            const message = event?.message;
+            if (!message || message.role !== "assistant") {
+              return;
+            }
+            const content = Array.isArray(message.content)
+              ? message.content
+              : [];
+            for (const block of content) {
+              if (!block || typeof block !== "object") {
+                continue;
+              }
+              if (block.type === "thought" || block.type === "thinking") {
+                const thinking =
+                  typeof (block as any).thinking === "string"
+                    ? (block as any).thinking
+                    : typeof (block as any).text === "string"
+                      ? (block as any).text
+                      : "";
+                if (thinking === "") {
+                  continue;
+                }
+                const lines = thinking.split("\n");
+                const shown = lines.slice(0, 3);
+                for (const line of shown) {
+                  options.onEvent?.(chalk.dim(line));
+                }
+                if (lines.length > 3) {
+                  options.onEvent?.(chalk.dim(`… (+${lines.length - 3} lines)`));
+                }
+                continue;
+              }
+              if (block.type === "text") {
+                const text =
+                  typeof (block as any).text === "string"
+                    ? (block as any).text
+                    : "";
+                for (const line of assistantTextLines(text)) {
+                  options.onEvent?.(line);
+                }
+                continue;
+              }
+            }
+          });
+        },
+      },
+    ],
+  });
+}
+
+/**
  * The session the agent works in.
  *
  * Pi's own session, with two things added: the runner's guardrail reaches the
@@ -349,73 +454,11 @@ export function piSessionFactory(options: {
   return async ({ cwd, systemPromptSections, tools }) => {
     useProxyFromEnvironment();
     await installGuardPolicy({ cwd });
-    const loader = new DefaultResourceLoader({
+    const loader = createResourceLoader({
       cwd,
-      agentDir: options.agentDirectory,
-      additionalExtensionPaths: [guardExtensionPath()],
-      extensionsOverride: (loaded) => ({
-        ...loaded,
-        extensions: loaded.extensions.filter((extension) => !isOwnExtension(extension.path)),
-      }),
-      extensionFactories: [
-        {
-          name: "afk-runner-guardrail",
-          factory: (pi) => {
-            pi.on("before_agent_start", (event) => {
-              for (const [name, text] of Object.entries(systemPromptSections)) {
-                event.systemPromptOptions.sections[name] = text;
-              }
-            });
-            pi.on("tool_call", (event) => {
-              options.onEvent?.(chalk.dim(`  → ${describeToolCall(event)}`));
-            });
-            pi.on("message_end", (event: any) => {
-              const message = event?.message;
-              if (!message || message.role !== "assistant") {
-                return;
-              }
-              const content = Array.isArray(message.content)
-                ? message.content
-                : [];
-              for (const block of content) {
-                if (!block || typeof block !== "object") {
-                  continue;
-                }
-                if (block.type === "thought" || block.type === "thinking") {
-                  const thinking =
-                    typeof (block as any).thinking === "string"
-                      ? (block as any).thinking
-                      : typeof (block as any).text === "string"
-                        ? (block as any).text
-                        : "";
-                  if (thinking === "") {
-                    continue;
-                  }
-                  const lines = thinking.split("\n");
-                  const shown = lines.slice(0, 3);
-                  for (const line of shown) {
-                    options.onEvent?.(chalk.dim(line));
-                  }
-                  if (lines.length > 3) {
-                    options.onEvent?.(chalk.dim(`… (+${lines.length - 3} lines)`));
-                  }
-                  continue;
-                }
-                if (block.type === "text") {
-                  const text =
-                    typeof (block as any).text === "string"
-                      ? (block as any).text
-                      : "";
-                  for (const line of assistantTextLines(text)) {
-                    options.onEvent?.(line);
-                  }
-                  continue;
-                }
-              }
-            });
-          },
-        },
-      ],
+      agentDirectory: options.agentDirectory,
+      systemPromptSections,
+      ...(options.onEvent === undefined ? {} : { onEvent: options.onEvent }),
     });
     await loader.reload();
 
@@ -506,6 +549,12 @@ export function runOptionsFrom(
     deadlineMs: options.deadlineMs,
     staleAfterMs: options.staleAfterMs,
     ...(options.verifyPushes === undefined ? {} : { verifyPushes: options.verifyPushes }),
+    // A named issue took its lock before the run read anything. A run that lets
+    // the queue choose does not know the issue until it has chosen it, so the
+    // lock is taken inside the run — one issue at a time, even in a sweep.
+    ...(options.issue === undefined
+      ? { lockIssue: (issue: number) => takeLock(options.lockDirectory, workLockName(issue)) }
+      : {}),
   };
 }
 
@@ -580,7 +629,9 @@ export interface CliDependencies {
  * One issue, or the whole queue with `--all`. The lock is taken for the whole
  * invocation and given back whatever happens — a runner that died holding it
  * would keep the next one out for ever, and a runner that gave it back too
- * early would let two of them work at once.
+ * early would let two of them work at once. Work on a named issue takes the
+ * issue's own lock, so two issues can be worked on one host at once; a merge
+ * takes its own and never waits for a work run.
  */
 export async function main(
   argv: readonly string[],
@@ -609,7 +660,7 @@ export async function main(
 
   let lock;
   try {
-    lock = await takeLock(resolved.lockDirectory);
+    lock = await takeLock(resolved.lockDirectory, lockNameFor(resolved));
   } catch (failure) {
     if (failure instanceof LockHeld) {
       process.stderr.write(`${failure.message}\n`);
@@ -664,6 +715,36 @@ export async function main(
   };
 
   try {
+    if (resolved.merge === true) {
+      return await mergeAll({
+        repo: resolved.repo,
+        checkout: resolved.checkout,
+        remote: resolved.remote,
+        baseBranch: resolved.baseBranch,
+        worktreeRoot: resolved.worktreeRoot,
+        git: dependencies.git ?? runGit,
+        gh: dependencies.gh ?? runGh,
+        run: dependencies.run ?? runCommand,
+        session,
+        deadlineMs: resolved.deadlineMs,
+        ...(resolved.verifyPushes === undefined
+          ? {}
+          : { verifyPushes: resolved.verifyPushes }),
+        stopped: () => stopped,
+        onStepStart: (step) => {
+          process.stdout.write(`[${step}] start\n`);
+        },
+        onStep: (record) => {
+          const detail = record.detail === "" ? "" : ` — ${record.detail}`;
+          process.stdout.write(`[${record.step}] ${record.outcome}${detail}\n`);
+        },
+        onSubject: (subject) => {
+          process.stdout.write(
+            `pull request #${subject.pullRequest} · ${subject.title}\n`,
+          );
+        },
+      });
+    }
     if (resolved.all === true) {
       return await sweep(run, resolved.repo);
     }
@@ -738,23 +819,21 @@ async function work(runOptions: RunOptions, namedIssue: number | undefined): Pro
     const result = await runOnce(runOptions);
     if (result.outcome === "empty") {
       process.stdout.write("the queue is empty — there was nothing to work\n");
-    } else if ((result.outcome as string) === "unworkable") {
+    } else if (result.outcome === "unworkable") {
       const issueNum = result.issue ?? namedIssue;
-      const derivedState = (result as { derivedState?: string }).derivedState;
-      let reason: string;
-      if (derivedState === "Claimed") {
-        reason = "it is held by another runner";
-      } else if (derivedState === "Reviewed") {
-        reason = "already reviewed";
-      } else if (derivedState === "Counted") {
-        reason = "already counted";
-      } else {
-        reason = "check whether it is claimed by another runner, already reviewed, or already counted";
-      }
+      const reason =
+        blockedReason(result.blockedBy) ?? unworkableReason(result.derivedState);
       process.stderr.write(
         `issue ${issueNum} could not be worked — ${reason}\n`,
       );
       return 1;
+    } else if (result.outcome === "skipped" || result.outcome === "split") {
+      const what =
+        result.outcome === "skipped"
+          ? "closed as not needed"
+          : "split into smaller issues";
+      const why = result.reason === "" ? "" : ` — ${result.reason}`;
+      process.stdout.write(`issue ${result.issue} was ${what}${why}\n`);
     } else {
       process.stdout.write(
         `worked issue ${result.issue} — the record is at ${result.record}\n`,
@@ -762,6 +841,14 @@ async function work(runOptions: RunOptions, namedIssue: number | undefined): Pro
     }
     return EXIT_OK;
   } catch (failure) {
+    if (failure instanceof LockHeld) {
+      process.stderr.write(`${failure.message}\n`);
+      return EXIT_LOCKED;
+    }
+    if (failure instanceof LockUnusable) {
+      process.stderr.write(`${failure.message}\n`);
+      return EXIT_NO_LOCK;
+    }
     if (failure instanceof RunFailed) {
       process.stderr.write(`${failure.message}\n`);
       return STEP_EXIT_CODES[failure.step] ?? 1;
@@ -769,6 +856,36 @@ async function work(runOptions: RunOptions, namedIssue: number | undefined): Pro
     process.stderr.write(`${errorMessage(failure)}\n`);
     return 1;
   }
+}
+
+/**
+ * Land the reviewed pull requests, and say what happened.
+ *
+ * A skipped pull request is not a failure: it is one the review or the CI has
+ * not cleared yet, and the next run reads it again. A step that stopped is a
+ * failure, and the name of the step is where a reader starts.
+ */
+async function mergeAll(options: MergeOptions): Promise<number> {
+  let result: MergeResult;
+  try {
+    result = await mergeReviewedPullRequests(options);
+  } catch (failure) {
+    process.stderr.write(`the merge could not start: ${errorMessage(failure)}\n`);
+    return 1;
+  }
+
+  for (const number of result.merged) {
+    process.stdout.write(`merged #${number}\n`);
+  }
+  for (const entry of result.skipped) {
+    process.stdout.write(`left #${entry.pullRequest} alone — ${entry.reason}\n`);
+  }
+  for (const entry of result.failed) {
+    process.stderr.write(
+      `pull request ${entry.pullRequest} stopped at the ${entry.step} step: ${entry.message}\n`,
+    );
+  }
+  return result.failed.length === 0 ? EXIT_OK : 1;
 }
 
 /** Run the command, when this file is the program that was started. */

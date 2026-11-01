@@ -31,7 +31,7 @@ import {
   installGuardPolicy,
 } from "../src/guard.js";
 import { RUN_STATUS_ENTRY, statusFromEntries, statusLine } from "../src/live.js";
-import type { RunOptions, RunResult } from "../src/runner.js";
+import { unworkableReason, type RunOptions, type RunResult } from "../src/runner.js";
 import { createFixtureRepository, gitOutput } from "./git-sandbox.js";
 
 
@@ -320,6 +320,40 @@ describe("the run the front door owns", () => {
         title: "Fix the thing",
         stage: "done",
       });
+    } finally {
+      await rm(checkout, { recursive: true, force: true });
+    }
+  });
+
+  it("says why the issue could not be worked, in the words the CLI prints", async () => {
+    const checkout = await mkdtemp(join(tmpdir(), "afk-live-"));
+    try {
+      const host = fakePi();
+      const fake = fakeSession();
+      const work = async (): Promise<RunResult> => ({
+        issue: 42,
+        outcome: "unworkable",
+        steps: [],
+        record: "",
+        derivedState: "Claimed",
+      });
+
+      const door = liveFrontDoor(host.pi, { session: async () => fake.session, work });
+      const { ctx, notes } = fakeContext();
+
+      await door.start(`--repo gazon1/cardinalfish --checkout ${checkout}`, ctx);
+
+      await vi.waitFor(() => {
+        expect(
+          notes.some((note) => note.message.includes("could not be worked")),
+        ).toBe(true);
+      });
+      // The reason is the runner's mapping, not a second copy of it: the CLI
+      // prints the same words for the same derived state.
+      const said = notes.find((note) => note.message.includes("could not be worked"));
+      expect(said?.message).toBe(
+        `afk-runner: issue 42 could not be worked — ${unworkableReason("Claimed")}`,
+      );
     } finally {
       await rm(checkout, { recursive: true, force: true });
     }
@@ -774,6 +808,12 @@ describe("the guard's policy", () => {
     // Without a bash entry the guard reports a configuration issue and the shell
     // inherits the allow silently.
     expect(GUARD_POLICY.bash["*"]).toBe("allow");
+    // The leftovers go through the runner's tool, which holds the bounds on the
+    // queue. A shell command is a way around them.
+    expect(GUARD_POLICY.bash["gh issue create*"]).toEqual({
+      action: "deny",
+      reason: expect.stringContaining("agent_leftover"),
+    });
     // The guard's own wildcards: `*` crosses `/`, and the last matching entry wins.
     expect(GUARD_POLICY.path["*.env"]).toBe("deny");
     expect(GUARD_POLICY.path["*.env.*"]).toBe("deny");
