@@ -45,6 +45,7 @@ import {
 import {
   CommandFailed,
   addWorktree,
+  fetchCommit,
   fetchRef,
   headRef,
   pushWorkBranch,
@@ -74,6 +75,7 @@ import {
   type IssueSummary,
   type PullRequestSummary,
 } from "./gh.js";
+import type { Lock } from "./lock.js";
 
 /** The states that can be derived from the observables. */
 export type DerivedState =
@@ -1154,6 +1156,15 @@ export interface RunOptions {
    * issue.
    */
   readonly onIssue?: (issue: { readonly number: number; readonly title: string }) => void;
+  /**
+   * Take the issue's host lock, once the run knows which issue it works.
+   *
+   * A run that named its issue took the lock before it read anything; a run
+   * that let the queue choose did not know the issue until the choice was
+   * made, so the lock has to be taken here — before the first step that
+   * writes anything. It is given back when the run ends, however it ends.
+   */
+  readonly lockIssue?: (issue: number) => Promise<Lock>;
   readonly now?: Date;
   readonly nonce?: string;
   readonly runId?: string;
@@ -1318,7 +1329,12 @@ export async function runOnce(options: RunOptions): Promise<RunResult> {
       derivedState: planOrUnworkable.derivedState,
     };
   }
-  return await runPlan(options, planOrUnworkable, now, runId);
+  const lock = await options.lockIssue?.(planOrUnworkable.issue.number);
+  try {
+    return await runPlan(options, planOrUnworkable, now, runId);
+  } finally {
+    await lock?.release();
+  }
 }
 
 /**
@@ -1440,17 +1456,20 @@ export async function checkoutPullRequestBranch(options: {
   readonly git: GitRunner;
   readonly run: CommandRunner;
 }): Promise<string> {
-  await fetchRef(options.git, options.checkout, {
-    remote: options.remote,
-    ref: options.branch,
-  });
-  const sha = await readRemoteSha(options.git, options.checkout, {
+  // Read the branch's commit from a ref this run fetched for itself: the
+  // branch can move between a fetch and the read, and `FETCH_HEAD` is shared
+  // with every other run of the checkout.
+  const exists = await readRemoteSha(options.git, options.checkout, {
     remote: options.remote,
     ref: headRef(options.branch),
   });
-  if (sha === null) {
+  if (exists === null) {
     throw new Error(`the branch ${options.branch} is not on ${options.remote}`);
   }
+  const sha = await fetchCommit(options.git, options.checkout, {
+    remote: options.remote,
+    ref: headRef(options.branch),
+  });
   await removeWorktree(options.git, options.checkout, options.worktreePath);
   await options.git(["worktree", "add", "--detach", options.worktreePath, sha], {
     cwd: options.checkout,

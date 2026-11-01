@@ -63,8 +63,10 @@ itself back in front of the queue and no issue is worked twice. A failure does
 not stop the sweep; the status is the **first** failure's code, and `0` means
 every issue in the list was worked. An issue that cannot be worked — a fresh
 claim that belongs to a run elsewhere — is reported and counts as a failure, so
-a sweep never says "drained" while an issue was left. The lock is taken once,
-for the whole sweep, and given back at the end.
+a sweep never says "drained" while an issue was left. The sweep's lock is taken
+once, for the whole sweep, and given back at the end; each issue it works also
+takes that issue's lock while it is being worked, so a hand-started `--issue
+<N>` run and the sweep cannot work the same issue at the same time.
 
 `TimeoutStartSec` is `infinity`. A sweep has no fixed length, so any finite
 value is a kill in the middle of one. Each issue's turn is still bounded by the
@@ -74,12 +76,13 @@ a second instance while this one runs.
 
 ## Merging
 
-`pi-afk-runner-merge.timer` runs the same binary with `--merge`, and the same
-lock, so a merge leaves a running sweep alone and a sweep leaves a merge alone.
-It lands the open pull requests whose branch is `agent/issue-<N>` and whose
-**newest** review comment says `**Verdict:** pass`, that carry `agent-reviewed`,
-that are not drafts, and whose CI the repository's own `scripts/ci-verdict.py`
-calls a success. Anything else is named and left for the next tick.
+`pi-afk-runner-merge.timer` runs the same binary with `--merge`, and a lock of
+its own, so a merge and the work runs do not wait for each other and two
+merges never run at once. It lands the open pull requests whose branch is
+`agent/issue-<N>` and whose **newest** review comment says `**Verdict:** pass`,
+that carry `agent-reviewed`, that are not drafts, and whose CI the repository's
+own `scripts/ci-verdict.py` calls a success. Anything else is named and left
+for the next tick.
 
 A pull request whose branch does not move is landed as CI judged it. One whose
 branch has to move — a conflict, or the base's arrival breaking the gate — is
@@ -108,8 +111,11 @@ anyway. Do not use it to hide a gate that is red *because of* the change.
 ## Two runners, one host
 
 The unit is `Type=oneshot`, so systemd will not start a second one while the
-first is running. The lock is the backstop for a runner started by hand: it
-exits `75` immediately, having read nothing and written nothing.
+first is running. The lock is the backstop for a runner started by hand: a run
+started on an issue another run is already working exits `75` immediately,
+having read nothing and written nothing. The lock is per issue, so several
+runners may work different issues on one host at once — the timer's sweep
+holds the queue's lock, and that is the one a hand-started `--all` waits on.
 
 ## A claim left behind
 
@@ -119,8 +125,8 @@ stale claim's ref is deleted, the issue is claimed again, and the work is redone
 — the session that made it is gone with the process that died.
 
 `--stale-after-ms` is how long a claim may sit before that happens. It is two
-hours here: a run is capped at one hour, and the host lock means no second
-runner on this machine can be holding it. So a claim a killed sweep left behind
-is taken over a tick or two later, not after a week. A human who comments on the
-issue moves its last-update time, and the comment defers the take-over without
-anybody having to know there is one.
+hours here: a run is capped at one hour, and the issue's lock means no second
+runner on this machine can be working that issue. So a claim a killed sweep left
+behind is taken over a tick or two later, not after a week. A human who comments
+on the issue moves its last-update time, and the comment defers the take-over
+without anybody having to know there is one.

@@ -48,7 +48,7 @@ import { join, resolve } from "node:path";
 
 import { runGit, workBranch } from "./git.js";
 import { RUN_STATUS_ENTRY, statusFromEntries, statusLine, type RunStatus } from "./live.js";
-import { takeLock } from "./lock.js";
+import { lockNameFor, takeLock } from "./lock.js";
 import { RunFailed, newRunId, runOnce, type RunOptions, type RunResult, unworkableReason } from "./runner.js";
 import type { AgentSession, SessionFactory } from "./session.js";
 import { PINNED_PI_RANGE, assertInstalledPiVersion, installedPiVersion } from "./version.js";
@@ -396,7 +396,7 @@ export function liveFrontDoor(
 
     let lock: Awaited<ReturnType<typeof takeLock>>;
     try {
-      lock = await takeLock(options.lockDirectory);
+      lock = await takeLock(options.lockDirectory, lockNameFor(options));
     } catch (failure) {
       // A held lock and an unusable one both mean "not this runner, not now", and
       // both already say which.
