@@ -692,4 +692,48 @@ describe("the merge pipeline", () => {
       await fixture.dispose();
     }
   });
+
+  it("test_a_cut_off_review_does_not_merge_and_leaves_the_pull_request_open", async () => {
+    const fixture = await createFixtureRepository({
+      files: { "scripts/setup-worktree.sh": SETUP, "shared.txt": "the base\n" },
+    });
+    try {
+      await pushBranch(fixture, "shared.txt", "the branch\n");
+      await moveMain(fixture, "the base moved\n");
+
+      const session: SessionFactory = async ({ cwd, tools }) => {
+        if (isReviewer(tools)) {
+          return {
+            async prompt() {
+              await new Promise<void>(() => {});
+            },
+            async abort() {},
+            dispose() {},
+          };
+        }
+        return {
+          async prompt() {
+            await writeFile(join(cwd, "shared.txt"), "resolved\n", "utf8");
+          },
+          async abort() {},
+          dispose() {},
+        };
+      };
+
+      const { gh, merged, calls } = stubGh([reviewedPullRequest()]);
+      const result = await mergeReviewedPullRequests(
+        options(fixture, gh, { session, deadlineMs: 2000 }),
+      );
+
+      expect(result.merged).toEqual([]);
+      expect(merged).toEqual([]);
+      expect(result.failed[0]?.step).toBe("merge-review");
+      expect(result.failed[0]?.message).toContain("hit its");
+
+      // not merged
+      expect(calls.some((call) => call.includes("merge"))).toBe(false);
+    } finally {
+      await fixture.dispose();
+    }
+  });
 });
