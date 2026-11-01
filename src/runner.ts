@@ -2285,7 +2285,7 @@ async function runPlan(
         // started from a base older than the one this run claimed, and a diff
         // would show the base's own changes as the branch's.
         const carried = (
-          await options.git(["log", "--oneline", `${state.base}..HEAD`], {
+          await options.git(["log", "--format=%h", `${state.base}..HEAD`], {
             cwd: state.worktreePath,
           })
         )
