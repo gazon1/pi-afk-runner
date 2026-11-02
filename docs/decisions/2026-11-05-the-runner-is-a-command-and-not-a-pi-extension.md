@@ -1,6 +1,7 @@
 ---
 title: The door goes — the runner is a command, not a Pi extension
-status: accepted
+status: superseded
+superseded-by: 2026-11-05-pi-is-gone
 date: 2026-11-05
 authors: MiniMax Code
 deciders: Singularity Developer

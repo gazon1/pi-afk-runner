@@ -1,16 +1,15 @@
 /**
  * The runner's tools, as the runner knows them.
  *
- * The runner has two engines — Pi and Mastra — and the tools both of them
- * carry are the same: the decisions a turn ends on and the leftover the fourth
- * turn files. So a tool is **described here**, in the runner's own terms, and
- * each engine builds its own object from the description — Pi's `defineTool`
- * and Mastra's `createTool`.
+ * The runner's tools are the decisions a turn ends on and the leftover the
+ * fourth turn files. A tool is **described here**, in the runner's own terms,
+ * and the engine's adapter builds its own object from the description — here,
+ * Mastra's `createTool`.
  *
  * The description is what the runner means; the engine's object is what the
  * model calls. A tool written twice is a tool whose two copies drift, and the
  * drift is a decision the runner would read differently depending on which
- * engine ran it.
+ * copy ran it.
  */
 
 import type { Static, TSchema } from "typebox";

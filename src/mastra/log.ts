@@ -1,7 +1,6 @@
 /**
  * The run's journal, on Mastra.
  *
- * Pi writes its lines as the turn runs — the session's events carry them.
  * Mastra answers with the whole turn at once, so the lines are written when
  * the answer comes: the tool calls it made, and what it said.
  */

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * The unattended front door.
+ * The unattended runner.
  *
  * One invocation: take the lock, work one issue — or, with `--all`, every
  * eligible issue one after another — write the record, give the lock back.
@@ -22,24 +22,15 @@
  * mode that lands the reviewed, green pull requests the work pipeline opened.
  */
 
-import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import {
-  DefaultResourceLoader,
-  createAgentSession,
-  type ModelRuntime,
-} from "@earendil-works/pi-coding-agent";
-import chalk from "chalk";
 import { EnvHttpProxyAgent, fetch as undiciFetch, setGlobalDispatcher } from "undici";
 
 import { DEFAULT_DEADLINE_MS } from "./budget.js";
 import { readClaimed, readQueue, runGh, type GhRunner } from "./gh.js";
-import { guardExtensionPath, installGuardPolicy } from "./guard.js";
 import { runCommand, runGit, type CommandRunner, type GitRunner } from "./git.js";
 import { LockHeld, LockUnusable, lockNameFor, takeLock, workLockName } from "./lock.js";
-import { toPiTools } from "./pi-tools.js";
 import {
   mergeReviewedPullRequests,
   type MergeOptions,
@@ -54,14 +45,10 @@ import {
 } from "./runner.js";
 import {
   addUsage,
-  skillsDirectory,
-  usageFromMessage,
   type AgentSession,
   type RunUsage,
   type SessionFactory,
 } from "./session.js";
-import { assertInstalledPiVersion } from "./version.js";
-import { assistantTextLines, describeToolCall } from "./journal.js";
 
 /** The run finished, or the queue was empty. */
 export const EXIT_OK = 0;
@@ -105,15 +92,6 @@ export const DEFAULT_STALE_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
  */
 export { DEFAULT_DEADLINE_MS };
 
-/**
- * The agent engine a run works on.
- *
- * `pi` is the runner's own history — the engine the runner has always used.
- * `mastra` is the new one, beside it. The flag chooses; the run itself does
- * not know which engine it is on.
- */
-export type Engine = "pi" | "mastra";
-
 /** What the command line says. */
 export interface CliOptions {
   /**
@@ -139,12 +117,8 @@ export interface CliOptions {
   readonly lockDirectory: string;
   /** Where the worktrees are created. */
   readonly worktreeRoot: string;
-  /** Pi's agent directory — its settings, its extensions, its credentials. */
-  readonly agentDirectory: string;
   /** The model the agent runs on — `provider/id`. */
   readonly model?: string;
-  /** The agent engine the run works on. */
-  readonly engine: Engine;
   /** Whether the target repository's pre-push hook may gate the pushes. */
   readonly verifyPushes?: boolean;
   /** Whether to look for related issues and work them in one batch. */
@@ -170,9 +144,7 @@ export const USAGE = [
   "  --base <branch>         the branch the base is read from (default: main)",
   "  --lock-dir <path>       where the lock lives (default: <checkout>/build/afk-runner)",
   "  --worktree-root <path>  where the worktrees are created (default: <checkout>/../afk-worktrees)",
-  "  --agent-dir <path>      Pi's agent directory (default: ~/.pi/agent)",
   "  --model <provider/id>   the model the agent runs on (default: the provider's first)",
-  "  --engine <pi|mastra>    the agent engine the run works on (default: pi)",
   "  --no-verify             skip the target repository's pre-push hook when pushing",
   "  --batch-related         look for related ready-for-agent issues and work them in one batch",
   `  --deadline-ms <n>       the ceiling on the run (default: ${DEFAULT_DEADLINE_MS})`,
@@ -239,15 +211,7 @@ export function parseArgs(argv: readonly string[]): CliOptions {
     values.get("lock-dir") ?? join(checkout, "build", "afk-runner");
   const worktreeRoot =
     values.get("worktree-root") ?? join(dirname(checkout), "afk-worktrees");
-  // The same precedence Pi itself uses for its agent directory, so that the
-  // directory this runner names is the one the session and the guard read.
-  const agentDirectory =
-    values.get("agent-dir") ??
-    process.env.PI_CODING_AGENT_DIR ??
-    process.env.PI_AGENT_DIR ??
-    join(homedir(), ".pi", "agent");
   const model = values.get("model");
-  const engine = engineOf(values.get("engine"));
   const noVerify = values.has("no-verify");
   const batchRelated = values.has("batch-related");
   const deadlineMs = number(values.get("deadline-ms"), DEFAULT_DEADLINE_MS, "--deadline-ms");
@@ -263,30 +227,12 @@ export function parseArgs(argv: readonly string[]): CliOptions {
     baseBranch,
     lockDirectory,
     worktreeRoot,
-    agentDirectory,
     ...(model === undefined ? {} : { model }),
-    engine,
     ...(noVerify ? { verifyPushes: false } : {}),
     ...(batchRelated ? { batchRelated: true } : {}),
     deadlineMs,
     staleAfterMs,
   };
-}
-
-/**
- * The engine the command names.
- *
- * The two names are the two engines the runner carries. A third name is a
- * typo, and a typo that named an engine would quietly run the wrong one.
- */
-function engineOf(value: string | undefined): Engine {
-  if (value === undefined) {
-    return "pi";
-  }
-  if (value !== "pi" && value !== "mastra") {
-    throw new Error(`--engine must name an engine, as pi or mastra — got ${value}`);
-  }
-  return value;
 }
 
 /**
@@ -374,187 +320,6 @@ export function useProxyFromEnvironment(env: NodeJS.ProcessEnv = process.env): b
 }
 
 /**
- * The lines an assistant text block contributes to the run stream.
- *
- * A text block can hold several lines — the final summary usually does — and
- * every one of them is tagged, so no line of the stream reads as runner
- * output. A blank line carries nothing and is dropped.
- */
-export { assistantTextLines } from "./journal.js";
-
-/**
- * The loader the session's resources come from.
- *
- * It is the SDK's own loader, with two things said: the guard's extension is
- * installed into the session, and the runner's own skills are in its skill
- * paths.
- */
-export function createResourceLoader(options: {
-  readonly cwd: string;
-  readonly agentDirectory: string;
-  readonly systemPromptSections: Record<string, string>;
-  /** Told what the agent is doing, as it does it. */
-  readonly onEvent?: (line: string) => void;
-  /**
-   * Told what a turn cost, when the provider reported it.
-   *
-   * The message the `message_end` event carries is the one that holds the
-   * numbers, and the loader is the one that sees the event.
-   */
-  readonly onUsage?: (usage: RunUsage) => void;
-}): DefaultResourceLoader {
-  return new DefaultResourceLoader({
-    cwd: options.cwd,
-    agentDir: options.agentDirectory,
-    additionalExtensionPaths: [guardExtensionPath()],
-    // The runner's own skills, and nothing else: the target repository's
-    // skills and the host user's come from the loader's own discovery. The
-    // host's are not the runner's to depend on — a run has to be the same on
-    // every host — so a skill the runner depends on is a skill the runner
-    // carries.
-    additionalSkillPaths: [skillsDirectory()],
-    extensionFactories: [
-      {
-        name: "afk-runner-guardrail",
-        factory: (pi) => {
-          pi.on("before_agent_start", (event) => {
-            for (const [name, text] of Object.entries(options.systemPromptSections)) {
-              event.systemPromptOptions.sections[name] = text;
-            }
-          });
-          pi.on("tool_call", (event) => {
-            options.onEvent?.(chalk.dim(`  → ${describeToolCall(event)}`));
-          });
-          pi.on("message_end", (event: any) => {
-            const message = event?.message;
-            if (!message || message.role !== "assistant") {
-              return;
-            }
-            // What the turn cost, when the provider said what it cost. The
-            // message this event carries is the one that holds the numbers.
-            const usage = usageFromMessage(message);
-            if (usage !== undefined) {
-              options.onUsage?.(usage);
-            }
-            const content = Array.isArray(message.content)
-              ? message.content
-              : [];
-            for (const block of content) {
-              if (!block || typeof block !== "object") {
-                continue;
-              }
-              if (block.type === "thought" || block.type === "thinking") {
-                const thinking =
-                  typeof (block as any).thinking === "string"
-                    ? (block as any).thinking
-                    : typeof (block as any).text === "string"
-                      ? (block as any).text
-                      : "";
-                if (thinking === "") {
-                  continue;
-                }
-                const lines = thinking.split("\n");
-                const shown = lines.slice(0, 3);
-                for (const line of shown) {
-                  // A blank line carries nothing: the marker on it would be a
-                  // line of its own, and it would read as the agent's line.
-                  if (line.trim() === "") {
-                    continue;
-                  }
-                  // The marker is what says "the agent, not the runner": the
-                  // journal is not a TTY, so the dim is the same text as a
-                  // status line and the shape is all that is left.
-                  options.onEvent?.(chalk.dim(`· ${line}`));
-                }
-                if (lines.length > 3) {
-                  options.onEvent?.(chalk.dim(`… (+${lines.length - 3} lines)`));
-                }
-                continue;
-              }
-              if (block.type === "text") {
-                const text =
-                  typeof (block as any).text === "string"
-                    ? (block as any).text
-                    : "";
-                for (const line of assistantTextLines(text)) {
-                  options.onEvent?.(line);
-                }
-                continue;
-              }
-            }
-          });
-        },
-      },
-    ],
-  });
-}
-
-/**
- * The session the agent works in.
- *
- * Pi's own session, with two things added: the runner's guardrail reaches the
- * model through the system prompt, and a model is **chosen**. A session with
- * no model answers to nobody — the SDK's own initial resolution falls back to
- * "unknown" when the host has no default model saved — so the runner names
- * one, and says so when it cannot find any.
- *
- * The extension is installed **into the session**, not into the host's Pi — the
- * guardrail the runner needs has to be in the session, and the session the
- * runner creates must not be steered by anything the host happens to have
- * loaded.
- */
-export function piSessionFactory(options: {
-  readonly agentDirectory: string;
-  /** The model — `provider/id`. The provider's first model when it is absent. */
-  readonly model?: string;
-  /** Told what the agent is doing, as it does it. */
-  readonly onEvent?: (line: string) => void;
-}): SessionFactory {
-  // The Pi the runner drives has to be the Pi it was written for. A session
-  // that half-works against a different SDK is worse than a session that
-  // refuses to start, so the gate runs before the first one is made.
-  assertInstalledPiVersion();
-  return async ({ cwd, systemPromptSections, tools, onUsage }) => {
-    useProxyFromEnvironment();
-    await installGuardPolicy({ cwd });
-    const loader = createResourceLoader({
-      cwd,
-      agentDirectory: options.agentDirectory,
-      systemPromptSections,
-      ...(options.onEvent === undefined ? {} : { onEvent: options.onEvent }),
-      ...(onUsage === undefined ? {} : { onUsage }),
-    });
-    await loader.reload();
-
-    const created = await createAgentSession({
-      cwd,
-      // The same directory the loader was given: the flag means "this agent
-      // directory", not "the extensions of this one and the credentials of another".
-      agentDir: options.agentDirectory,
-      resourceLoader: loader,
-      ...(tools === undefined ? {} : { customTools: toPiTools(tools) }),
-    });
-
-    // `session_start` is the host's event, and this session has no host: the SDK
-    // builds the extension runner and binds the tool-call gate, but never emits it.
-    // The guard loads its policy there, so without this line it has none — and a
-    // call with no rule is an ask, which in a session with no dialog is a deny.
-    // Measured: every tool call blocked before this line, only the denied paths after.
-    await created.session.bindExtensions({});
-
-    const model = pickModel(created.session.modelRuntime, options.model);
-    if (model === undefined) {
-      throw new Error(
-        "no model to run on: name one with --model <provider/id>, or give the " +
-          "host a provider whose credential is configured",
-      );
-    }
-    await created.session.setModel(model);
-    return created.session;
-  };
-}
-
-/**
  * The run the command gives the runner.
  *
  * Everything here comes from the command line or from the injected dependencies;
@@ -588,53 +353,6 @@ export function runOptionsFrom(
       ? { lockIssue: (issue: number) => takeLock(options.lockDirectory, workLockName(issue)) }
       : {}),
   };
-}
-
-/**
- * One line about a tool call: the tool, and the command when there is one.
- *
- * It lives with the run's journal — the Mastra engine reads it too.
- */
-export { describeToolCall };
-
-/**
- * The model the session runs on.
- *
- * The named one when the command names it; otherwise the first model of the
- * first provider whose credential is configured. "First" is the provider's own
- * order — the order its catalogue lists its models in — and not a ranking:
- * choosing a model well is the host's judgement, not the runner's.
- */
-export function pickModel(
-  runtime: ModelRuntime,
-  reference: string | undefined,
-): ReturnType<ModelRuntime["getModel"]> {
-  if (reference !== undefined) {
-    // The provider and the model are separated by the **first** slash: a model
-    // id may itself contain one — `commandcode/reflection/beam:free` is a
-    // provider called `commandcode` and a model called `reflection/beam:free`.
-    const separator = reference.indexOf("/");
-    if (separator <= 0 || separator === reference.length - 1) {
-      throw new Error(`--model must name a model, as provider/id — got ${reference}`);
-    }
-    const provider = reference.slice(0, separator);
-    const id = reference.slice(separator + 1);
-    const model = runtime.getModel(provider, id);
-    if (model === undefined) {
-      throw new Error(`the provider ${provider} has no model ${id}`);
-    }
-    return model;
-  }
-  for (const provider of runtime.getRegisteredProviderIds()) {
-    if (!runtime.hasConfiguredAuth(provider)) {
-      continue;
-    }
-    const models = runtime.getModels(provider);
-    if (models.length > 0) {
-      return models[0];
-    }
-  }
-  return undefined;
 }
 
 /** What the command runs against — the parts a test replaces. */
@@ -878,28 +596,25 @@ export async function main(
     process.stdout.write(`${line}\n`);
   };
 
-  // The Pi engine is the default and the one the runner has always used; the
-  // Mastra engine sits beside it. Its module is loaded only when it is asked
-  // for, so a Pi run does not pay for it.
+  // The provider is reached through the proxy when there is one — the SDK's own
+  // dispatcher does not read the environment.
+  useProxyFromEnvironment();
+
+  // The engine is Mastra, and its module is loaded only when a session is
+  // asked for, so a run that never starts one does not pay for it.
   let mastra: SessionFactory | undefined;
   const base: SessionFactory =
     dependencies.session ??
-    (resolved.engine === "mastra"
-      ? async (options) => {
-          if (mastra === undefined) {
-            const { mastraSessionFactory } = await import("./mastra/session.js");
-            mastra = mastraSessionFactory({
-              ...(resolved.model === undefined ? {} : { model: resolved.model }),
-              onEvent: say,
-            });
-          }
-          return mastra(options);
-        }
-      : piSessionFactory({
-          agentDirectory: resolved.agentDirectory,
+    (async (options) => {
+      if (mastra === undefined) {
+        const { mastraSessionFactory } = await import("./mastra/session.js");
+        mastra = mastraSessionFactory({
           ...(resolved.model === undefined ? {} : { model: resolved.model }),
           onEvent: say,
-        }));
+        });
+      }
+      return mastra(options);
+    });
   const session: SessionFactory = async (options) => {
     const created = await base(options);
     active = created;

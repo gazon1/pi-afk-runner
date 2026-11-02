@@ -1,11 +1,10 @@
 /**
  * Mastra's tools, built from the runner's descriptions.
  *
- * Mastra's tool is a different object from Pi's: the schema is a Standard
- * Schema, the call is `(input, context)`, and a refusal is an exception the
- * model reads as a failed call. The **description** is the runner's own — the
- * same one the Pi engine builds from — so the two engines cannot drift on
- * what a tool means or on what it refuses.
+ * Mastra's tool is its own object: the schema is a Standard Schema, the call
+ * is `(input, context)`, and a refusal is an exception the model reads as a
+ * failed call. The **description** is the runner's own, so what a tool means
+ * and what it refuses are decided in one place.
  */
 
 import { createTool } from "@mastra/core/tools";
@@ -16,9 +15,8 @@ import type { AnyToolSpec } from "../tools.js";
 /**
  * The description the model is told, in Mastra's own shape.
  *
- * Pi puts a tool's guidelines in the system prompt; Mastra has no such
- * section, so the guidelines go into the tool's description — which is where
- * the model reads them anyway.
+ * Mastra has no section of its own for a tool's guidelines, so the guidelines
+ * go into the tool's description — which is where the model reads them anyway.
  */
 function describeForMastra(spec: AnyToolSpec): string {
   if (spec.promptGuidelines === undefined || spec.promptGuidelines.length === 0) {

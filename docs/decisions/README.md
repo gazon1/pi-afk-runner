@@ -15,15 +15,16 @@ for the rule that the copies follow.
 
 | Decision | What it settles |
 |---|---|
-| `2026-11-05-the-runner-is-a-command-and-not-a-pi-extension.md` | the door goes: the runner is a command, the version gate moves into the session factory, and what survives of the Pi extension record |
-| `2026-11-05-the-run-runs-on-mastra.md` | the run runs on Mastra: the agent, the graph and the memory are Mastra's, and the seams and the contract stay |
+| `2026-11-05-pi-is-gone.md` | Pi is out: the SDK, the workflow engine and the permission system go, Mastra is the only engine, and the graph is the runner's own TypeScript |
+| `2026-11-05-the-runner-is-a-command-and-not-a-pi-extension.md` | the door goes: the runner is a command, and what survives of the Pi extension record — **superseded** by `2026-11-05-pi-is-gone.md`: the command stands, the version gate goes with Pi |
+| `2026-11-05-the-run-runs-on-mastra.md` | the run runs on Mastra: the agent, the graph and the memory are Mastra's, and the seams and the contract stay — **superseded** by `2026-11-05-pi-is-gone.md`: the seams stand, the graph is the runner's own |
 | `2026-11-02-the-reviewers-tree-is-put-back.md` | the review puts the worktree back to the tree it judged, so a leftover never rides along with the fix |
 | `2026-11-01-only-a-gone-session-is-swallowed.md` | which failures the front door swallows, and which ones it lets out — **superseded** by `2026-11-05-the-runner-is-a-command-and-not-a-pi-extension.md`: there is no front door to swallow anything |
 | `2026-11-04-the-record-quotes-the-tail-and-names-the-log.md` | what the record quotes of a gate's output, and where the whole of it is |
 | `2026-11-01-the-self-review-runs-the-gates-again.md` | the self-review runs the gates again, and the agent's work is pushed only when they are green — **superseded** by the runner running the gates itself |
 | `2026-10-30-the-host-lock-is-a-real-flock.md` | the host lock, and why the runner is a Linux tool |
 | `2026-11-01-the-lock-is-per-issue.md` | the lock's unit: one per issue, one for the sweep, one for merge |
-| `2026-10-30-the-work-session-is-the-runners-minus-the-runner.md` | what a work session loads, and where the guard's policy lives — **superseded** by `2026-11-05-the-run-runs-on-mastra.md`: a run has no Pi session |
+| `2026-10-30-the-work-session-is-the-runners-minus-the-runner.md` | what a work session loads, and where the guard's policy lives — **superseded** by `2026-11-05-pi-is-gone.md`: a run has no Pi session |
 | `2026-10-31-the-auto-attached-chat-keeps-its-worktree.md` | why the worktree is put back when the chat was switched into it — **superseded** by `2026-11-05-the-runner-is-a-command-and-not-a-pi-extension.md`: the chat is gone |
 | `2026-11-02-a-restored-worktree-is-prepared.md` | why the worktree the door puts back is prepared — **superseded** by `2026-11-05-the-runner-is-a-command-and-not-a-pi-extension.md`: the door is gone; the review path's worktree is still prepared |
 | `2026-10-30-a-failed-runs-branch-is-continued.md` | what the next attempt does with the branch a failed run left |
@@ -38,11 +39,11 @@ for the rule that the copies follow.
 | `2026-10-31-an-interrupted-run-releases-its-claim.md` | what a killed run does with its claim, and why the signal releases it |
 | `2026-10-30-the-brief-is-the-body-when-no-comment-carries-the-marker.md` | where the brief is, and what happens when there is none |
 | `2026-11-02-the-fourth-turn-asks-what-follows.md` | the fourth turn, and who files the leftovers |
-| `2026-11-02-a-prompt-may-only-name-a-skill-the-runner-carries.md` | the skills a prompt may name, and who carries them — **superseded** by `2026-11-05-the-run-runs-on-mastra.md`: the rule stands, the carrier is Mastra's |
+| `2026-11-02-a-prompt-may-only-name-a-skill-the-runner-carries.md` | the skills a prompt may name, and who carries them — **superseded** by `2026-11-05-pi-is-gone.md`: the rule stands, the carrier is the runner's own |
 | `2026-11-02-the-reclaim-deletes-the-branch-the-dead-run-left.md` | what the reclaim does with the branch the dead run left on the remote |
 | `2026-11-02-the-merge-pipeline-is-separate.md` | why landing is an opt-in mode, and when a pull request is a candidate |
 | `2026-11-02-the-branch-and-its-pattern-live-in-one-place.md` | the work branch's name and the pattern that recognises it, and who asks it |
-| `2026-11-02-the-session-is-a-workflow.md` | the session's states, the workflow that runs them, and whose rules they stay — **superseded** by `2026-11-05-the-run-runs-on-mastra.md`: the shape stands, the engine is Mastra's |
+| `2026-11-02-the-session-is-a-workflow.md` | the session's states, the workflow that runs them, and whose rules they stay — **superseded** by `2026-11-05-pi-is-gone.md`: the shape stands, the graph is the runner's own |
 | `2026-11-01-the-queue-is-read-in-one-call.md` | the cost of a run: the queue and the branches are read once, and every `gh` call is bounded |
 | `2026-11-01-the-work-is-a-conditional-graph.md` | triage, scope and split as a branch; `gate` for the review loop; dependencies; the small-change skip |
 | `2026-11-01-a-fix-that-changes-nothing-stops-the-loop.md` | a fix that leaves the head where it was stops the review loop, and the run says why |

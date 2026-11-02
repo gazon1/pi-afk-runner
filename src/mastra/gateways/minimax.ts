@@ -14,16 +14,16 @@ import {
 } from "@mastra/core/llm";
 
 /** Where MiniMax's Anthropic-compatible API lives. */
-export const MINIMAX_URL = "https://api.minimax.io/anthropic/v1";
+const MINIMAX_URL = "https://api.minimax.io/anthropic/v1";
 
 /** The environment variable the key is read from. */
-export const MINIMAX_API_KEY = "MINIMAX_API_KEY";
+const MINIMAX_API_KEY = "MINIMAX_API_KEY";
 
 /** The provider the gateway's models are named under. */
 export const MINIMAX_PROVIDER = "minimax";
 
 /** The models the gateway serves. */
-export const MINIMAX_MODELS: readonly string[] = [
+const MINIMAX_MODELS: readonly string[] = [
   "MiniMax-M3",
   "MiniMax-M3.1-Flash",
   "MiniMax-M2.7",
@@ -39,7 +39,7 @@ export const MINIMAX_MODELS: readonly string[] = [
 export const MINIMAX_DEFAULT_MODEL = "MiniMax-M2.7";
 
 /**
- * The gateway the runner's Mastra engine talks to.
+ * The gateway the runner talks to.
  *
  * It is the same gateway the `mastra-app` project runs on: MiniMax's models
  * under one provider, with the key from the environment.

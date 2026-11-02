@@ -20,8 +20,8 @@ export const DEFAULT_MASTRA_MODEL = `${MINIMAX_PROVIDER}/${MINIMAX_DEFAULT_MODEL
 /**
  * The model the reference names.
  *
- * The reference is `provider/model`, the same shape the Pi engine's
- * `--model` has, and the provider is one the runner carries a gateway for.
+ * The reference is `provider/model`, and the provider is one the runner
+ * carries a gateway for.
  */
 export async function resolveMastraModel(reference: string): Promise<GatewayLanguageModel> {
   const separator = reference.indexOf("/");
@@ -32,7 +32,7 @@ export async function resolveMastraModel(reference: string): Promise<GatewayLang
   const modelId = reference.slice(separator + 1);
   if (provider !== MINIMAX_PROVIDER) {
     throw new Error(
-      `the Mastra engine carries no provider ${provider} — it carries ${MINIMAX_PROVIDER}`,
+      `the runner carries no provider ${provider} — it carries ${MINIMAX_PROVIDER}`,
     );
   }
   const gateway = new MiniMaxGateway();

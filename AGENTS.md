@@ -5,7 +5,7 @@ carry the detail.
 
 ## What this repository is
 
-A **command**: a TypeScript program, written against Pi's SDK, that takes an issue labelled
+A **command**: a TypeScript program, written against Mastra's API, that takes an issue labelled
 `ready-for-agent`, works it in an isolated worktree, opens a pull request and has a second agent
 review it. **The work pipeline never merges**; landing is the separate, opt-in `--merge` mode, and
 it only lands what the work pipeline opened and reviewed.
@@ -30,24 +30,29 @@ npm run check   # typecheck, lint, test, build
 ```
 
 One command, four checks. `npx vitest run` alone is not enough — the build copies the prompt
-files next to the module, and a package Pi loads that does not build is a package Pi cannot load.
+files next to the module, and a command that does not build is a command that cannot run.
 
 **Do not run the target repository's gates here.** `./check.sh`, `just gate` and the Gradle build
 belong to the repository the runner operates on; there is no Gradle in this repository.
 
-## The engines
+## The engine
 
-A run works on one of **two engines**: Pi (`--engine pi`, the default) or Mastra
-(`--engine mastra`). They are the same session with two implementations, so the run,
-the gates, the record and the contract do not know which engine is underneath.
+A run works on **Mastra**, and Mastra is the only engine. The run, the gates, the record
+and the contract do not know what the engine is underneath — the seam is the session
+(`AgentSession`, `SessionFactory` in `src/session.ts`).
 
-The runner's own description of a tool is in `src/tools.ts` — one description, two
-adapters (`src/pi-tools.ts`, `src/mastra/tools.ts`). A tool written twice is a tool
-whose two copies drift. The same holds for the guard's rules (`src/guard.ts` holds the
-list; both engines apply it) and for the journal (`src/journal.ts` writes it).
+The runner's own description of a tool is in `src/tools.ts`, and the engine's object
+over it is in `src/mastra/tools.ts`. The guard's rules are in `src/guard.ts` and the
+engine applies them (`src/mastra/guard.ts`); the journal is in `src/journal.ts`. One
+description, one carrier, one spelling: a rule written twice is a rule whose two copies
+drift.
+
+The **graph** — the states a session moves through — is the runner's own TypeScript
+(`src/workflow.ts`). It is not an engine's: the rules of the run (the deadline, the
+stop, the cut-off, the review loop) are the runner's own.
 
 The decision is in
-[docs/decisions/2026-11-05-the-run-runs-on-mastra.md](docs/decisions/2026-11-05-the-run-runs-on-mastra.md).
+[docs/decisions/2026-11-05-pi-is-gone.md](docs/decisions/2026-11-05-pi-is-gone.md).
 
 ## The contract comes first
 
@@ -88,10 +93,10 @@ workflow, the decision log, the issue triage — and
 documents are written.
 
 A prompt in `src/prompts/` may name a skill, and then the skill has to be one **the work session
-has**: a skill of the target repository's `.agents/skills`, or one of these. The runner ships
-these and puts them in the session's skill paths, so a skill the runner depends on is a skill the
-runner carries. A skill that exists only on the host that happens to run the runner is not one a
-prompt may name — the run has to be the same on every host.
+has**: a skill of the target repository's `.agents/skills`, or one of these. The runner reads the
+directories itself (`src/mastra/skills.ts`) and hands them to the agent, so a skill the runner
+depends on is a skill the runner carries. A skill that exists only on the host that happens to run
+the runner is not one a prompt may name — the run has to be the same on every host.
 
 A prompt names a skill as `$<name>`, and the suite reads that shape: every `$name` in a prompt is
 a skill the runner carries, and a session on a host with no skills of its own has it anyway.

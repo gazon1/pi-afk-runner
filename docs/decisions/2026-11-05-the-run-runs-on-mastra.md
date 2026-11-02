@@ -1,6 +1,7 @@
 ---
 title: The run runs on Mastra — the agent, the graph and the memory are Mastra's
-status: accepted
+status: superseded
+superseded-by: 2026-11-05-pi-is-gone
 date: 2026-11-05
 authors: MiniMax Code
 deciders: Singularity Developer

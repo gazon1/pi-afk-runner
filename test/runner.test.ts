@@ -21,12 +21,11 @@ import {
   runPromptArray,
   splitIssue,
   startAgent,
-  usageFromMessage,
   type AgentSession,
   type SessionFactory,
 } from "../src/session.js";
+import { assistantTextLines } from "../src/journal.js";
 import {
-  assistantTextLines,
   DEFAULT_DEADLINE_MS,
   formatCost,
   formatDuration,
@@ -139,17 +138,6 @@ import {
   main,
   type CliDependencies,
 } from "../src/cli.js";
-import {
-  PINNED_PI_RANGE,
-  PiVersionMismatch,
-  assertPiVersion,
-  checkPiVersion,
-  comparePiVersions,
-  installedPiVersion,
-  parsePiVersion,
-  satisfiesRange,
-} from "../src/version.js";
-
 /**
  * The states for a run of `count` prompts.
  *
@@ -193,122 +181,6 @@ function testWorktree(issueNumber: number) {
 const GATE_VERDICT_LINE =
   /^\s*\**\s*verdict\s*\**\s*:\s*\**\s*(pass|fail)\s*\**\s*\.?\s*$/i;
 
-/**
- * The version gate is the one thing the extension must never get wrong in the wrong
- * direction: it has to let a supported Pi through and stop an unsupported one. Everything
- * here is about the boundary — the version that is exactly the lower bound, the one that is
- * exactly the upper bound, and the one just outside each.
- */
-describe("the pinned Pi version range", () => {
-  it("test_the_extension_refuses_to_run_outside_its_pi_version_range", async () => {
-    // The version this extension is written against passes.
-    const inside = checkPiVersion("1.4.0");
-    expect(inside.ok).toBe(true);
-    expect(inside.reason).toBeNull();
-
-    // Outside the range, in either direction, the check refuses.
-    const below = checkPiVersion("1.3.9");
-    expect(below.ok).toBe(false);
-    expect(below.reason).toContain("1.3.9");
-    expect(below.reason).toContain(PINNED_PI_RANGE);
-
-    const above = checkPiVersion("1.5.0");
-    expect(above.ok).toBe(false);
-    expect(above.reason).toContain("1.5.0");
-
-    // A far-away version is refused for the same reason, not by accident of parsing.
-    expect(checkPiVersion("0.9.1").ok).toBe(false);
-    expect(checkPiVersion("2.0.0").ok).toBe(false);
-
-    // And the refusal is a refusal, not a warning: the caller throws.
-    expect(() => assertPiVersion("1.5.0")).toThrow(PiVersionMismatch);
-    expect(() => assertPiVersion("1.4.0")).not.toThrow();
-
-    // The range the check actually uses is the pinned one.
-    expect(PINNED_PI_RANGE).toBe(">=1.4.0 <1.5.0");
-  });
-
-  it("accepts every version inside the range, including its bounds", () => {
-    for (const version of ["1.4.0", "1.4.1", "1.4.17", "1.4.99"]) {
-      expect(checkPiVersion(version).ok).toBe(true);
-    }
-  });
-
-  it("refuses a prerelease of the range's lower bound", () => {
-    // `1.4.0-rc.1` is older than `1.4.0`, so it is not inside `>=1.4.0`.
-    expect(checkPiVersion("1.4.0-rc.1").ok).toBe(false);
-    // And it is not inside the range either.
-    const version = parsePiVersion("1.4.0-rc.1");
-    expect(version).not.toBeNull();
-    expect(satisfiesRange(version!, PINNED_PI_RANGE)).toBe(false);
-  });
-
-  it("refuses a version it cannot parse, rather than passing it", () => {
-    for (const raw of ["", "1.4", "1.4.0.0", "not-a-version", "v1.4.0"]) {
-      expect(checkPiVersion(raw).ok).toBe(false);
-    }
-    expect(parsePiVersion("not-a-version")).toBeNull();
-    expect(parsePiVersion("v1.4.0")).toBeNull();
-  });
-
-  it("reads the version of the Pi it is running inside", () => {
-    const installed = installedPiVersion();
-    expect(installed).toMatch(/^\d+\.\d+\.\d+/);
-    // The SDK this extension is developed against is the one it is running inside.
-    expect(checkPiVersion(installed).ok).toBe(true);
-  });
-});
-
-describe("the version comparison", () => {
-  it("orders versions by major, then minor, then patch", () => {
-    const at = (raw: string) => parsePiVersion(raw)!;
-    expect(comparePiVersions(at("1.4.0"), at("1.5.0"))).toBeLessThan(0);
-    expect(comparePiVersions(at("1.5.0"), at("1.4.0"))).toBeGreaterThan(0);
-    expect(comparePiVersions(at("1.4.0"), at("1.4.0"))).toBe(0);
-    expect(comparePiVersions(at("2.0.0"), at("1.99.99"))).toBeGreaterThan(0);
-  });
-
-  it("orders a prerelease before its release", () => {
-    const at = (raw: string) => parsePiVersion(raw)!;
-    expect(comparePiVersions(at("1.4.0-rc.1"), at("1.4.0"))).toBeLessThan(0);
-    expect(comparePiVersions(at("1.4.0-rc.1"), at("1.4.0-rc.2"))).toBeLessThan(0);
-  });
-
-  it("ignores build metadata", () => {
-    const at = (raw: string) => parsePiVersion(raw)!;
-    expect(comparePiVersions(at("1.4.0+build.1"), at("1.4.0"))).toBe(0);
-    expect(checkPiVersion("1.4.0+build.1").ok).toBe(true);
-  });
-});
-
-describe("the range grammar", () => {
-  const at = (raw: string) => parsePiVersion(raw)!;
-
-  it("reads a conjunction of comparators", () => {
-    expect(satisfiesRange(at("1.4.0"), ">=1.4.0 <1.5.0")).toBe(true);
-    expect(satisfiesRange(at("1.4.9"), ">=1.4.0 <1.5.0")).toBe(true);
-    expect(satisfiesRange(at("1.5.0"), ">=1.4.0 <1.5.0")).toBe(false);
-    expect(satisfiesRange(at("1.3.9"), ">=1.4.0 <1.5.0")).toBe(false);
-  });
-
-  it("reads each comparator", () => {
-    expect(satisfiesRange(at("1.4.0"), ">=1.4.0")).toBe(true);
-    expect(satisfiesRange(at("1.3.9"), ">=1.4.0")).toBe(false);
-    expect(satisfiesRange(at("1.4.0"), ">1.4.0")).toBe(false);
-    expect(satisfiesRange(at("1.5.0"), "<=1.5.0")).toBe(true);
-    expect(satisfiesRange(at("1.5.1"), "<=1.5.0")).toBe(false);
-    expect(satisfiesRange(at("1.4.0"), "<1.5.0")).toBe(true);
-    expect(satisfiesRange(at("1.4.0"), "=1.4.0")).toBe(true);
-    expect(satisfiesRange(at("1.4.1"), "=1.4.0")).toBe(false);
-  });
-
-  it("satisfies nothing when the range itself cannot be read", () => {
-    expect(satisfiesRange(at("1.4.0"), "")).toBe(false);
-    expect(satisfiesRange(at("1.4.0"), "not-a-range")).toBe(false);
-    expect(satisfiesRange(at("1.4.0"), ">=1.4.0 <<broken")).toBe(false);
-  });
-});
-
 describe("the repository the run works", () => {
   it("comes from the checkout's origin when the command does not name one", async () => {
     const asked: string[][] = [];
@@ -318,7 +190,7 @@ describe("the repository the run works", () => {
     };
 
     const options = await resolveRepo(
-      { checkout: "/checkout", remote: "origin", baseBranch: "main", lockDirectory: "/lock", worktreeRoot: "/wt", agentDirectory: "/agent", engine: "pi", deadlineMs: 1, staleAfterMs: 1 },
+      { checkout: "/checkout", remote: "origin", baseBranch: "main", lockDirectory: "/lock", worktreeRoot: "/wt", deadlineMs: 1, staleAfterMs: 1 },
       git,
     );
 
@@ -341,14 +213,14 @@ describe("the repository the run works", () => {
   it("keeps --repo when the command names one, and refuses a nameless origin", async () => {
     const git = async (): Promise<string> => "";
     const named = await resolveRepo(
-      { repo: "owner/name", checkout: "/c", remote: "origin", baseBranch: "main", lockDirectory: "/l", worktreeRoot: "/w", agentDirectory: "/a", engine: "pi", deadlineMs: 1, staleAfterMs: 1 },
+      { repo: "owner/name", checkout: "/c", remote: "origin", baseBranch: "main", lockDirectory: "/l", worktreeRoot: "/w", deadlineMs: 1, staleAfterMs: 1 },
       git,
     );
     expect(named.repo).toBe("owner/name");
 
     await expect(
       resolveRepo(
-        { checkout: "/c", remote: "origin", baseBranch: "main", lockDirectory: "/l", worktreeRoot: "/w", agentDirectory: "/a", engine: "pi", deadlineMs: 1, staleAfterMs: 1 },
+        { checkout: "/c", remote: "origin", baseBranch: "main", lockDirectory: "/l", worktreeRoot: "/w", deadlineMs: 1, staleAfterMs: 1 },
         git,
       ),
     ).rejects.toThrow("does not name a repository");
@@ -1468,31 +1340,6 @@ describe("the agent's session", () => {
     expect(prompts[0]).toContain("not the base");
     expect(prompts[1]).toContain("agent_scope_decision");
     expect(promptsDirectory()).toContain("prompts");
-  });
-
-  it("reads the tokens and the cost off a message", () => {
-    // The provider's numbers ride on the assistant message that the session's
-    // events carry — the same `message_end` event the CLI already handles.
-    expect(
-      usageFromMessage({
-        role: "assistant",
-        usage: { totalTokens: 100, cost: { total: 0.1 } },
-      }),
-    ).toEqual({ totalTokens: 100, cost: 0.1 });
-    // A provider that says nothing about its tokens has nothing to report:
-    // a zero is a number, and a number a reader would trust.
-    expect(
-      usageFromMessage({
-        role: "assistant",
-        usage: { totalTokens: 0, cost: { total: 0 } },
-      }),
-    ).toBeUndefined();
-    expect(usageFromMessage({ role: "assistant" })).toBeUndefined();
-    expect(usageFromMessage(undefined)).toBeUndefined();
-    // And a cost is reported only when a provider reported one.
-    expect(
-      usageFromMessage({ role: "assistant", usage: { totalTokens: 10 } }),
-    ).toEqual({ totalTokens: 10 });
   });
 
   it("adds two runs' usage", () => {

@@ -1,14 +1,12 @@
 /**
  * The guard, on Mastra.
  *
- * Pi's guard is an extension that gates every tool call and reads its policy
- * from a file. Mastra has no such extension — but it has the hook the policy
- * needs: the workspace's own `beforeToolCall`, which sees the tool and what it
- * was called with before the call runs.
+ * The guard is a hook on the workspace: `beforeToolCall` sees the tool and
+ * what it was called with before the call runs.
  *
  * The **policy** is not written here. It is `GUARD_POLICY` from `src/guard.ts`
- * — the same one the Pi guard reads — so the two engines refuse the same
- * paths and the same commands, and the rules live in one place.
+ * — the one place the rules live, so the refused paths and the refused
+ * commands are decided once.
  *
  * The rules are wildcards: `*` matches anything including `/`, the match is
  * anchored, and the **last** matching rule wins. So `*.env` covers a `.env` at

@@ -1,9 +1,8 @@
 /**
  * The run's journal: the lines a reader sees while the agent works.
  *
- * They live here because both engines write them — Pi reads them off the
- * session's events, Mastra off the agent's answer — and a line that is
- * written twice is a line the two engines spell differently.
+ * The session writes them: the adapter reads them off the engine's answer and
+ * hands them here, so a line is spelled the same way whoever reads it.
  */
 
 /**

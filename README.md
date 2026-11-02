@@ -1,8 +1,8 @@
 # pi-afk-runner
 
-An AFK queue runner for [Pi](https://github.com/earendil-works/pi-coding-agent): it takes an
-issue labelled `ready-for-agent`, gives it an isolated git worktree, runs an agent on it, opens a
-pull request, and has a second agent review that pull request.
+An AFK queue runner: it takes an issue labelled `ready-for-agent`, gives it an isolated git
+worktree, runs an agent on it, opens a pull request, and has a second agent review that pull
+request. The agent runs on [Mastra](https://mastra.ai) — the runner's only engine.
 
 **The work pipeline never merges.** A human merges — or the separate, opt-in merge pipeline does,
 when it is asked to: `--merge` lands reviewed pull requests, and nothing lands before its review
@@ -30,32 +30,28 @@ this repository's own: [contract/merge.md](contract/merge.md).
 
 ## The components
 
-This is an **assembly**. The mechanics come from ready-made Pi packages, pinned to exact versions
-in `package.json` and in `.pi/settings.json`:
+This is an **assembly**. The mechanics come from ready-made packages, pinned to exact versions in
+`package.json`:
 
 | Component | Version | What it does |
 |---|---|---|
-| `@gotgenes/pi-permission-system` | 42.0.0 | the guard: what must never be touched |
-| `@mastra/core` | 1.81.0 | the Mastra engine: the agent, the workspace, the model gateway |
+| `@mastra/core` | 1.81.0 | the engine: the agent, the workspace, the model gateway |
+| `@mastra/memory` | 1.40.0 | the memory a run's turns live in |
+| `@mastra/schema-compat` | 1.3.17 | the tool schemas, from typebox to Standard Schema |
 
 Three things are irreducibly ours: the **exclusive claim** (a remote ref carrying a nonce — a
 label cannot be a lock, because adding one is idempotent), the **binding to the contract above**,
 and the **record** of a run.
 
-## The version gate
+## The version pin
 
-The runner drives Pi's SDK, against Pi's own API. When Pi changes that interface, a runner written
-against the old one does not fail loudly — it fails by doing the wrong thing.
+The runner drives Mastra's API, against Mastra's own types. When Mastra changes that interface, a
+runner written against the old one does not fail loudly — it fails by doing the wrong thing.
 
-So the runner declares the range of Pi it was written for and **refuses to run outside it**. A
-runner that stops is recoverable; a runner that half-works is not. The gate runs before the first
-session is made, so a mismatched Pi is refused at the start of the run.
-
-```ts
-import { assertInstalledPiVersion } from "pi-afk-runner";
-
-assertInstalledPiVersion(); // throws PiVersionMismatch outside the pinned range
-```
+So the runner pins the version it was written for **exactly**, in `package.json`. The pin is the
+gate: `npm ci` installs that version and nothing else, so a runner that stops is recoverable and a
+runner that half-works is not. The package exports nothing — it is a **command**, not a library —
+so there is no public API to keep compatible.
 
 ## Install
 
@@ -72,31 +68,28 @@ npm run build          # compile, and copy the prompt files next to the module
 node dist/cli.js --checkout ~/work/singularity
 ```
 
-`npm link` puts the same command on the `PATH` as `pi-afk-runner`. The peer dependency
-`@earendil-works/pi-coding-agent` has to be installed next to it, because the runner drives Pi's
-SDK.
+`npm link` puts the same command on the `PATH` as `pi-afk-runner`.
 
 ### What the install brings
 
-The work session runs in a **Pi session**, and the session discovers the packages the target
-repository declares in its own `.pi/settings.json`:
+The work session runs in a **Mastra agent**, and it carries:
 
-| Package | What it does |
-|---|---|
-| `pi-subagents` | the reviewer: delegation in an isolated context, in its own process |
-| `pi-advisor-flow` | the executor/advisor flow |
-| `@quintinshaw/pi-dynamic-workflows` | the multi-step workflow |
-| `pi-lens` | live lint and format feedback inside the turn |
-| `@gotgenes/pi-permission-system` | the guard: what must never be touched |
-| `agents-cron` | cron, isolated runs, the run store |
-| `@signalridge/pi-worktree` | the worktree |
-| `@narumitw/pi-github-pr` | the pull request and its checks |
-| `@drix10/agent-flow` | the builder / reviewer / QA roles, as skills |
+- the runner's own **skills** — the review, the gates, the change workflow, the decision log, the
+  issue triage, and how to write for agents. The package ships them, and the run hands them to the
+  agent, so a prompt may name one of them;
+- the target repository's own **skills**, under `.agents/skills`. A skill the target declares wins
+  over the runner's copy, so a skill is carried once;
+- the **guard**: the rules that say what must never be touched — `*.env`, `*.pem`, and the command
+  that would file a leftover behind the runner's bounds. The rules are the runner's own
+  (`src/guard.ts`) and they are applied over the agent's tools;
+- the runner's own **decision tools**: `agent_issue_decision`, `agent_scope_decision`,
+  `agent_review_verdict`, `agent_leftover`, and the one that records the run's outcome.
 
 Two things are **not** packages, on purpose. The **guardrail** — the rule that an issue body is
-data — is a string in the code, because the CLI's `--append-system-prompt` silently ignores a
-missing file and a rule read from disk can vanish without a word. And the **version gate** — the
-refusal to run against a Pi this package was not written for — is the same kind of thing.
+data — is a string in the code, because a rule read from disk can vanish without a word. And the
+**graph** — the states a session moves through — is the runner's own TypeScript
+(`src/workflow.ts`), because the rules of the run (the deadline, the stop, the cut-off, the review
+loop) are the runner's own and do not belong to an engine.
 
 ## Run
 
@@ -113,8 +106,9 @@ repository without them fails at the worktree step, and nothing after it runs:
 - an issue whose brief is a comment opening with `## Agent Brief`, or — when there is no such
   comment — the issue's body. An issue with neither is refused rather than worked.
 
-A model has to resolve, too: `--model <provider/id>` names one; without it the CLI uses the first
-model of the first provider with a credential.
+A model has to resolve, too: `--model <provider/id>` names one; without it the runner uses
+MiniMax's own default. The key comes from the environment — `MINIMAX_API_KEY` — and the runner
+holds no credential of its own.
 
 ### The gates the runner runs
 
@@ -202,13 +196,11 @@ The work session is a graph, and two of its nodes decide whether the rest runs:
 
 A `skip` or a `split` is a finished run: no branch is pushed and no pull request
 is opened. The decisions are tools, `agent_issue_decision` and
-`agent_scope_decision`; the graph is the workflow engine's, with `phase`,
-`agent` and plain `if`.
+`agent_scope_decision`; the graph is the runner's own.
 
 The review is a loop, not a single pass. A `fail` verdict buys a fix turn (a
 fresh session) and a push, and the fixed diff is reviewed again, up to three
-times or until the run's deadline leaves no budget — the engine's own `gate`
-block. A fix that changes nothing — the branch's head did not move — stops the
+times or until the run's deadline leaves no budget. A fix that changes nothing — the branch's head did not move — stops the
 loop: there is nothing to push and nothing to review again. A review that was
 cut off — by the deadline or by a human's stop — stops it too: it stated no
 verdict, so there is nothing to fix and nothing to review again, and the run's
@@ -222,24 +214,14 @@ runner's own gates are not part of that rule: they run the whole list on every
 worked issue, because they are the run's own verdict and not the repository's
 hook. CI still gates landing in the merge mode.
 
-### The engines
+### The engine
 
-A run works on one of **two engines**, and the flag chooses:
+A run works on **Mastra**: a Mastra agent with Mastra's tools, its own memory and a Mastra model
+gateway (`--model provider/model`, the key from the environment). The run, the gates, the record
+and the contract do not know what the engine is — the seam is the session.
 
-```bash
-pi-afk-runner --checkout ~/work/singularity                  # --engine pi, the default
-pi-afk-runner --checkout ~/work/singularity --engine mastra
-```
-
-**Pi** is the engine the runner has always used: Pi's own session, its own tools, its own
-model discovery. **Mastra** is the new one — a Mastra agent with Mastra's tools, its own
-memory and a Mastra model gateway (`--model provider/model`, the key from the
-environment). The two are the **same session** with two implementations: the run, the
-gates, the record and the contract do not know which engine is underneath.
-
-The Mastra engine's memory lives in the process for now, so a run that restarts loses
-its context. The Mastra module is loaded only when it is asked for, so a Pi run does not
-pay for it.
+The engine's module is loaded only when a session is asked for, so a run that never starts one does
+not pay for it. Its memory lives in the process for now, so a run that restarts loses its context.
 
 ### What a run leaves behind
 

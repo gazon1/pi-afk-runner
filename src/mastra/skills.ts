@@ -11,8 +11,8 @@
  */
 
 import { existsSync } from "node:fs";
-import { readdir } from "node:fs/promises";
-import { join } from "node:path";
+import { readdir, readFile } from "node:fs/promises";
+import { basename, join } from "node:path";
 
 import { skillsDirectory } from "../session.js";
 
@@ -41,19 +41,57 @@ async function skillDirectoriesIn(root: string): Promise<string[]> {
 }
 
 /**
+ * The names a skill directory answers to.
+ *
+ * The name is the one the skill declares in its frontmatter, and the
+ * directory's own name as well — Mastra reads one of them, and a skill that
+ * shadows another must be found by either.
+ */
+async function namesOf(directory: string): Promise<Set<string>> {
+  const names = new Set<string>([basename(directory)]);
+  const text = await readFile(join(directory, SKILL_FILE), "utf8").catch(() => "");
+  const frontmatter = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text)?.[1] ?? "";
+  const declared = /^name:\s*(.+)$/m.exec(frontmatter)?.[1]?.trim();
+  if (declared !== undefined && declared !== "") {
+    names.add(declared);
+  }
+  return names;
+}
+
+/**
  * Every skill the run carries.
  *
  * The runner's own skills come first — they are the ones the runner depends
- * on — and the target repository's own come after. The host user's skills are
- * not the runner's to depend on: a run has to be the same on every host.
+ * on — and the target repository's own come after, under `.agents/skills`. The
+ * host user's skills are not the runner's to depend on: a run has to be the
+ * same on every host.
+ *
+ * **The target's own copy of a skill wins.** A repository that carries its own
+ * `code-review-pr-workflow` has said what its skill is, and the runner's copy
+ * is only a fallback for the repositories that carry none. So a skill the
+ * target declares is carried once — the target's.
  */
 export async function skillDirectories(options: {
   /** The worktree the run works in — the target repository's own root. */
   readonly cwd: string;
 }): Promise<string[]> {
-  return [
-    ...(await skillDirectoriesIn(skillsDirectory())),
-    ...(await skillDirectoriesIn(join(options.cwd, ".agents", "skills"))),
-    ...(await skillDirectoriesIn(join(options.cwd, ".pi", "skills"))),
-  ];
+  const runner = await skillDirectoriesIn(skillsDirectory());
+  const target = await skillDirectoriesIn(join(options.cwd, ".agents", "skills"));
+
+  const taken = new Set<string>();
+  for (const directory of target) {
+    for (const name of await namesOf(directory)) {
+      taken.add(name);
+    }
+  }
+
+  const carried: string[] = [];
+  for (const directory of runner) {
+    const names = await namesOf(directory);
+    if ([...names].some((name) => taken.has(name))) {
+      continue;
+    }
+    carried.push(directory);
+  }
+  return [...carried, ...target];
 }

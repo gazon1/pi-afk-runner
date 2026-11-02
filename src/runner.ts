@@ -820,10 +820,10 @@ export async function reviewPullRequest(options: {
     // The same cut the work session reports; a review that did not finish is
     // not a review that stated no verdict.
     //
-    // The cut is the engine's own abort error, not a plain failure: the
-    // engine treats an unknown failure as recoverable and carries on to the
-    // next state, and a review that was cut off would then be reviewed again
-    // — the same diff, a second verdict, for a review that never happened.
+    // The cut is the graph's own abort error, not a plain failure: an
+    // unknown failure is treated as recoverable and carries on to the next
+    // state, and a review that was cut off would then be reviewed again —
+    // the same diff, a second verdict, for a review that never happened.
     throw cutOffError(
       cutOffMessage({
         what: "the review's session",
@@ -1712,10 +1712,10 @@ export type RunResult =
     });
 
 /**
- * Why an issue could not be worked, in the words the front doors say.
+ * Why an issue could not be worked, in the words the runner says.
  *
- * One mapping, so the CLI and the live door say the same thing about the
- * same derived state.
+ * One mapping, so the CLI and the run say the same thing about the same
+ * derived state.
  */
 export function unworkableReason(derivedState: DerivedState): string {
   switch (derivedState) {
@@ -1738,7 +1738,7 @@ export function unworkableReason(derivedState: DerivedState): string {
 }
 
 /**
- * Why an issue is waiting for its parent, in the words the front doors say.
+ * Why an issue is waiting for its parent, in the words the runner says.
  *
  * A dependency is the issue's own text — `**Depends on:** #N` — and it is
  * satisfied by the parent's work landing: its pull request is merged. A parent
@@ -1755,21 +1755,21 @@ export function blockedReason(
 
 
 /**
- * The sentence for an empty queue, in the words the front doors say.
+ * The sentence for an empty queue, in the words the runner says.
  */
 export function emptyQueueSentence(): string {
   return "the queue is empty — there was nothing to work";
 }
 
 /**
- * The sentence for a worked issue, in the words the front doors say.
+ * The sentence for a worked issue, in the words the runner says.
  */
 export function workedIssueSentence(result: RunResult): string {
   return `worked issue ${result.issue} — the record is at ${result.record}`;
 }
 
 /**
- * The sentence a front door says for a run result, where one exists.
+ * The sentence the runner says for a run result, where one exists.
  */
 export function runResultSentence(result: RunResult): string | null {
   if (result.outcome === "empty") return emptyQueueSentence();
@@ -2203,7 +2203,7 @@ async function chooseIssue(
     }
   | null
 > {
-  /** The failure of the selection, in the words the front doors show. */
+  /** The failure of the selection, in the words the runner shows. */
   const selectFailed = (failure: unknown): RunFailed => {
     const reason = failure instanceof Error ? failure.message : String(failure);
     return new RunFailed({
@@ -2750,8 +2750,9 @@ async function runPlan(
         state.issue = detail;
         let exhausted = false;
 
-        // `gate` is the engine's retry-until-pass block: review, and when the
-        // verdict failed, fix what it found and review the fixed diff again.
+        // The review loop is the runner's own retry-until-pass block: review,
+        // and when the verdict failed, fix what it found and review the fixed
+        // diff again.
         //
         // The review keeps its own share of the budget: the gates have theirs,
         // and a review that is given what the gates left is a review that
@@ -2841,9 +2842,9 @@ async function runPlan(
             });
           },
         }).catch((error: unknown) => {
-          // A gate that refused the fix is under the workflow's error: the
-          // engine stops on it, and the failure itself is what the record
-          // and the exit code must name.
+          // A gate that refused the fix is under the graph's error: the graph
+          // stops on it, and the failure itself is what the record and the
+          // exit code must name.
           const cause = (error as { readonly details?: unknown }).details;
           throw cause instanceof Error ? cause : error;
         });

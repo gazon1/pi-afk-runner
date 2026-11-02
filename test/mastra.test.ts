@@ -1,14 +1,11 @@
 /**
- * The Mastra engine, beside the Pi one.
+ * The engine the runner runs on.
  *
- * The runner has two engines now: Pi is the one it has always used, and Mastra
- * is the one it may use instead, chosen with `--engine mastra`. The run itself
- * does not know which engine it is on — the seam is the session, and every
- * engine has to look the same there.
- *
- * These tests are the guard on that: the same tool means the same thing on
- * both engines, the guard refuses the same paths, the skills are the same
- * ones, and a turn that failed says so the way Pi says it.
+ * The run does not know which engine it is on — the seam is the session, and
+ * every engine has to look the same there. These tests are the guard on that:
+ * a tool means what it says, the guard refuses what it must, the skills are
+ * the ones the prompts name, and a turn that failed says so on the last
+ * assistant message, which is where the runner reads it.
  */
 
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
@@ -17,9 +14,7 @@ import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { parseArgs } from "../src/cli.js";
 import { GUARD_POLICY } from "../src/guard.js";
-import { toPiTool } from "../src/pi-tools.js";
 import { defineTool, type AnyToolSpec } from "../src/tools.js";
 import { denyReason, matchesPattern } from "../src/mastra/guard.js";
 import { skillDirectories } from "../src/mastra/skills.js";
@@ -94,31 +89,6 @@ async function callMastra(
   return await execute(params, {});
 }
 
-/**
- * The Pi tool's own call.
- *
- * Pi's `execute` takes the SDK's arguments around the call, and the runner's
- * own tools do not need them: the id, the parameters, and nothing else.
- */
-async function callPi(
-  tool: { readonly execute?: (...args: never[]) => Promise<{ readonly isError?: boolean }> },
-  params: unknown,
-): Promise<{ readonly isError?: boolean }> {
-  const execute = tool.execute as
-    | ((
-        id: string,
-        params: unknown,
-        signal: undefined,
-        onUpdate: undefined,
-        context: never,
-      ) => Promise<{ readonly isError?: boolean }>)
-    | undefined;
-  if (execute === undefined) {
-    throw new Error("the tool has no execute");
-  }
-  return await execute("call-1", params, undefined, undefined, {} as never);
-}
-
 /** A tool of the runner's own shape: a description and what it does. */
 function specOf(
   overrides: Partial<{
@@ -154,10 +124,10 @@ describe("the tools of the Mastra engine", () => {
     expect(tool.description).toContain("End the review with a verdict.");
   });
 
-  it("tells the model the rules the Pi engine puts in the system prompt", () => {
-    // Pi has a section of its own for the rules; Mastra has no such section,
-    // so the rules have to reach the model some other way — the description is
-    // where the model reads them.
+  it("tells the model the rules the prompt carries", () => {
+    // Mastra has no section of its own for a tool's rules, so they have to
+    // reach the model some other way — the description is where the model
+    // reads them.
     const tool = toMastraTool(specOf({ promptGuidelines: ["One leftover a run.", "Two a day."] }));
     expect(tool.description).toContain("One leftover a run.");
     expect(tool.description).toContain("Two a day.");
@@ -190,27 +160,11 @@ describe("the tools of the Mastra engine", () => {
     await expect(callMastra(tool, { value: "x" })).rejects.toThrow("the queue is full");
   });
 
-  it("means the same thing as the Pi tool of the same description", async () => {
-    // One description, two engines. The refusal is the one thing that has to
-    // look the same on both: Pi says it with a flag, Mastra with an
-    // exception — but the model reads the same refusal.
-    const spec = specOf({
-      execute: async () => ({
-        content: [{ type: "text" as const, text: "refused" }],
-        details: {},
-        isError: true,
-      }),
-    });
-    const pi = await callPi(toPiTool(spec), { value: "x" });
-    expect(pi.isError).toBe(true);
-    await expect(callMastra(toMastraTool(spec), { value: "x" })).rejects.toThrow("refused");
-  });
 });
 
 describe("the guard on the Mastra engine", () => {
-  it("reads the policy the Pi guard reads", () => {
-    // One policy, two mechanisms: the rules live in one place, so the two
-    // engines cannot refuse different things.
+  it("reads the policy the runner holds", () => {
+    // The rules live in one place, so nothing can refuse something else.
     expect(GUARD_POLICY.path["*.env"]).toBe("deny");
     expect(GUARD_POLICY.bash["gh issue create*"]).toBeDefined();
   });
@@ -322,10 +276,9 @@ describe("the session of the Mastra engine", () => {
     }
   });
 
-  it("fails the turn the way Pi fails it", async () => {
-    // The runner reads the failure off the last assistant message. A Mastra
-    // run that failed has to say so there, or the run reads as a run that
-    // worked.
+  it("fails the turn on the last assistant message", async () => {
+    // The runner reads the failure off the last assistant message. A run that
+    // failed has to say so there, or the run reads as a run that worked.
     const cwd = await mkdtemp(join(tmpdir(), "afk-worktree-"));
     const failing = {
       specificationVersion: "v2",
@@ -381,20 +334,32 @@ describe("the session of the Mastra engine", () => {
       session.dispose();
     }
   });
-});
 
-describe("the engine flag", () => {
-  it("is Pi unless the command says otherwise", () => {
-    expect(parseArgs([]).engine).toBe("pi");
-  });
-
-  it("names the Mastra engine when it is asked for", () => {
-    expect(parseArgs(["--engine", "mastra"]).engine).toBe("mastra");
-    expect(parseArgs(["--engine", "pi"]).engine).toBe("pi");
-  });
-
-  it("refuses an engine it does not carry", () => {
-    expect(() => parseArgs(["--engine", "claude"])).toThrow(/--engine/);
+  it("carries the turn on when a tool refuses the call", async () => {
+    // A refusal is not a crash: the runner's own bound — the split that is too
+    // small, the leftover that is already open — is a refusal, and the model
+    // has to be able to read why and try again.
+    const cwd = await mkdtemp(join(tmpdir(), "afk-worktree-"));
+    const tool = specOf({
+      name: "agent_test",
+      execute: async () => ({
+        content: [{ type: "text" as const, text: "the queue is full" }],
+        details: {},
+        isError: true,
+      }),
+    });
+    const session = await createMastraSession({
+      model: modelOf([toolTurn("agent_test", { value: "x" }), textTurn("left it alone")]),
+      cwd,
+      systemPromptSections: {},
+      tools: [tool],
+    });
+    try {
+      await session.prompt("file the leftover");
+      expect(session.messages?.at(-1)?.stopReason).toBe("stop");
+    } finally {
+      session.dispose();
+    }
   });
 });
 
@@ -428,5 +393,30 @@ describe("the guard on the Mastra workspace", () => {
     }));
     expect(results[0]?.result).toContain("Refused");
     expect(String(results[1]?.result)).toContain("hello.txt");
+  });
+
+  it("refuses the command that would file a leftover behind the runner's bounds", async () => {
+    // The guard judges the call by what it carries, not by what it is called:
+    // a command that files an issue is refused whatever tool runs it.
+    const cwd = await mkdtemp(join(tmpdir(), "afk-worktree-"));
+    const agent = createMastraAgent({
+      cwd,
+      name: "afk-runner",
+      instructions: "",
+      model: modelOf([
+        toolTurn(
+          "mastra_workspace_execute_command",
+          { command: "gh issue create --title a leftover" },
+          "call-1",
+        ),
+        textTurn("filed nothing"),
+      ]),
+      tools: [],
+      skills: [],
+    });
+
+    const answer = await agent.generate("file a leftover");
+    const result = answer.toolResults.at(0)?.payload.result;
+    expect(String(result)).toContain("Refused");
   });
 });

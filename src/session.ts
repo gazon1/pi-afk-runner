@@ -326,50 +326,6 @@ export interface RunUsage {
 }
 
 /**
- * The usage an assistant message carries, when the provider reported any.
- *
- * The numbers live on the message the session's **events** carry — the same
- * `message_end` event the CLI already handles — and a provider that reports
- * no token counts leaves them at zero. So **zero is not a report**: a turn
- * that reads zero has nothing to say, and a summary that says "0 tokens"
- * would be a number a reader would trust.
- */
-export function usageFromMessage(message: unknown): RunUsage | undefined {
-  const usage = (
-    message as
-      | {
-          readonly usage?: {
-            readonly totalTokens?: unknown;
-            readonly cost?: { readonly total?: unknown };
-          };
-        }
-      | null
-      | undefined
-  )?.usage;
-  const tokens = reportedNumber(usage?.totalTokens);
-  const cost = reportedNumber(usage?.cost?.total);
-  if (tokens <= 0 && cost <= 0) {
-    // The provider said nothing about this turn.
-    return undefined;
-  }
-  return {
-    totalTokens: tokens,
-    ...(cost > 0 ? { cost } : {}),
-  };
-}
-
-/**
- * A number a provider reported, or zero.
- *
- * The SDK's usage is read structurally — the runner does not depend on the
- * SDK's package — so the numbers arrive as `unknown`, and a number that is
- * not one is no number at all.
- */
-function reportedNumber(value: unknown): number {
-  return typeof value === "number" && Number.isFinite(value) ? value : 0;
-}
-
-/**
  * Two runs' usage, added.
  *
  * The cost is added only when one of them reported one: a run whose work
@@ -782,7 +738,7 @@ export async function runPromptArray(options: {
         );
       }
       // The action's failure is a failed turn: it is thrown here and the
-      // engine's runner turns it into the same failure a turn makes.
+      // graph turns it into the same failure a turn makes.
       return { state: "ok", result: await options.action(state) };
     }
     const sent = options.session.prompt(state.text);
@@ -812,7 +768,7 @@ export async function runPromptArray(options: {
     const completed = result.completed.filter((state) => state.counts).length;
     return { completed, total, aborted: aborted || result.aborted, cutReason, abortError };
   } catch (error) {
-    // The engine wraps a failed turn and says which state it failed in. The
+    // The graph wraps a failed turn and says which state it failed in. The
     // failure underneath it is the cause; the caller reads the message.
     const cause = stateFailure(error);
     if (cause === null) {

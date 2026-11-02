@@ -5,10 +5,9 @@
  * Mastra's agent underneath: a prompt is a `generate`, an abort is an
  * `AbortController`, and the messages are the turns the session has had.
  *
- * The **failure** is the one thing that has to look like Pi's: a turn whose
- * model call failed settles, and the failure is on the last assistant message.
- * The runner reads the failure from there, so a Mastra run that failed says
- * the same thing a Pi run that failed says.
+ * The **failure** settles: a turn whose model call failed does not throw out
+ * of the session, and the failure is on the last assistant message. The runner
+ * reads the failure from there.
  */
 
 import type { Agent } from "@mastra/core/agent";
@@ -130,7 +129,7 @@ export async function createMastraSession(options: {
         ];
       } catch (failure) {
         // A failed turn settles normally — the runner reads the failure off
-        // the last assistant message, exactly as it reads Pi's.
+        // the last assistant message.
         messages = [...messages, failedTurn(failure)];
       } finally {
         running = null;
