@@ -182,7 +182,7 @@ function lastLine(text: string): string {
  * apart: a gate that refused the change, a host that cannot run the gate, and
  * a gate that never got to answer.
  */
-async function gateFailure(
+export async function gateFailure(
   gate: string,
   invocation: GateInvocation,
   failure: unknown,
