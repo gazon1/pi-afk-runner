@@ -161,10 +161,12 @@ function assistantLine(message: SessionEvent["message"]): string | null {
   const text = message.content
     .flatMap((block) => (isTextBlock(block) ? [block.text] : []))
     .join("\n");
-  const line = text.split("\n").find((part) => part.trim() !== "")?.trim() ?? "";
-  if (line === "") {
+  // The first line that has something on it: the line the agent would say out loud.
+  const found = text.match(/^\s*\S.*$/m);
+  if (found === null) {
     return null;
   }
+  const line = found[0].trim();
   return line.length > 200 ? `${line.slice(0, 200)}…` : line;
 }
 
@@ -335,17 +337,28 @@ export function liveFrontDoor(
    * reads.
    */
   const publish = (ctx: ExtensionContext, run: LiveRun): void => {
-    try {
-      if (run.status !== null) {
-        pi.appendEntry(RUN_STATUS_ENTRY, run.status);
+    const status = run.status;
+    // The line is made before the calls: a mistake in it is ours, and it has
+    // nothing to do with the host's "the session is gone".
+    const line = status === null ? undefined : statusLine(status);
+    if (status !== null) {
+      try {
+        pi.appendEntry(RUN_STATUS_ENTRY, status);
+      } catch (failure) {
+        if (!isStaleContext(failure)) {
+          throw failure;
+        }
+        // The session this context was made for is gone. The run goes on, and
+        // the line is restored from the entry when the session is opened again.
       }
-      ctx.ui.setStatus(STATUS_KEY, run.status === null ? undefined : statusLine(run.status));
+    }
+    try {
+      ctx.ui.setStatus(STATUS_KEY, line);
     } catch (failure) {
-      // A session switch deactivates the runner this context was made for. The run
-      // goes on, and the line is restored from the entry when the session is opened.
       if (!isStaleContext(failure)) {
         throw failure;
       }
+      // The session is gone; its footer went with it.
     }
   };
 
@@ -403,6 +416,68 @@ export function liveFrontDoor(
     }
   };
 
+  /**
+   * What the door says about a worktree that came back unprepared.
+   *
+   * One wording for the two places the door says it, so the two copies cannot
+   * drift apart. It says what happened rather than what was meant: the setup
+   * script may not have been there at all, and it may have run and failed —
+   * the reason in the brackets says which.
+   */
+  const unpreparedMessage = (subject: string, reason: string): string =>
+    `afk-runner: ${subject} came back unprepared — ${SETUP_SCRIPT} did not prepare it (${reason}). Run it in the worktree before the gates.`;
+
+  /**
+   * Open the run's session as this chat.
+   *
+   * The work session is headless while it runs, but its transcript is a Pi
+   * session file: switching to it gives the human a real chat with the same
+   * history — a session they can read, and carry on from. The worktree is
+   * restored first when the run's own cleanup has removed it, because a session
+   * whose working directory is gone can read nothing.
+   */
+  const attach = async (ctx: ExtensionCommandContext, force = false): Promise<void> => {
+    if (last === null || last.transcript === null) {
+      talk(ctx, "afk-runner: this session has no run to attach to yet", "info");
+      return;
+    }
+    if (working && !force) {
+      talk(
+        ctx,
+        "afk-runner: the agent is working — /afk-runner-stop first, or /afk-runner-attach when it settles",
+        "warning",
+      );
+      return;
+    }
+    const target = last;
+    const restored = await restoreWorktree(runGit, target, (path) =>
+      prepareWorktreeSetup(command, path),
+    );
+    if (restored.problem !== null) {
+      talk(
+        ctx,
+        `afk-runner: the worktree would not come back, so the session would have nowhere to work: ${restored.problem}`,
+        "error",
+      );
+      return;
+    }
+    if (restored.unprepared !== null) {
+      talk(ctx, unpreparedMessage("the worktree", restored.unprepared), "warning");
+    }
+    try {
+      const switched = await ctx.switchSession(target.transcript as string);
+      if (switched.cancelled) {
+        talk(ctx, "afk-runner: the switch was cancelled", "info");
+      }
+    } catch (failure) {
+      talk(
+        ctx,
+        `afk-runner: the session could not be opened: ${errorMessage(failure)}`,
+        "error",
+      );
+    }
+  };
+
   let hostContext: ExtensionCommandContext | null = null;
   /** The auto-attach of the run under way, so the run can wait for it before the worktree goes. */
   let autoAttach: Promise<void> | null = null;
@@ -414,7 +489,7 @@ export function liveFrontDoor(
       return;
     }
 
-    const argv = args.trim().split(/\s+/).filter((token) => token !== "");
+    const argv = args.trim().split(/\s+/).filter(Boolean);
     const prepared = await prepareRun(argv);
     if (!prepared.ok) {
       talk(ctx, `afk-runner: ${errorMessage(prepared.failure)}`, "error");
@@ -571,20 +646,24 @@ export function liveFrontDoor(
           finish(ctx, run, "done");
         }
       } catch (failure) {
+        // What failed is said before the stage is published, and the stage is
+        // published either way: a status line that cannot be written must not
+        // keep the human from hearing what failed.
+        //
         // Reporting can itself fail (a gone session is fine; anything else is
         // not). Either way the failure is not left unhandled: it is written
         // where a human can find it after the fact, and the run still ends.
+        try {
+          talk(ctx, `afk-runner: ${errorMessage(failure)}`, "error");
+        } catch (reportFailure) {
+          console.error("afk-runner: reporting the run's failure failed:", reportFailure);
+        }
         try {
           finish(
             ctx,
             run,
             failure instanceof RunFailed ? `failed (${failure.step})` : "failed",
           );
-        } catch (reportFailure) {
-          console.error("afk-runner: reporting the run's failure failed:", reportFailure);
-        }
-        try {
-          talk(ctx, `afk-runner: ${errorMessage(failure)}`, "error");
         } catch (reportFailure) {
           console.error("afk-runner: reporting the run's failure failed:", reportFailure);
         }
@@ -728,68 +807,6 @@ export function liveFrontDoor(
         console.error(`afk-runner: the abort failed: ${errorMessage(failure)}`);
       }
     });
-    }
-  };
-
-  /**
-   * What the door says about a worktree that came back unprepared.
-   *
-   * One wording for the two places the door says it, so the two copies cannot
-   * drift apart. It says what happened rather than what was meant: the setup
-   * script may not have been there at all, and it may have run and failed —
-   * the reason in the brackets says which.
-   */
-  const unpreparedMessage = (subject: string, reason: string): string =>
-    `afk-runner: ${subject} came back unprepared — ${SETUP_SCRIPT} did not prepare it (${reason}). Run it in the worktree before the gates.`;
-
-  /**
-   * Open the run's session as this chat.
-   *
-   * The work session is headless while it runs, but its transcript is a Pi
-   * session file: switching to it gives the human a real chat with the same
-   * history — a session they can read, and carry on from. The worktree is
-   * restored first when the run's own cleanup has removed it, because a session
-   * whose working directory is gone can read nothing.
-   */
-  const attach = async (ctx: ExtensionCommandContext, force = false): Promise<void> => {
-    if (last === null || last.transcript === null) {
-      talk(ctx, "afk-runner: this session has no run to attach to yet", "info");
-      return;
-    }
-    if (working && !force) {
-      talk(
-        ctx,
-        "afk-runner: the agent is working — /afk-runner-stop first, or /afk-runner-attach when it settles",
-        "warning",
-      );
-      return;
-    }
-    const target = last;
-    const restored = await restoreWorktree(runGit, target, (path) =>
-      prepareWorktreeSetup(command, path),
-    );
-    if (restored.problem !== null) {
-      talk(
-        ctx,
-        `afk-runner: the worktree would not come back, so the session would have nowhere to work: ${restored.problem}`,
-        "error",
-      );
-      return;
-    }
-    if (restored.unprepared !== null) {
-      talk(ctx, unpreparedMessage("the worktree", restored.unprepared), "warning");
-    }
-    try {
-      const switched = await ctx.switchSession(target.transcript as string);
-      if (switched.cancelled) {
-        talk(ctx, "afk-runner: the switch was cancelled", "info");
-      }
-    } catch (failure) {
-      talk(
-        ctx,
-        `afk-runner: the session could not be opened: ${errorMessage(failure)}`,
-        "error",
-      );
     }
   };
 
