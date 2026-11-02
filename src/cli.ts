@@ -44,7 +44,7 @@ import {
   type MergeOptions,
   type MergeResult,
 } from "./merge.js";
-import { RunFailed, blockedReason, runOnce, type RunOptions, unworkableReason } from "./runner.js";
+import { RunFailed, blockedReason, emptyQueueSentence, runOnce, type RunOptions, unworkableReason, workedIssueSentence } from "./runner.js";
 import { skillsDirectory, type AgentSession, type SessionFactory } from "./session.js";
 
 /** The run finished, or the queue was empty. */
@@ -800,7 +800,7 @@ async function sweep(runOptions: RunOptions, repo: string): Promise<number> {
 
   const numbers = [...new Set(issues.map((issue) => issue.number))];
   if (numbers.length === 0) {
-    process.stdout.write("the queue is empty — there was nothing to work\n");
+    process.stdout.write(`${emptyQueueSentence()}\n`);
     return EXIT_OK;
   }
 
@@ -834,7 +834,7 @@ async function work(runOptions: RunOptions, namedIssue: number | undefined): Pro
   try {
     const result = await runOnce(runOptions);
     if (result.outcome === "empty") {
-      process.stdout.write("the queue is empty — there was nothing to work\n");
+      process.stdout.write(`${emptyQueueSentence()}\n`);
     } else if (result.outcome === "unworkable") {
       const issueNum = result.issue ?? namedIssue;
       const reason =
@@ -851,9 +851,7 @@ async function work(runOptions: RunOptions, namedIssue: number | undefined): Pro
       const why = result.reason === "" ? "" : ` — ${result.reason}`;
       process.stdout.write(`issue ${result.issue} was ${what}${why}\n`);
     } else {
-      process.stdout.write(
-        `worked issue ${result.issue} — the record is at ${result.record}\n`,
-      );
+      process.stdout.write(`${workedIssueSentence(result)}\n`);
     }
     return EXIT_OK;
   } catch (failure) {

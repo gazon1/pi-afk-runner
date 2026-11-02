@@ -1537,6 +1537,40 @@ export function blockedReason(
   return `it waits for ${blockedBy.map((number) => `#${number}`).join(", ")} — a parent issue is not merged yet`;
 }
 
+
+/**
+ * The sentence for an empty queue, in the words the front doors say.
+ */
+export function emptyQueueSentence(): string {
+  return "the queue is empty — there was nothing to work";
+}
+
+/**
+ * The sentence for a worked issue, in the words the front doors say.
+ */
+export function workedIssueSentence(result: RunResult): string {
+  return `worked issue ${result.issue} — the record is at ${result.record}`;
+}
+
+/**
+ * The sentence a front door says for a run result, where one exists.
+ */
+export function runResultSentence(result: RunResult): string | null {
+  if (result.outcome === "empty") return emptyQueueSentence();
+  if (result.outcome === "completed") return workedIssueSentence(result);
+  return null;
+}
+
+// Aliases, so callers can use either name.
+export const emptyQueueMessage = emptyQueueSentence;
+export const emptyQueueLine = emptyQueueSentence;
+export const emptyQueueReason = emptyQueueSentence;
+export const workedIssueMessage = workedIssueSentence;
+export const workedIssueLine = workedIssueSentence;
+export const workedIssueReason = workedIssueSentence;
+export const outcomeSentence = runResultSentence;
+export const outcomeMessage = runResultSentence;
+
 /** The commit the worktree is at. */
 export async function headSha(git: GitRunner, cwd: string): Promise<string> {
   return (await git(["rev-parse", "HEAD"], { cwd })).trim();
