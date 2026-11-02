@@ -502,25 +502,42 @@ export function parseCiOutcome(json: string): CiOutcome | null {
  * The same read as {@link readCiVerdict}, but the answer keeps the exit code,
  * because the merge gate has to tell a green CI from a red one.
  */
-export async function readCiOutcome(
+/**
+ * Read the CI tool's raw output for a commit, or null when it could not run.
+ *
+ * The tool exits non-zero when CI failed, so its answer travels on the error;
+ * this is the one read that both callers share.
+ */
+async function readCiRaw(
   run: CommandRunner,
   cwd: string,
   options: { readonly ref: string; readonly repo: string },
-): Promise<CiOutcome | null> {
+): Promise<string | null> {
   const spec = {
     command: "python3",
     args: [CI_VERDICT_TOOL, options.ref, "--repo", options.repo, "--json"],
     cwd,
   };
   try {
-    return parseCiOutcome(await run(spec));
+    return await run(spec);
   } catch (failure) {
     if (failure instanceof CommandFailed) {
       // The verdict it printed before it exited is on the error.
-      return parseCiOutcome(failure.stdout);
+      return failure.stdout;
     }
+    // The tool could not be run at all; the runner says nothing rather than
+    // something it cannot stand behind.
     return null;
   }
+}
+
+export async function readCiOutcome(
+  run: CommandRunner,
+  cwd: string,
+  options: { readonly ref: string; readonly repo: string },
+): Promise<CiOutcome | null> {
+  const output = await readCiRaw(run, cwd, options);
+  return output === null ? null : parseCiOutcome(output);
 }
 
 /**
@@ -545,22 +562,8 @@ export async function readCiVerdict(
   cwd: string,
   options: { readonly ref: string; readonly repo: string },
 ): Promise<string | null> {
-  const spec = {
-    command: "python3",
-    args: [CI_VERDICT_TOOL, options.ref, "--repo", options.repo, "--json"],
-    cwd,
-  };
-  try {
-    return parseCiVerdict(await run(spec));
-  } catch (failure) {
-    if (failure instanceof CommandFailed) {
-      // The verdict it printed before it exited is on the error.
-      return parseCiVerdict(failure.stdout);
-    }
-    // The tool could not be run at all; the runner says nothing rather than
-    // something it cannot stand behind.
-    return null;
-  }
+  const output = await readCiRaw(run, cwd, options);
+  return output === null ? null : parseCiVerdict(output);
 }
 
 /** How the CI line says which run it is. */
