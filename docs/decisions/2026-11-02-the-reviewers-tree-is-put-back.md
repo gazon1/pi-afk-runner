@@ -55,9 +55,19 @@ the tree the reviewer judged. One restore answers both — the gates' tree is
 the current head, the review's tree is the head it judged — so there is one
 implementation of "put the tree back", not two that can drift.
 
+The **branch** is named too. A plain `git reset --hard` moves whatever branch
+is checked out, so a reviewer that checked out another branch would have that
+branch moved to the head the review judged: a branch the review never judged,
+and one that is not the runner's to move. The tree goes back on the branch the
+review judged — that branch is moved by name, and the branch the reviewer
+checked out is left where it is. The branch is detached first, because a branch
+that is checked out in a worktree cannot be moved.
+
 The restore happens before the verdict is read, so a session that failed
-leaves nothing behind either: the tree goes back on the way out, and a restore
-that fails is said so beside the session's own failure.
+leaves nothing behind either: the tree goes back on the way out. A restore
+that fails is said so in the runner's own words, and a session that failed as
+well is named beside it — the two are one failure: the review did not happen,
+and the tree it did not judge is not back either.
 
 **A leftover is not kept in a commit of its own.** The brief allowed both — a
 commit of its own, or the gates' restore — and the restore is the one that
@@ -93,6 +103,8 @@ first is what makes the comparison mean what it says.
   scratch, and its gate's build is not part of the branch.
 - The reviewer is told the rule: the prompt says the tree is put back and the
   verdict is the only thing that leaves the session.
+- A branch the reviewer checked out is left where it was. The review moves the
+  branch it judged, by name, and says so in the failure when it cannot.
 
 ## Links
 
