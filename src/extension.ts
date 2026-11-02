@@ -46,6 +46,7 @@ import { resolve } from "node:path";
 
 import { issueWorktreePath, runCommand, runGit, workBranch, type CommandRunner } from "./git.js";
 import { RUN_STATUS_ENTRY, statusFromEntries, statusLine, type RunStatus } from "./live.js";
+import { newPoolState } from "./pool.js";
 import {
   RunFailed,
   SETUP_SCRIPT,
@@ -444,8 +445,10 @@ export function liveFrontDoor(
       return;
     }
     const lock = prepared.lock;
-    // The model is the one this session runs on unless the command names one.
-    const model = options.model ?? hostModel(ctx.model) ?? undefined;
+    // The model is the one the command names. The host's own model is the
+    // fallback: it runs the work when there is no pool to pick a model from.
+    const model = options.model;
+    const fallbackModel = model === undefined ? (hostModel(ctx.model) ?? undefined) : undefined;
 
     const run: LiveRun = {
       status: null,
@@ -481,6 +484,14 @@ export function liveFrontDoor(
         piSessionFactory({
           agentDirectory: options.agentDirectory,
           ...(model === undefined ? {} : { model }),
+          ...(fallbackModel === undefined ? {} : { fallbackModel }),
+          pool: prepared.pool,
+          state: newPoolState(),
+          // The pool moves the session between models, and a host that does
+          // not hear about it wonders why the answer changed.
+          onPoolEvent: (line) => {
+            talk(ctx, `afk-runner: ${line}`, "info");
+          },
         }),
       (created) => {
         if (workSession === null) {
