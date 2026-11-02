@@ -44,7 +44,8 @@ and the contract do not know what the engine is underneath — the seam is the s
 The runner's own description of a tool is in `src/tools.ts`, and the engine's object
 over it is in `src/mastra/tools.ts`. The tools a turn ends on — the triage's decision,
 the scope's decision, the related issues to batch, the review's verdict — are in
-`src/decisions/`, one decision per file. The guard's rules are in `src/guard.ts` and the
+`src/decisions/`, one decision per file. The tool that packs the repository for the
+agent is in `src/packing.ts`. The guard's rules are in `src/guard.ts` and the
 engine applies them (`src/mastra/guard.ts`); the journal is in `src/journal.ts`. One
 description, one carrier, one spelling: a rule written twice is a rule whose two copies
 drift.

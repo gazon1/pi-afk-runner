@@ -15,6 +15,7 @@ for the rule that the copies follow.
 
 | Decision | What it settles |
 |---|---|
+| `2026-11-07-the-repository-is-packed-for-the-agent.md` | the repository is packed for the agent with repomix: the tool that packs it, the guard's policy applied to the pack, and the scenarios that pack instead of read |
 | `2026-11-06-the-graph-runs-on-the-mastra-workflow-engine.md` | the graph runs on Mastra's workflow engine and is a set of components: the states, the tokens, the errors, the step, the straight line, the work session, the review loop — **the graph clause replaced** in `2026-11-05-pi-is-gone.md`: the graph is the engine's, and the runner's rules stay the runner's |
 | `2026-11-05-the-pool-asks-the-engine-what-it-carries.md` | the pool on the Mastra engine: the catalogue it asks, the session that can be moved, and the level the file names — **supersedes** `2026-11-02-the-model-pool-is-a-file-the-host-owns.md` and `2026-11-02-the-file-names-the-effort-of-each-model.md`: the pool asks the engine what it carries, and the level is reported rather than applied |
 | `2026-11-05-the-engine-tells-the-model-when-a-turn-ends-on-a-tool.md` | the engine tells the model, between its steps, that the turn ends on a tool: the review's verdict is reached instead of being cut off by the step limit |

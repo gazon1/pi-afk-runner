@@ -49,6 +49,7 @@ import {
   type ScopeSubtask,
 } from "./decisions/index.js";
 import { createLeftoverTool, normaliseTitle } from "./leftovers.js";
+import { createPackTool } from "./packing.js";
 import { type ToolSpec } from "./tools.js";
 import {
   cutOffError,
@@ -1011,14 +1012,16 @@ export async function startAgent(options: {
       [WORKTREE_SECTION]: worktreeRule(options.worktree),
     },
     // The tools the work session carries: the triage's decision, the scope's
-    // decision and the leftover the fourth turn files. The runner performs
-    // the decisions' effects, not the agent: closing an issue, splitting one
-    // and filing a leftover are the runner's writes, and the bounds on them
-    // are the runner's to hold.
+    // decision, the leftover the fourth turn files, and the pack that hands
+    // the agent the repository as one document. The runner performs the
+    // decisions' effects, not the agent: closing an issue, splitting one and
+    // filing a leftover are the runner's writes, and the bounds on them are
+    // the runner's to hold.
     tools: [
       createIssueDecisionTool(triage),
       createScopeDecisionTool(scope),
       createLeftoverTool({ repo: options.repo, gh }),
+      createPackTool({ cwd: options.cwd }),
       ...(options.batchRelated === true
         ? [createRelatedDecisionTool(related)]
         : []),

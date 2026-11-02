@@ -21,7 +21,9 @@ a commit that says `wip:` or `the agent's work` is one of them.
 
    So judge the change by reading it. Re-read the code you touched, the
    interfaces it uses and the tests around it, and let the reasoning — not a
-   green build — be what you trust.
+   green build — be what you trust. When that code is several files, the
+   `agent_pack_codebase` tool packs that part of the repository into one
+   document.
 
 3. **Do not commit or push.** The runner commits whatever is left in the
    worktree on your behalf and pushes under its own branch name, so the push

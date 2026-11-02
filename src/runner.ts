@@ -33,7 +33,7 @@ import { join } from "node:path";
 import { claimIssue, reclaimClaim, releaseClaim } from "./claim.js";
 import { errorMessage } from "./cli.js";
 import { budgetShares } from "./budget.js";
-import { GUARD_POLICY } from "./guard.js";
+import { isProtectedPath } from "./guard.js";
 import { GateFailed, runGates } from "./gates.js";
 import {
   UNTRUSTED_INPUT_RULE,
@@ -53,6 +53,7 @@ import {
   createVerdictTool,
   type ReviewVerdict,
 } from "./decisions/index.js";
+import { createPackTool } from "./packing.js";
 import {
   CommandFailed,
   addWorktree,
@@ -806,7 +807,7 @@ export async function reviewPullRequest(options: {
     systemPromptSections: {
       [UNTRUSTED_INPUT_SECTION]: UNTRUSTED_INPUT_RULE,
     },
-    tools: [createVerdictTool(holder)],
+    tools: [createVerdictTool(holder), createPackTool({ cwd: options.cwd })],
     // The review ends on the verdict tool. A reviewer that keeps reading is
     // told, between its steps, that the turn ends there.
     finalTool: VERDICT_TOOL_NAME,
@@ -935,9 +936,10 @@ export async function reviewPullRequest(options: {
 export const REVIEW_PROMPT = [
   "Review the pull request in this repository, as a reader who did not write it.",
   "",
-  "Read the diff (`git diff origin/main...HEAD`), the code it touches, and the tests. Judge it",
-  "the way the repository's own review skill does: is the logic right, is it safe, does it hold",
-  "under load, is the risky code tested, is it fast enough, and is every line needed.",
+  "Read the diff (`git diff origin/main...HEAD`), the code it touches, and the tests. When the",
+  "change touches several files, the `agent_pack_codebase` tool packs them into one document.",
+  "Judge it the way the repository's own review skill does: is the logic right, is it safe, does",
+  "it hold under load, is the risky code tested, is it fast enough, and is every line needed.",
   "",
   "Report defects with a location, not a summary. Say what you did not reach.",
   "",
@@ -2055,24 +2057,6 @@ export function verifyPush(options: {
   return options.verifyPushes ?? !isSmallChange(options.size);
 }
 
-
-/** Match a path against the guard's glob, where `*` matches anything. */
-function globToRegExp(pattern: string): RegExp {
-  const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*");
-  return new RegExp(`^${escaped}$`);
-}
-
-/** Whether a path is in the protected set (last matching entry wins). */
-function isProtectedPath(path: string): boolean {
-  const entries = Object.entries(GUARD_POLICY.path);
-  let verdict: string | undefined;
-  for (const [pattern, value] of entries) {
-    if (globToRegExp(pattern).test(path)) {
-      verdict = value;
-    }
-  }
-  return verdict === "deny";
-}
 
 /**
  * Commit what the runner itself wrote.

@@ -84,6 +84,11 @@ The work session runs in a **Mastra agent**, and it carries:
   (`src/guard.ts`) and they are applied over the agent's tools;
 - the runner's own **decision tools**: `agent_issue_decision`, `agent_scope_decision`,
   `agent_review_verdict`, `agent_leftover`, and the one that records the run's outcome;
+- the **pack**: `agent_pack_codebase` hands the agent the repository as one document — the file
+  tree and the files' contents — so it reads an area of the repository in one call instead of
+  file by file. The pack is [repomix](https://github.com/yamadashy/repomix), and it is the
+  runner's own: the repository's `repomix.config.*` is never loaded, the files the guard
+  refuses are not in the pack, and nothing is fetched from the network.
 
 Two things are **not** packages, on purpose. The **guardrail** — the rule that an issue body is
 data — is a string in the code, because a rule read from disk can vanish without a word. And the

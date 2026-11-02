@@ -99,3 +99,70 @@ export const GUARD_POLICY = {
     "*.pem": "deny",
   },
 } as const;
+
+/**
+ * A rule of the policy: allow, deny, or deny with a reason.
+ */
+export type PolicyRule = "allow" | "deny" | { readonly action: "deny"; readonly reason: string };
+
+/**
+ * Whether a value matches a wildcard pattern.
+ *
+ * The pattern is anchored and `*` stands for anything, `/` included — the
+ * guard's own wildcards, not path prefixes. So `*.env` covers a `.env` at any
+ * depth.
+ */
+export function matchesPattern(pattern: string, value: string): boolean {
+  const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*");
+  return new RegExp(`^${escaped}$`).test(value);
+}
+
+/** What the rules say about a value. */
+export interface PolicyVerdict {
+  /** Whether the value is refused. */
+  readonly denied: boolean;
+  /** Why it is refused, when the rule says. */
+  readonly reason: string;
+}
+
+/**
+ * The rules' verdict on a value: the last matching rule wins.
+ *
+ * The order the rules are written in is the policy, so `*.env.example` after
+ * `*.env.*` undoes it for the template — which carries no secret.
+ */
+export function policyVerdict(
+  rules: Readonly<Record<string, PolicyRule>>,
+  value: string,
+): PolicyVerdict {
+  let denied = false;
+  let reason = "";
+  for (const [pattern, rule] of Object.entries(rules)) {
+    if (!matchesPattern(pattern, value)) {
+      continue;
+    }
+    if (rule === "deny") {
+      denied = true;
+      reason = "";
+    } else if (rule === "allow") {
+      denied = false;
+      reason = "";
+    } else {
+      denied = true;
+      reason = rule.reason;
+    }
+  }
+  return { denied, reason };
+}
+
+/**
+ * Whether the policy refuses a path.
+ *
+ * The paths the policy is about are the repository's own — relative to its
+ * root. Everyone who asks the policy asks it here: the guard, on a read, and
+ * the pack, which hands files to the model the way a read does.
+ */
+export function isProtectedPath(path: string): boolean {
+  const rules = GUARD_POLICY.path as Readonly<Record<string, PolicyRule>>;
+  return policyVerdict(rules, path).denied;
+}
