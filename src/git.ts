@@ -1000,7 +1000,10 @@ export async function restoreWorktree(
   const prune = async (): Promise<void> => {
     try {
       await git(["worktree", "prune"], { cwd: options.checkout });
-    } catch {}
+    } catch {
+      // The registration is still there. The `worktree add` below says "already
+      // exists", and the retry is what answers it.
+    }
   };
   let listError: string | null = null;
   const registered = async (): Promise<boolean | null> => {
@@ -1017,6 +1020,21 @@ export async function restoreWorktree(
       listError = errorMessage(failure);
       return null;
     }
+  };
+  /**
+   * Forget the worktree: the directory, and the registration of it.
+   *
+   * A directory git does not know makes `worktree add` refuse, and a
+   * registration git still knows makes it refuse too. Both have to go.
+   */
+  const reset = async (): Promise<void> => {
+    try {
+      await rm(targetPath, { recursive: true, force: true });
+    } catch {
+      // The directory is still there. The `worktree add` below says so, and
+      // the retry is what answers it.
+    }
+    await prune();
   };
   const add = async (args: readonly string[]): Promise<string | null> => {
     try {
@@ -1062,10 +1080,7 @@ export async function restoreWorktree(
       };
     }
     // A directory git does not know would make `worktree add` refuse.
-    try {
-      await rm(targetPath, { recursive: true, force: true });
-    } catch {}
-    await prune();
+    await reset();
   }
   const first = await addBranch();
   if (first === null) {
@@ -1073,10 +1088,7 @@ export async function restoreWorktree(
   }
   if (first.includes("already exists")) {
     // A registration prune missed: forget the tree and try once more.
-    try {
-      await rm(targetPath, { recursive: true, force: true });
-    } catch {}
-    await prune();
+    await reset();
     const second = await addBranch();
     if (second === null) {
       return { problem: null, unprepared: await prepared() };
