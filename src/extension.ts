@@ -720,17 +720,20 @@ export function liveFrontDoor(
         await runGit(["worktree", "prune"], { cwd: target.checkout });
       } catch {}
     };
-    const registered = async (): Promise<boolean> => {
+    let listError: string | null = null;
+    const registered = async (): Promise<boolean | null> => {
       try {
         const list = await runGit(["worktree", "list", "--porcelain"], { cwd: target.checkout });
+        listError = null;
         return list.split("\n").some((line) => {
           if (!line.startsWith("worktree ")) return false;
           // Git prints absolute paths, so one comparison of resolved paths is
           // the whole question.
           return resolve(line.slice("worktree ".length).trim()) === targetPath;
         });
-      } catch {
-        return false;
+      } catch (failure) {
+        listError = errorMessage(failure);
+        return null;
       }
     };
     const add = async (args: readonly string[]): Promise<string | null> => {
@@ -772,9 +775,20 @@ export function liveFrontDoor(
 
     await prune();
     if (existsSync(targetPath)) {
-      if (await registered()) {
+      const isRegistered = await registered();
+      if (isRegistered === true) {
         // It is still there, and the runner prepared it when it made it.
         return { problem: null, unprepared: null };
+      }
+      if (isRegistered === null) {
+        // The checkout could not say whether the worktree is registered. Do not
+        // remove it: a directory git does not know would make `worktree add`
+        // refuse, but here we cannot tell, and removing it would destroy the
+        // run's work.
+        return {
+          problem: `could not tell whether the worktree is registered (${listError ?? "unknown error"}); left as it was`,
+          unprepared: null,
+        };
       }
       // A directory git does not know would make `worktree add` refuse.
       try {
