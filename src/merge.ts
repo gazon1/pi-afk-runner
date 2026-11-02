@@ -411,6 +411,7 @@ async function mergeOne(
           factory: options.session,
           gh: options.gh,
           run: options.run,
+          git: options.git,
           deadlineMs: budgetShares(remainingMs()).reviewMs,
           ...(options.stopped === undefined ? {} : { stopped: options.stopped }),
         });
