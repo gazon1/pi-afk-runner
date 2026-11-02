@@ -55,6 +55,8 @@ import {
   type RunOptions,
   type RunResult,
   unworkableReason,
+  emptyQueueSentence,
+  workedIssueSentence,
 } from "./runner.js";
 import type { AgentSession, SessionFactory } from "./session.js";
 import { PINNED_PI_RANGE, assertInstalledPiVersion, installedPiVersion } from "./version.js";
@@ -567,7 +569,7 @@ export function liveFrontDoor(
           );
           finish(ctx, run, "done");
         } else if (result.outcome === "empty") {
-          talk(ctx, "afk-runner: the queue is empty — there was nothing to work", "info");
+          talk(ctx, `afk-runner: ${emptyQueueSentence()}`, "info");
           finish(ctx, run, "done");
         } else if (result.outcome === "skipped" || result.outcome === "split") {
           const what =
@@ -578,11 +580,7 @@ export function liveFrontDoor(
           talk(ctx, `afk-runner: issue ${result.issue} was ${what}${why}`, "info");
           finish(ctx, run, "done");
         } else {
-          talk(
-            ctx,
-            `afk-runner: worked issue ${result.issue} — the record is at ${result.record}`,
-            "info",
-          );
+          talk(ctx, `afk-runner: ${workedIssueSentence(result)}`, "info");
           finish(ctx, run, "done");
         }
       } catch (failure) {
