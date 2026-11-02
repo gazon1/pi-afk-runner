@@ -353,7 +353,7 @@ describe("the run the front door owns", () => {
         outcome: "unworkable",
         steps: [],
         record: "",
-        derivedState: "Claimed",
+        reason: unworkableReason("Claimed"),
       });
 
       const door = liveFrontDoor(host.pi, { session: async () => fake.session, work });

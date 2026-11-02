@@ -57,7 +57,7 @@ import {
   runOnce,
   type RunOptions,
   type RunResult,
-  unworkableReason,
+
 } from "./runner.js";
 import type { AgentSession, SessionFactory } from "./session.js";
 import { PINNED_PI_RANGE, assertInstalledPiVersion, installedPiVersion } from "./version.js";
@@ -525,7 +525,7 @@ export function liveFrontDoor(
         if (result.outcome === "unworkable") {
           const issueNum = result.issue ?? options.issue;
           const reason =
-            blockedReason(result.blockedBy) ?? unworkableReason(result.derivedState);
+            blockedReason(result.blockedBy) ?? result.reason;
           talk(
             ctx,
             `afk-runner: issue ${issueNum ?? ""} could not be worked — ${reason}`,

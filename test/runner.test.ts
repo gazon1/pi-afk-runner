@@ -422,13 +422,8 @@ describe("the reason an issue could not be worked", () => {
     expect(unworkableReason("Counted")).toBe("already counted");
   });
 
-  it("falls back to the check when the state says nothing", () => {
-    expect(unworkableReason(undefined)).toBe(
-      "check whether it is claimed by another runner, already reviewed, or already counted",
-    );
-    expect(unworkableReason("Queue")).toBe(
-      "check whether it is claimed by another runner, already reviewed, or already counted",
-    );
+  it("throws for states that are not unworkable", () => {
+    expect(() => unworkableReason("Queue")).toThrow();
   });
 });
 
