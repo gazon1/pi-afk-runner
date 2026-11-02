@@ -27,8 +27,9 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { createWriteStream } from "node:fs";
+import { createWriteStream, existsSync } from "node:fs";
 import { rm } from "node:fs/promises";
+import { resolve } from "node:path";
 import { join } from "node:path";
 
 /** Who the claim is attributed to. Part of the tag object's identity. */
@@ -953,4 +954,106 @@ export async function pushWorkBranch(
     issueNumber: options.issueNumber,
     ...(options.verify === undefined ? {} : { verify: options.verify }),
   });
+}
+
+export interface RestoredWorktree {
+  readonly problem: string | null;
+  readonly unprepared: string | null;
+}
+
+export async function restoreWorktree(
+  git: GitRunner,
+  run: CommandRunner,
+  options: {
+    readonly worktreePath: string;
+    readonly branch: string;
+    readonly remote: string;
+    readonly checkout: string;
+  },
+): Promise<RestoredWorktree> {
+  const SETUP_SCRIPT = "scripts/setup-worktree.sh";
+  const targetPath = resolve(options.worktreePath);
+  const target = {
+    worktreePath: options.worktreePath,
+    branch: options.branch,
+    remote: options.remote,
+    checkout: options.checkout,
+  };
+  const prune = async (): Promise<void> => {
+    try {
+      await git(["worktree", "prune"], { cwd: target.checkout });
+    } catch {}
+  };
+  const registered = async (): Promise<boolean> => {
+    try {
+      const list = await git(["worktree", "list", "--porcelain"], { cwd: target.checkout });
+      return list.split("\n").some((line) => {
+        if (!line.startsWith("worktree ")) return false;
+        return resolve(line.slice("worktree ".length).trim()) === targetPath;
+      });
+    } catch {
+      return false;
+    }
+  };
+  const add = async (args: readonly string[]): Promise<string | null> => {
+    try {
+      await git(args, { cwd: target.checkout });
+      return null;
+    } catch (failure) {
+      return errorMessage(failure);
+    }
+  };
+  const addBranch = (): Promise<string | null> =>
+    add(["worktree", "add", targetPath, target.branch]);
+  const addDetached = async (): Promise<string | null> => {
+    const tracking = `refs/remotes/${target.remote}/${target.branch}`;
+    await git(["fetch", target.remote, `${target.branch}:${tracking}`], {
+      cwd: target.checkout,
+    }).catch(() => {});
+    return add(["worktree", "add", "--detach", targetPath, tracking]);
+  };
+  const prepare = async (): Promise<string | null> => {
+    try {
+      await run({ command: "bash", args: [SETUP_SCRIPT], cwd: targetPath });
+      return null;
+    } catch (failure) {
+      return errorMessage(failure);
+    }
+  };
+
+  await prune();
+  if (existsSync(targetPath)) {
+    if (await registered()) {
+      return { problem: null, unprepared: null };
+    }
+    try {
+      await rm(targetPath, { recursive: true, force: true });
+    } catch {}
+    await prune();
+  }
+  const first = await addBranch();
+  if (first === null) {
+    return { problem: null, unprepared: await prepare() };
+  }
+  if (first.includes("already exists")) {
+    try {
+      await rm(targetPath, { recursive: true, force: true });
+    } catch {}
+    await prune();
+    const second = await addBranch();
+    if (second === null) {
+      return { problem: null, unprepared: await prepare() };
+    }
+  }
+  const detached = await addDetached();
+  if (detached !== null) {
+    return { problem: detached, unprepared: null };
+  }
+  return { problem: null, unprepared: await prepare() };
+}
+
+
+function errorMessage(failure: unknown): string {
+  if (failure instanceof Error) return failure.message;
+  return String(failure);
 }

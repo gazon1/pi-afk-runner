@@ -43,10 +43,8 @@ import {
   runOptionsFrom,
   type CliOptions,
 } from "./cli.js";
-import { existsSync, rmSync } from "node:fs";
-import { resolve } from "node:path";
 
-import { issueWorktreePath, runCommand, runGit, workBranch, type CommandRunner } from "./git.js";
+import { issueWorktreePath, restoreWorktree, runCommand, runGit, workBranch, type CommandRunner } from "./git.js";
 import { RUN_STATUS_ENTRY, statusFromEntries, statusLine, type RunStatus } from "./live.js";
 import { lockNameFor, takeLock } from "./lock.js";
 import {
@@ -242,14 +240,6 @@ export interface LiveDependencies {
    * gives it to the whole run.
    */
   readonly run?: CommandRunner;
-}
-
-/** What the restore of a worktree did. */
-interface Restored {
-  /** The worktree did not come back — why. */
-  readonly problem: string | null;
-  /** The worktree came back, but the repository's setup script did not run in it — why. */
-  readonly unprepared: string | null;
 }
 
 /** The run in flight, as the host session sees it. */
@@ -580,7 +570,7 @@ export function liveFrontDoor(
         if (autoAttach !== null) {
           await autoAttach;
           if (last !== null) {
-            const restored = await restoreWorktree(last);
+            const restored = await restoreWorktree(runGit, command, last);
             if (restored.problem !== null) {
               talk(
                 ctx,
@@ -708,102 +698,6 @@ export function liveFrontDoor(
    * when it made it, and preparing it again would be the runner's own step
    * done twice.
    */
-  const restoreWorktree = async (target: {
-    readonly worktreePath: string;
-    readonly branch: string;
-    readonly remote: string;
-    readonly checkout: string;
-  }): Promise<Restored> => {
-    const targetPath = resolve(target.worktreePath);
-    const prune = async (): Promise<void> => {
-      try {
-        await runGit(["worktree", "prune"], { cwd: target.checkout });
-      } catch {}
-    };
-    const registered = async (): Promise<boolean> => {
-      try {
-        const list = await runGit(["worktree", "list", "--porcelain"], { cwd: target.checkout });
-        return list.split("\n").some((line) => {
-          if (!line.startsWith("worktree ")) return false;
-          // Git prints absolute paths, so one comparison of resolved paths is
-          // the whole question.
-          return resolve(line.slice("worktree ".length).trim()) === targetPath;
-        });
-      } catch {
-        return false;
-      }
-    };
-    const add = async (args: readonly string[]): Promise<string | null> => {
-      try {
-        await runGit(args, { cwd: target.checkout });
-        return null;
-      } catch (failure) {
-        return errorMessage(failure);
-      }
-    };
-    const addBranch = (): Promise<string | null> =>
-      add(["worktree", "add", targetPath, target.branch]);
-    // A review-only run leaves a detached worktree and may have no local branch.
-    // On a single-branch clone the branch also has no remote-tracking ref, so put
-    // the chat on the fetched commit itself.
-    const addDetached = async (): Promise<string | null> => {
-      const tracking = `refs/remotes/${target.remote}/${target.branch}`;
-      await runGit(["fetch", target.remote, `${target.branch}:${tracking}`], {
-        cwd: target.checkout,
-      }).catch(() => {});
-      return add(["worktree", "add", "--detach", targetPath, tracking]);
-    };
-    /**
-     * The repository's own preparation, run from the worktree's own copy of the
-     * script — the script works on the checkout it lives in.
-     */
-    const prepare = async (): Promise<string | null> => {
-      try {
-        await command({
-          command: "bash",
-          args: [SETUP_SCRIPT],
-          cwd: targetPath,
-        });
-        return null;
-      } catch (failure) {
-        return errorMessage(failure);
-      }
-    };
-
-    await prune();
-    if (existsSync(targetPath)) {
-      if (await registered()) {
-        // It is still there, and the runner prepared it when it made it.
-        return { problem: null, unprepared: null };
-      }
-      // A directory git does not know would make `worktree add` refuse.
-      try {
-        rmSync(targetPath, { recursive: true, force: true });
-      } catch {}
-      await prune();
-    }
-    const first = await addBranch();
-    if (first === null) {
-      return { problem: null, unprepared: await prepare() };
-    }
-    if (first.includes("already exists")) {
-      // A registration prune missed: forget the tree and try once more.
-      try {
-        rmSync(targetPath, { recursive: true, force: true });
-      } catch {}
-      await prune();
-      const second = await addBranch();
-      if (second === null) {
-        return { problem: null, unprepared: await prepare() };
-      }
-    }
-    const detached = await addDetached();
-    if (detached !== null) {
-      return { problem: detached, unprepared: null };
-    }
-    return { problem: null, unprepared: await prepare() };
-  };
-
   /**
    * Open the run's session as this chat.
    *
@@ -827,7 +721,7 @@ export function liveFrontDoor(
       return;
     }
     const target = last;
-    const restored = await restoreWorktree(target);
+    const restored = await restoreWorktree(runGit, command, target);
     if (restored.problem !== null) {
       talk(
         ctx,
