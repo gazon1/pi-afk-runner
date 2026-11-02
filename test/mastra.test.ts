@@ -14,9 +14,9 @@ import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { GUARD_POLICY } from "../src/guard.js";
+import { GUARD_POLICY, matchesPattern } from "../src/guard.js";
 import { defineTool, type AnyToolSpec } from "../src/tools.js";
-import { denyReason, matchesPattern } from "../src/mastra/guard.js";
+import { denyReason } from "../src/mastra/guard.js";
 import { skillDirectories } from "../src/mastra/skills.js";
 import { createMastraAgent, systemPrompt } from "../src/mastra/agent.js";
 import { toMastraTool } from "../src/mastra/tools.js";

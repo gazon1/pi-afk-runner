@@ -17,9 +17,11 @@ import {
   runWorkSession,
   stateFailure,
   WORKFLOW_ACTIONS,
+  WORKFLOW_ERROR_CODE,
   WORKFLOW_STATES,
+  WorkflowError,
   type WorkflowState,
-} from "../src/workflow.js";
+} from "../src/workflow/index.js";
 
 /**
  * The workflow is the graph the session moves through, and the engine that
@@ -133,6 +135,24 @@ describe("the session's workflow", () => {
 
     await expect(run).rejects.toThrow("the session's turn failed");
     expect(ran).toEqual(["brief"]);
+  });
+
+  it("says which state failed, when the turn throws the graph's own error", async () => {
+    // A turn that throws the graph's own error is still a failure of that
+    // state: the phase says where it happened, and the failure underneath is
+    // what the caller is told about.
+    const inner = new Error("the provider is down");
+    const run = runStates({
+      states: [{ name: "implement", phase: "Implement", text: "the work", counts: true }],
+      run: async () => {
+        throw new WorkflowError("the provider is down", WORKFLOW_ERROR_CODE.execution, {
+          recoverable: false,
+          details: inner,
+        });
+      },
+    });
+
+    await expect(run).rejects.toThrow("the Implement phase failed: the provider is down");
   });
 
   it("comes back as a cut-off run, with the states that finished", async () => {
@@ -421,6 +441,58 @@ describe("the work session's branch", () => {
 
     expect(ran.slice(0, 2)).toEqual(["issue-body", "issue-comments"]);
   });
+
+  it("comes back as a cut-off run when the cut-off is deep in the nest", async () => {
+    // The work turns run in a workflow of their own, nested in the scope's
+    // workflow, nested in the script. A cut-off there must stop the whole
+    // run: a run that carries on past a cut-off looks like a run that worked.
+    const ran: string[] = [];
+    const result = await runWorkSession({
+      nodes: workNodes(),
+      run: async (state) => {
+        ran.push(state.name);
+        if (state.name === "implement") {
+          throw cutOffError("the run was cut off before its next turn");
+        }
+        return { state: "ok", result: "ok" };
+      },
+    });
+
+    expect(result.aborted).toBe(true);
+    expect(result.completed.map((state) => state.name)).toEqual([
+      "triage",
+      "scope",
+      "brief",
+    ]);
+    // The turns after the cut-off never ran.
+    expect(ran).toEqual(["triage", "scope", "brief", "implement"]);
+  });
+
+  it("stops the whole run when a failure is deep in the nest", async () => {
+    // The same, for a failure: the run reports the phase it failed in, and
+    // the failure underneath is the one the caller is told about.
+    const failure = new Error("the model's turn failed: the provider is down");
+    const ran: string[] = [];
+    const run = runWorkSession({
+      nodes: workNodes(),
+      run: async (state) => {
+        ran.push(state.name);
+        return state.name === "implement"
+          ? { state: "error", error: failure }
+          : { state: "ok", result: "ok" };
+      },
+    });
+
+    const thrown = await run.then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect((thrown as Error).message).toBe(
+      "the Implement phase failed: the model's turn failed: the provider is down",
+    );
+    expect(stateFailure(thrown)).toBe(failure);
+    expect(ran).toEqual(["triage", "scope", "brief", "implement"]);
+  });
 });
 
 describe("the review loop", () => {
@@ -444,6 +516,26 @@ describe("the review loop", () => {
     expect(result.stopReason).toEqual({ kind: "passed" });
     expect(result.reviews).toBe(2);
     expect(calls).toEqual(["review 1", "fix", "review 2"]);
+  });
+
+  it("does not review at all when there are no attempts", async () => {
+    // The engine's loop runs its body at least once, so the empty case is
+    // settled before the loop: no attempts, no reviews.
+    const calls: string[] = [];
+    const result = await runReviewGate({
+      attempts: 0,
+      review: async () => {
+        calls.push("review");
+        return "pass";
+      },
+      fix: async () => {
+        calls.push("fix");
+      },
+    });
+
+    expect(result.stopReason).toEqual({ kind: "failed" });
+    expect(result.reviews).toBe(0);
+    expect(calls).toEqual([]);
   });
 
   it("stops when the attempts run out", async () => {

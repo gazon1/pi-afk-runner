@@ -5,6 +5,10 @@ run**, or has to become smaller issues. Do not change any file yet.
 
 Read the brief's acceptance criteria and the code they touch.
 
+The `agent_pack_codebase` tool packs the code you name into one document:
+use it when the criteria touch several files, and read the single file with
+the workspace's own tools when they touch one.
+
 **The checkout may carry an earlier run's work.** The system prompt names the
 commits this branch has that the base does not. Judge the size of the brief,
 not of what the tree already contains: a piece already on the branch is not a

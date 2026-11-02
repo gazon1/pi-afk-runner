@@ -16,60 +16,13 @@
 
 import type { Workspace } from "@mastra/core/workspace";
 
-import { GUARD_POLICY } from "../guard.js";
+import { GUARD_POLICY, policyVerdict, type PolicyRule } from "../guard.js";
 
-/** A rule of the policy: allow, deny, or deny with a reason. */
-type Rule = "allow" | "deny" | { readonly action: "deny"; readonly reason: string };
-
-/** What a rule says about a value. */
-interface Verdict {
-  readonly denied: boolean;
-  readonly reason: string;
-}
-
-/**
- * The policy's rules for the paths, in the order they are written.
- *
- * The last matching rule wins, so the order is the policy: `*.env.example`
- * comes after `*.env.*` and undoes it for the template.
- */
-const PATH_RULES = GUARD_POLICY.path as Readonly<Record<string, Rule>>;
+/** The policy's rules for the paths, in the order they are written. */
+const PATH_RULES = GUARD_POLICY.path as Readonly<Record<string, PolicyRule>>;
 
 /** The policy's rules for the shell commands, in the order they are written. */
-const BASH_RULES = GUARD_POLICY.bash as Readonly<Record<string, Rule>>;
-
-/**
- * Whether a value matches a wildcard pattern.
- *
- * The pattern is anchored and `*` stands for anything, `/` included — the
- * guard's own wildcards, not path prefixes.
- */
-export function matchesPattern(pattern: string, value: string): boolean {
-  const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*");
-  return new RegExp(`^${escaped}$`).test(value);
-}
-
-/** The rules' verdict on a value: the last matching rule wins. */
-function decide(rules: Readonly<Record<string, Rule>>, value: string): Verdict {
-  let denied = false;
-  let reason = "";
-  for (const [pattern, rule] of Object.entries(rules)) {
-    if (!matchesPattern(pattern, value)) {
-      continue;
-    }
-    if (rule === "deny") {
-      denied = true;
-      reason = "";
-    } else if (rule === "allow") {
-      denied = false;
-      reason = "";
-    } else {
-      denied = true;
-      reason = rule.reason;
-    }
-  }
-  return { denied, reason };
-}
+const BASH_RULES = GUARD_POLICY.bash as Readonly<Record<string, PolicyRule>>;
 
 /** A string field of the call's input, when the call carries one. */
 function stringField(input: unknown, name: string): string | undefined {
@@ -90,14 +43,14 @@ function stringField(input: unknown, name: string): string | undefined {
 export function denyReason(input: unknown): string | null {
   const path = stringField(input, "path");
   if (path !== undefined) {
-    const verdict = decide(PATH_RULES, path);
+    const verdict = policyVerdict(PATH_RULES, path);
     if (verdict.denied) {
       return `Refused: ${path} is not a file the agent may read or write.`;
     }
   }
   const command = stringField(input, "command");
   if (command !== undefined) {
-    const verdict = decide(BASH_RULES, command);
+    const verdict = policyVerdict(BASH_RULES, command);
     if (verdict.denied) {
       return verdict.reason === ""
         ? `Refused: ${command} is not a command the agent may run.`

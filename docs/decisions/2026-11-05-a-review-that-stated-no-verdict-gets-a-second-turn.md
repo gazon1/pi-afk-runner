@@ -93,7 +93,7 @@ the reviewer had already judged.
 - `src/runner.ts` — the review's two states, the reminder, and the `skip` that keeps the second
   turn a second chance.
 - `src/session.ts` — the verdict tool, and the first verdict that stands.
-- `src/workflow.ts` — the `skip` the graph asks before a state runs.
+- `src/workflow/linear.ts` — the `skip` the graph asks before a state runs.
 - `2026-11-05-the-workflow-runs-the-gates.md` — the record this one follows: a gate's refusal
   comes back to the agent as a turn.
 - `2026-11-01-a-review-that-is-cut-off-stops-the-loop.md` — the other way a review ends without

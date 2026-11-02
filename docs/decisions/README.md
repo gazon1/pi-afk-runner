@@ -15,6 +15,8 @@ for the rule that the copies follow.
 
 | Decision | What it settles |
 |---|---|
+| `2026-11-07-the-repository-is-packed-for-the-agent.md` | the repository is packed for the agent with repomix: the tool that packs it, the guard's policy applied to the pack, and the scenarios that pack instead of read |
+| `2026-11-06-the-graph-runs-on-the-mastra-workflow-engine.md` | the graph runs on Mastra's workflow engine and is a set of components: the states, the tokens, the errors, the step, the straight line, the work session, the review loop — **the graph clause replaced** in `2026-11-05-pi-is-gone.md`: the graph is the engine's, and the runner's rules stay the runner's |
 | `2026-11-05-the-bound-is-one-rule.md` | the bound is one rule: one grace, one hard stop, and the run stops waiting for a child that ignores the request to stop — `gh` and `git` alike |
 | `2026-11-05-the-git-runs-through-simple-git.md` | the git runs through simple-git: the seam stays a function, the errors stay the runner's, the child git sees the whole environment, and the bound is the runner's as well as the child's |
 | `2026-11-05-the-sweep-works-several-issues-at-once.md` | the sweep works several issues at once: `--all --workers N`, the workers inside one sweep rather than several runners, the line that names its issue, and the git commands that are serialized |
@@ -24,7 +26,7 @@ for the rule that the copies follow.
 | `2026-11-05-a-review-that-stated-no-verdict-gets-a-second-turn.md` | a review that stated no verdict gets a second turn in the same session, the first verdict stands, and the second turn is skipped when the verdict is there |
 | `2026-11-05-the-workflow-runs-the-gates.md` | the workflow runs the gates and the agent does not: a refusal comes back to the agent as a turn, which gates run is the repository's own business, and the gates run with the repository's own PATH — **superseded** by `2026-11-05-a-run-gates-nothing-and-builds-nothing.md`: the gates are off by default |
 | `2026-11-05-the-command-line-is-parsed-by-citty.md` | the command line is parsed by citty: one list of flags, the usage rendered from it, and the exit code still the runner's |
-| `2026-11-05-pi-is-gone.md` | Pi is out: the SDK, the workflow engine and the permission system go, Mastra is the only engine, and the graph is the runner's own TypeScript |
+| `2026-11-05-pi-is-gone.md` | Pi is out: the SDK, the workflow engine and the permission system go, Mastra is the only engine, and the graph is the runner's own TypeScript — **the graph clause replaced** by `2026-11-06-the-graph-runs-on-the-mastra-workflow-engine.md`: the graph is the engine's, and the runner's rules stay the runner's |
 | `2026-11-05-the-runner-is-a-command-and-not-a-pi-extension.md` | the door goes: the runner is a command, and what survives of the Pi extension record — **superseded** by `2026-11-05-pi-is-gone.md`: the command stands, the version gate goes with Pi |
 | `2026-11-05-the-run-runs-on-mastra.md` | the run runs on Mastra: the agent, the graph and the memory are Mastra's, and the seams and the contract stay — **superseded** by `2026-11-05-pi-is-gone.md`: the seams stand, the graph is the runner's own |
 | `2026-11-02-the-reviewers-tree-is-put-back.md` | the review puts the worktree back to the tree it judged, so a leftover never rides along with the fix |

@@ -9,9 +9,6 @@ import {
   WORKTREE_SECTION,
   BRIEF_MARKER,
   BRIEF_SECTION,
-  ISSUE_DECISION_TOOL_NAME,
-  SCOPE_DECISION_TOOL_NAME,
-  VERDICT_TOOL_NAME,
   addUsage,
   fenceIssueBody,
   fenceIssueComments,
@@ -24,6 +21,11 @@ import {
   type AgentSession,
   type SessionFactory,
 } from "../src/session.js";
+import {
+  ISSUE_DECISION_TOOL_NAME,
+  SCOPE_DECISION_TOOL_NAME,
+  VERDICT_TOOL_NAME,
+} from "../src/decisions/index.js";
 import { assistantTextLines } from "../src/journal.js";
 import {
   DEFAULT_DEADLINE_MS,
@@ -34,7 +36,7 @@ import {
   runSummary,
 } from "../src/cli.js";
 import { budgetShares, defaultDeadlineMs } from "../src/budget.js";
-import { type StateName } from "../src/workflow.js";
+import { type StateName } from "../src/workflow/index.js";
 import { createLeftoverTool, LEFTOVER_TOOL_NAME, MAX_LEFTOVERS_PER_RUN } from "../src/leftovers.js";
 import { pullRequestArgs } from "../src/gh.js";
 import {

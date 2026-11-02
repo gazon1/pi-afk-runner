@@ -19,13 +19,14 @@
  * **The rule is a string, not a file.** The CLI's `--append-system-prompt`
  * silently ignores a missing file — measured — so a rule read from disk can
  * vanish without a word. This one is in the code, where it cannot.
+ *
+ * The tools a turn ends on are not here: they are the runner's decision tools,
+ * in `src/decisions/`.
  */
 
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-
-import { Type } from "typebox";
 
 import {
   BRIEF_MARKER,
@@ -39,19 +40,31 @@ import {
   type GhRunner,
   type IssueDetail,
 } from "./gh.js";
+import {
+  createIssueDecisionTool,
+  createRelatedDecisionTool,
+  createScopeDecisionTool,
+  type IssueDecision,
+  type ScopeDecision,
+  type ScopeSubtask,
+} from "./decisions/index.js";
 import { createLeftoverTool, normaliseTitle } from "./leftovers.js";
-import { defineTool, type ToolSpec } from "./tools.js";
+import { createPackTool } from "./packing.js";
+import { type ToolSpec } from "./tools.js";
 import {
   cutOffError,
   runStates,
   runWorkSession,
+  SCOPE_TOKEN,
   stateFailure,
+  TRIAGE_TOKEN,
   WORKFLOW_ACTIONS,
   WORKFLOW_STATES,
   type StateName,
   type StateOutcome,
+  type TriageToken,
   type WorkflowState,
-} from "./workflow.js";
+} from "./workflow/index.js";
 
 /**
  * The rule that keeps an issue body as data.
@@ -826,178 +839,6 @@ export async function runPromptArray(options: {
   }
 }
 
-/** The name of the tool the triage turn decides with. */
-export const ISSUE_DECISION_TOOL_NAME = "agent_issue_decision";
-
-/** What the triage turn decided. */
-export interface IssueDecision {
-  readonly decision: "work" | "skip";
-  readonly reason: string;
-}
-
-/**
- * The tool the triage turn ends on.
- *
- * It is the graph's first branch, and it is a **value**: the runner closes the
- * issue with the reason when the decision is `skip`, and otherwise carries on
- * to the scope turn. A triage that says nothing does not close anything.
- */
-export function createIssueDecisionTool(holder: { value?: IssueDecision }) {
-  return defineTool({
-    name: ISSUE_DECISION_TOOL_NAME,
-    label: "Decide whether the issue is worked",
-    description:
-      "Decide whether this issue should be worked at all. Call it as your last action of the " +
-      "triage turn: `work` when the brief is still worth doing, `skip` when the issue should be " +
-      "closed with the reason and the runner should move to the next one.",
-    promptSnippet: "Decide whether the issue is worked",
-    promptGuidelines: [
-      `Use ${ISSUE_DECISION_TOOL_NAME} as the triage turn's final action.`,
-      "`skip` closes the issue with the reason; the next issue in the queue is taken instead.",
-    ],
-    parameters: Type.Object({
-      decision: Type.Union([Type.Literal("work"), Type.Literal("skip")], {
-        description: "work to do the brief; skip to close the issue with the reason",
-      }),
-      reason: Type.String({
-        description:
-          "Why — one sentence a human can read. Required when the decision is skip.",
-      }),
-    }),
-    async execute(_toolCallId, params) {
-      const decision: IssueDecision = {
-        decision: params.decision,
-        reason: params.reason.trim(),
-      };
-      holder.value = decision;
-      return {
-        content: [
-          { type: "text", text: `Issue decision recorded: ${decision.decision}` },
-        ],
-        details: decision,
-      };
-    },
-  });
-}
-
-/** The name of the tool the scope turn decides with. */
-export const SCOPE_DECISION_TOOL_NAME = "agent_scope_decision";
-
-/** How many pieces a too-large issue may be split into. */
-export const MAX_SPLIT_SUBTASKS = 8;
-
-/** One piece of a split issue. */
-export interface ScopeSubtask {
-  readonly title: string;
-  /** The subtask's brief. It opens with `## Agent Brief`. */
-  readonly brief: string;
-}
-
-/** What the scope turn decided. */
-export interface ScopeDecision {
-  readonly decision: "fits" | "split";
-  readonly reason: string;
-  readonly subtasks: readonly ScopeSubtask[];
-}
-
-/** A refusal the model sees as a failed call, and why. */
-function scopeRefusal(reason: string): {
-  content: { type: "text"; text: string }[];
-  details: { decision: "fits" | "split"; reason: string; subtasks: ScopeSubtask[] };
-  isError: true;
-} {
-  return {
-    content: [{ type: "text", text: `Not recorded: ${reason}` }],
-    details: { decision: "fits", reason, subtasks: [] },
-    isError: true,
-  };
-}
-
-/**
- * The tool the scope turn ends on.
- *
- * `fits` goes on to the brief. `split` goes to the action that files the pieces
- * as issues, links them from the original and closes it. The bounds are here,
- * not in the agent: two is the smallest split that is a split, and
- * {@link MAX_SPLIT_SUBTASKS} is what keeps one issue from becoming a backlog.
- */
-export function createScopeDecisionTool(holder: { value?: ScopeDecision }) {
-  return defineTool({
-    name: SCOPE_DECISION_TOOL_NAME,
-    label: "Decide whether the issue fits one run",
-    description:
-      "Decide whether this issue fits one run, or has to be split. Call it as your last " +
-      "action of the scope turn. `fits` goes on to the brief; `split` files the subtasks as " +
-      "issues and closes this one.",
-    promptSnippet: "Decide whether the issue fits one run",
-    promptGuidelines: [
-      `Use ${SCOPE_DECISION_TOOL_NAME} as the scope turn's final action.`,
-      "`split` needs at least two and at most eight subtasks, each with a title and a brief that opens with `## Agent Brief`.",
-    ],
-    parameters: Type.Object({
-      decision: Type.Union([Type.Literal("fits"), Type.Literal("split")], {
-        description: "fits when one run can finish it; split when it has to be smaller issues",
-      }),
-      reason: Type.String({
-        description: "Why — one sentence a human can read.",
-      }),
-      subtasks: Type.Optional(
-        Type.Array(
-          Type.Object({
-            title: Type.String({ description: "The subtask's title — one line." }),
-            brief: Type.String({
-              description:
-                "The subtask's brief, in the target repository's format: it opens with " +
-                "`## Agent Brief` and carries the behaviour, the criteria and what is out of scope.",
-            }),
-          }),
-          {
-            description:
-              "For `split`: at least two and at most eight subtasks, in the order they must run.",
-          },
-        ),
-      ),
-    }),
-    async execute(_toolCallId, params) {
-      const subtasks = params.subtasks ?? [];
-      const reason = params.reason.trim();
-      if (params.decision === "split") {
-        if (subtasks.length < 2) {
-          return scopeRefusal("a split needs at least two subtasks");
-        }
-        if (subtasks.length > MAX_SPLIT_SUBTASKS) {
-          return scopeRefusal(
-            `a split is bounded at ${MAX_SPLIT_SUBTASKS} subtasks — this one has ${subtasks.length}`,
-          );
-        }
-        const notABrief = subtasks.find(
-          (task) => !task.brief.trimStart().startsWith(BRIEF_MARKER),
-        );
-        if (notABrief !== undefined) {
-          return scopeRefusal(
-            `the subtask "${notABrief.title}" does not open with \`${BRIEF_MARKER}\``,
-          );
-        }
-        if (subtasks.some((task) => task.title.trim() === "")) {
-          return scopeRefusal("every subtask needs a title");
-        }
-      }
-      const decision: ScopeDecision = {
-        decision: params.decision,
-        reason,
-        subtasks: params.decision === "split" ? subtasks : [],
-      };
-      holder.value = decision;
-      return {
-        content: [
-          { type: "text", text: `Scope decision recorded: ${decision.decision}` },
-        ],
-        details: decision,
-      };
-    },
-  });
-}
-
 /**
  * File an issue's pieces, link them from the original, and close it.
  *
@@ -1075,7 +916,7 @@ export async function splitIssue(options: {
 /** What a work session decided to do with its issue. */
 export interface WorkSessionResult extends PromptArrayResult {
   /** Whether the issue was worked, closed as not needed, or split. */
-  readonly decision: "work" | "skip" | "split";
+  readonly decision: TriageToken | typeof SCOPE_TOKEN.split;
   /** The reason the triage or scope turn gave. */
   readonly reason: string;
   /**
@@ -1170,15 +1011,17 @@ export async function startAgent(options: {
       [BRIEF_SECTION]: briefRule(brief),
       [WORKTREE_SECTION]: worktreeRule(options.worktree),
     },
-    // The three tools the work session carries: the triage's decision, the
-    // scope's decision, and the leftover the fourth turn files. The runner
-    // performs the decisions' effects, not the agent: closing an issue,
-    // splitting one and filing a leftover are the runner's writes, and the
-    // bounds on them are the runner's to hold.
+    // The tools the work session carries: the triage's decision, the scope's
+    // decision, the leftover the fourth turn files, and the pack that hands
+    // the agent the repository as one document. The runner performs the
+    // decisions' effects, not the agent: closing an issue, splitting one and
+    // filing a leftover are the runner's writes, and the bounds on them are
+    // the runner's to hold.
     tools: [
       createIssueDecisionTool(triage),
       createScopeDecisionTool(scope),
       createLeftoverTool({ repo: options.repo, gh }),
+      createPackTool({ cwd: options.cwd }),
       ...(options.batchRelated === true
         ? [createRelatedDecisionTool(related)]
         : []),
@@ -1203,10 +1046,10 @@ export async function startAgent(options: {
     // scope that said nothing treats the issue as one run's work.
     after: (state) => {
       if (state.name === "triage") {
-        return triage.value?.decision ?? "work";
+        return triage.value?.decision ?? TRIAGE_TOKEN.work;
       }
       if (state.name === "scope") {
-        return scope.value?.decision ?? "fits";
+        return scope.value?.decision ?? SCOPE_TOKEN.fits;
       }
       return "ok";
     },
@@ -1239,121 +1082,17 @@ export async function startAgent(options: {
   });
 
   const decision =
-    triage.value?.decision === "skip"
-      ? "skip"
-      : scope.value?.decision === "split"
-        ? "split"
-        : "work";
+    triage.value?.decision === TRIAGE_TOKEN.skip
+      ? TRIAGE_TOKEN.skip
+      : scope.value?.decision === SCOPE_TOKEN.split
+        ? SCOPE_TOKEN.split
+        : TRIAGE_TOKEN.work;
   const reason =
-    triage.value?.decision === "skip"
+    triage.value?.decision === TRIAGE_TOKEN.skip
       ? triage.value.reason
-      : scope.value?.decision === "split"
+      : scope.value?.decision === SCOPE_TOKEN.split
         ? scope.value.reason
         : "";
   return { ...result, decision, reason, issue };
 }
 
-/** The name of the tool the related-issues turn ends on. */
-export const RELATED_DECISION_TOOL_NAME = "agent_related_decision";
-
-/** What the related-issues turn decided to batch. */
-export interface RelatedDecision {
-  readonly batch: readonly number[];
-}
-
-/**
- * The tool the related-issues turn ends on.
- *
- * It names the issues the agent will fold into this run's change. An empty
- * list means the issue stands alone. The runner records the choice; the work
- * itself — addressing every batched issue's criteria in one diff — is the
- * agent's.
- */
-export function createRelatedDecisionTool(holder: { value?: RelatedDecision }) {
-  return defineTool({
-    name: RELATED_DECISION_TOOL_NAME,
-    label: "Decide which related issues to batch",
-    description:
-      "Decide which related ready-for-agent issues this run will work together with the " +
-      "current one. Call it as your last action of the related turn. An empty list means " +
-      "the issue stands alone.",
-    promptSnippet: "Decide which related issues to batch",
-    promptGuidelines: [
-      `Use ${RELATED_DECISION_TOOL_NAME} as the related turn's final action.`,
-      "List only issues whose criteria this run will actually address in the same change.",
-    ],
-    parameters: Type.Object({
-      batch: Type.Array(Type.Number(), {
-        description: "Issue numbers to fold into this run's change. Empty when solo.",
-      }),
-    }),
-    async execute(_toolCallId, params) {
-      const batch = params.batch.filter((n) => Number.isInteger(n) && n > 0);
-      const decision: RelatedDecision = { batch };
-      holder.value = decision;
-      return {
-        content: [{ type: "text", text: `Related decision recorded: ${batch.join(", ") || "solo"}` }],
-        details: decision,
-      };
-    },
-  });
-}
-
-/** The name of the tool the reviewer ends its turn with. */
-export const VERDICT_TOOL_NAME = "agent_review_verdict";
-
-/** What a review says. */
-export interface ReviewVerdict {
-  readonly verdict: "pass" | "fail";
-  readonly findings: readonly string[];
-}
-
-/**
- * The tool a review ends on.
- *
- * It is a **terminating** tool: the turn ends on the call, so the review does
- * not pay for another model turn to say what it already said. The verdict is
- * a value the runner reads, not a sentence it has to parse out of prose.
- */
-export function createVerdictTool(holder: { value?: ReviewVerdict }) {
-  return defineTool({
-    name: VERDICT_TOOL_NAME,
-    label: "Agent review verdict",
-    description:
-      "End the review with its verdict. Use this as your last action: it states whether " +
-      "the review found something that blocks the change, and what it found.",
-    promptSnippet: "End the review with its verdict",
-    promptGuidelines: [
-      `Use ${VERDICT_TOOL_NAME} as your final action, with the verdict you reached.`,
-      "After calling it, do not write another assistant message in the same turn.",
-    ],
-    parameters: Type.Object({
-      verdict: Type.Union([
-        Type.Literal("pass"),
-        Type.Literal("fail"),
-      ], { description: "pass when nothing blocks the change, fail when something does" }),
-      findings: Type.Array(Type.String(), {
-        description: "What the review found, one finding per entry. Empty when it passed.",
-      }),
-    }),
-    async execute(_toolCallId, params) {
-      const verdict: ReviewVerdict = {
-        verdict: params.verdict,
-        findings: params.findings,
-      };
-      // The first verdict stands. A review that ends on the tool and then gets
-      // asked for the verdict again must not change what it already decided:
-      // the review is one verdict, and the comment the runner posts is one.
-      holder.value ??= verdict;
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Review recorded: ${params.verdict}`,
-          },
-        ],
-        details: verdict,
-      };
-    },
-  });
-}

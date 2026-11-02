@@ -14,6 +14,8 @@ whose, and the runner does not read it. A stash of your own, for your own
 reasons, is yours to keep; the work is not in it.
 
 1. **Read the diff.** `git diff main...HEAD`. Every line of it is yours now.
+   The code around it is in the tree: the `agent_pack_codebase` tool packs the
+   part the diff touches into one document.
 
 2. **Check it against the brief's acceptance criteria.** One by one. Not "does
    it look right" — does *this* criterion hold, and can you show it?
