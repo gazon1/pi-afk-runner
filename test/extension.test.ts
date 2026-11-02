@@ -18,6 +18,7 @@ import {
   LOG_KEY,
   STATUS_KEY,
   boundaryOf,
+  isStaleContext,
   deliverRow,
   liveFrontDoor,
   hostModel,
@@ -1217,5 +1218,18 @@ describe("the guard's policy", () => {
       process.chdir(previous);
       await rm(layout, { recursive: true, force: true });
     }
+  });
+});
+
+describe("a gone session is recognised by the host's wording", () => {
+  it("is stale for the host's gone-session message", () => {
+    const failure = new Error(
+      "This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload().",
+    );
+    expect(isStaleContext(failure)).toBe(true);
+  });
+
+  it("is not stale for any other failure", () => {
+    expect(isStaleContext(new Error("widget exploded"))).toBe(false);
   });
 });
