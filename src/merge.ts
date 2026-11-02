@@ -89,15 +89,7 @@ export const MERGE_PROMPT = [
   "1. Resolve every conflict. Read both sides: keep what each was trying to do,",
   "   do not drop one side to make the merge quiet.",
   "",
-  "2. Run the repository's gate:",
-  "",
-  "   ```bash",
-  `   ${GATE_SCRIPT}`,
-  "   ```",
-  "",
-  "   Fix what it reports. A gate that fails is the merge not being finished.",
-  "",
-  "3. Leave the tree with no conflict markers and the gate green. Do not commit,",
+  "2. Leave the tree with no conflict markers. Do not commit,",
   "   do not push: the pipeline commits and pushes so the push stays under its",
   "   control.",
   "",
@@ -531,10 +523,34 @@ async function verifyGate(
     if (left() <= 0) {
       throw failure;
     }
+    const output =
+      failure instanceof CommandFailed
+        ? [failure.stdout, failure.stderr].filter((part) => part.trim() !== "").join("\n")
+        : String(failure);
+    const prompt = [
+      "A pull request branch was brought up to date with its base, and the",
+      "repository's gate failed on the resulting tree. Fix it.",
+      "",
+      "The gate run failed with this output:",
+      "",
+      "```",
+      output,
+      "```",
+      "",
+      "1. Fix what the gate reports. Do not run the gate yourself.",
+      "",
+      "2. Leave the tree with no conflict markers. Do not commit, do not push:",
+      "   the pipeline commits and pushes so the push stays under its control.",
+      "",
+      "   **The fix stays in the tree while this turn runs.** The pipeline keeps",
+      "   the tree and commits it. A stash is not part of what the pipeline",
+      "   commits.",
+    ].join("\n");
     await resolveWithAgent(
       options,
       worktreePath,
       budgetShares(remainingMs()).sessionMs,
+      prompt,
     );
     await run();
     return "passed after the agent's fix";
@@ -552,6 +568,7 @@ async function resolveWithAgent(
   options: MergeOptions,
   worktreePath: string,
   deadlineMs: number,
+  prompt: string = MERGE_PROMPT,
 ): Promise<void> {
   const session = await options.session({
     cwd: worktreePath,
@@ -559,7 +576,7 @@ async function resolveWithAgent(
   });
   const result = await runPromptArray({
     session,
-    prompts: [MERGE_PROMPT],
+    prompts: [prompt],
     // The resolution is one state: the conflict, resolved in one turn.
     states: [{ name: "resolve", phase: "Resolve" }],
     deadlineMs,
