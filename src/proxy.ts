@@ -18,15 +18,27 @@ import {
   fetch as undiciFetch,
   getGlobalDispatcher,
   setGlobalDispatcher,
+  type Dispatcher,
 } from "undici";
 
 /**
- * The dispatcher the SDK's fetch used before the runner changed it.
+ * The dispatcher as it was before the runner changed it.
  *
  * It is the way back: a model without a proxy of its own goes through the
  * host's own proxy, or through no proxy at all.
+ *
+ * It is remembered when the runner first changes the dispatcher, not when this
+ * module is loaded: the SDK installs a dispatcher of its own, and that one is
+ * the one to go back to.
  */
-const original = getGlobalDispatcher();
+let untouched: Dispatcher | undefined;
+
+/** Remember the dispatcher as it is now, so that it can be given back. */
+function remember(): void {
+  if (untouched === undefined) {
+    untouched = getGlobalDispatcher();
+  }
+}
 
 /** The proxy the environment names, when it names one. */
 export function proxyFromEnvironment(env: NodeJS.ProcessEnv = process.env): string | undefined {
@@ -48,14 +60,20 @@ export function proxyFromEnvironment(env: NodeJS.ProcessEnv = process.env): stri
  */
 export function useProxy(proxy: string | undefined, env: NodeJS.ProcessEnv = process.env): boolean {
   if (proxy !== undefined) {
+    remember();
     setGlobalDispatcher(new ProxyAgent(proxy));
     globalThis.fetch = undiciFetch as typeof globalThis.fetch;
     return true;
   }
   if (proxyFromEnvironment(env) === undefined) {
-    setGlobalDispatcher(original);
+    // No proxy at all: the dispatcher that was there before the runner
+    // changed it is the one that stays.
+    if (untouched !== undefined) {
+      setGlobalDispatcher(untouched);
+    }
     return false;
   }
+  remember();
   setGlobalDispatcher(new EnvHttpProxyAgent());
   globalThis.fetch = undiciFetch as typeof globalThis.fetch;
   return true;

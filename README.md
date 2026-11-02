@@ -300,6 +300,23 @@ are the steps, `75` says another runner holds the lock and `76` says the lock co
 that stopped at the gates leaves `45`, so a red gate is not read as an issue that could not be worked.
 The unit and the codes are in [systemd/](systemd/README.md).
 
+A finished run ends with a **summary** — the facts a reader wants, one per line, because a journal
+reads lines and a table wraps:
+
+```
+issue 42 — Fix the thing
+pull request: #1040
+review: pass
+duration: 3m 12s
+tokens: 12345
+cost: $0.42
+record: /path/to/the/checkout/build/diagnostics/issue-42/2026-10-30T09-00-00-000Z-abcdef12.md
+```
+
+The tokens and the cost are **absent** when the provider reported none — a zero is a number, and a
+number a reader would trust. With `--all`, every issue gets one line and the sweep ends with its
+total.
+
 The lock is a real `flock`, held for the whole run: a lock file a killed runner leaves behind would
 block the next one for ever, and a marker is not a lock — adding a label is idempotent. It is **per
 issue**: `--issue <N>` takes `issue-<N>.lock`, so several runners may work different issues on one

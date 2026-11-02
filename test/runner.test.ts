@@ -12,6 +12,7 @@ import {
   ISSUE_DECISION_TOOL_NAME,
   SCOPE_DECISION_TOOL_NAME,
   VERDICT_TOOL_NAME,
+  addUsage,
   fenceIssueBody,
   fenceIssueComments,
   findBrief,
@@ -20,14 +21,18 @@ import {
   runPromptArray,
   splitIssue,
   startAgent,
+  usageFromMessage,
   type AgentSession,
   type SessionFactory,
 } from "../src/session.js";
 import {
   assistantTextLines,
   DEFAULT_DEADLINE_MS,
+  formatCost,
+  formatDuration,
   repoFromRemoteUrl,
   resolveRepo,
+  runSummary,
 } from "../src/cli.js";
 import { budgetShares } from "../src/budget.js";
 import { type StateName } from "../src/workflow.js";
@@ -425,13 +430,58 @@ describe("the reason an issue could not be worked", () => {
     expect(unworkableReason("Counted")).toBe("already counted");
   });
 
-  it("falls back to the check when the state says nothing", () => {
-    expect(unworkableReason(undefined)).toBe(
-      "check whether it is claimed by another runner, already reviewed, or already counted",
-    );
-    expect(unworkableReason("Queue")).toBe(
-      "check whether it is claimed by another runner, already reviewed, or already counted",
-    );
+  it("throws for states that are not unworkable", () => {
+    expect(() => unworkableReason("Queue")).toThrow();
+  });
+
+  it("says that the issue waits for a parent that has not landed", async () => {
+    // The named issue waits: its parent is open and nothing of the parent's
+    // work has landed.
+    const gh = async (args: readonly string[]): Promise<string> => {
+      if (args[0] === "issue" && args[1] === "view" && args[2] === "2") {
+        return JSON.stringify({ closedByPullRequestsReferences: [] });
+      }
+      if (args[0] === "issue" && args[1] === "view") {
+        return JSON.stringify({
+          body: "**Depends on:** #2",
+          comments: [],
+          state: "OPEN",
+          title: "the child",
+          updatedAt: "2026-11-02T08:00:00Z",
+          labels: [],
+        });
+      }
+      if (args[0] === "pr" && args[1] === "list") {
+        return "[]";
+      }
+      return "";
+    };
+
+    const result = await runOnce({
+      repo: "gazon1/sing",
+      issueNumber: 42,
+      checkout: "/tmp/does-not-matter",
+      remote: "origin",
+      baseBranch: "main",
+      worktreeRoot: "/tmp/does-not-matter",
+      git: async () => "",
+      gh,
+      run: async () => "",
+      session: async () => {
+        throw new Error("the run should not have reached a session");
+      },
+      deadlineMs: 60_000,
+      staleAfterMs: 60_000,
+      now: new Date("2026-11-02T09:00:00Z"),
+    });
+
+    expect(result.outcome).toBe("unworkable");
+    if (result.outcome !== "unworkable") {
+      throw new Error("the issue was not unworkable");
+    }
+    // The reason is the parent, not a guess about the state.
+    expect(result.reason).toContain("#2");
+    expect(result.blockedBy).toEqual([2]);
   });
 });
 
@@ -1422,6 +1472,46 @@ describe("the agent's session", () => {
     expect(prompts[1]).toContain("agent_scope_decision");
     expect(promptsDirectory()).toContain("prompts");
   });
+
+  it("reads the tokens and the cost off a message", () => {
+    // The provider's numbers ride on the assistant message that the session's
+    // events carry — the same `message_end` event the CLI already handles.
+    expect(
+      usageFromMessage({
+        role: "assistant",
+        usage: { totalTokens: 100, cost: { total: 0.1 } },
+      }),
+    ).toEqual({ totalTokens: 100, cost: 0.1 });
+    // A provider that says nothing about its tokens has nothing to report:
+    // a zero is a number, and a number a reader would trust.
+    expect(
+      usageFromMessage({
+        role: "assistant",
+        usage: { totalTokens: 0, cost: { total: 0 } },
+      }),
+    ).toBeUndefined();
+    expect(usageFromMessage({ role: "assistant" })).toBeUndefined();
+    expect(usageFromMessage(undefined)).toBeUndefined();
+    // And a cost is reported only when a provider reported one.
+    expect(
+      usageFromMessage({ role: "assistant", usage: { totalTokens: 10 } }),
+    ).toEqual({ totalTokens: 10 });
+  });
+
+  it("adds two runs' usage", () => {
+    // The work session's cost and the review's, added up.
+    expect(addUsage({ totalTokens: 100, cost: 0.5 }, { totalTokens: 20, cost: 0.1 })).toEqual({
+      totalTokens: 120,
+      cost: 0.6,
+    });
+    // A cost one of them did not report is still a cost.
+    expect(addUsage({ totalTokens: 100 }, { totalTokens: 20, cost: 0.1 })).toEqual({
+      totalTokens: 120,
+      cost: 0.1,
+    });
+    // And two runs that reported nothing have no usage to add.
+    expect(addUsage(undefined, undefined)).toBeUndefined();
+  });
 });
 
 describe("the fixes", () => {
@@ -1781,6 +1871,50 @@ describe("the pull request", () => {
 });
 
 describe("the review", () => {
+  /**
+   * A `git` that answers the tree questions the review asks, and remembers
+   * what it was told.
+   *
+   * The review reads the head and the branch before its session and puts the
+   * worktree back to the tree it judged afterwards, so a fake that says
+   * nothing but the head and the branch is enough.
+   *
+   * The branch is a queue: the first answer is the branch before the session
+   * and the second the branch after it, so a fake can say that the reviewer
+   * left another branch checked out.
+   */
+  function stubGit(
+    calls: string[] = [],
+    options: {
+      /** The branch the worktree is on, before the session and after it. */
+      readonly branches?: readonly (string | null)[];
+      /** The command that fails, when one does. */
+      readonly fails?: string;
+    } = {},
+  ): (
+    args: readonly string[],
+    options: { readonly cwd: string },
+  ) => Promise<string> {
+    const branches = options.branches ?? ["agent/issue-42", "agent/issue-42"];
+    let asked = 0;
+    return async (args) => {
+      const command = `git ${args.join(" ")}`;
+      calls.push(command);
+      if (options.fails !== undefined && command === options.fails) {
+        throw new CommandFailed(128, "git", args, "", "fatal: the tree is not there");
+      }
+      if (args[0] === "rev-parse" && args[1] === "--abbrev-ref") {
+        const branch = branches[Math.min(asked, branches.length - 1)] ?? null;
+        asked += 1;
+        return branch === null ? "HEAD\n" : `${branch}\n`;
+      }
+      if (args[0] === "rev-parse") {
+        return "abc1234\n";
+      }
+      return "";
+    };
+  }
+
   it("test_the_review_comment_opens_with_the_marker", () => {
     const comment = reviewCommentBody({ verdict: "pass" });
 
@@ -1868,6 +2002,7 @@ describe("the review", () => {
       factory: factory as never,
       gh,
       run: async () => "",
+      git: stubGit(),
       deadlineMs: 60_000,
     });
 
@@ -1915,6 +2050,7 @@ describe("the review", () => {
       factory: factory as never,
       gh,
       run: async () => "",
+      git: stubGit(),
       deadlineMs: 60_000,
     });
 
@@ -1924,6 +2060,259 @@ describe("the review", () => {
 
     // One comment, and no second one: a `fail` is not a retry.
     expect(calls.filter((call) => call.startsWith("gh pr comment"))).toHaveLength(1);
+  });
+
+  it("test_the_review_puts_the_worktree_back_to_the_tree_it_judged", async () => {
+    // The reviewer works in the worktree, and whatever it leaves behind stays
+    // in the tree. The tree the reviewer judged is the tree that is pushed,
+    // so the worktree goes back to it — the same restore the gates use.
+    const calls: string[] = [];
+    const factory = async (options: {
+      tools?: readonly unknown[];
+    }): Promise<AgentSession> => ({
+      async prompt() {
+        calls.push("the review's session");
+        const tool = options.tools?.[0] as {
+          execute: (id: string, params: unknown) => Promise<unknown>;
+        };
+        await tool.execute("call-1", { verdict: "pass", findings: [] });
+      },
+      async abort() {},
+      dispose() {},
+    });
+
+    await reviewPullRequest({
+      repo: "gazon1/sing",
+      pullRequest: 1040,
+      cwd: "/tmp/does-not-matter",
+      factory: factory as never,
+      gh: async () => "",
+      run: async () => "",
+      git: stubGit(calls),
+      deadlineMs: 60_000,
+    });
+
+    // The head is read before the session, and the tree is put back to it
+    // afterwards: a restore that ran first would put back a tree the review
+    // had not judged yet.
+    const at = (prefix: string): number =>
+      calls.findIndex((call) => call.startsWith(prefix));
+    expect(at("git rev-parse HEAD")).toBeGreaterThanOrEqual(0);
+    expect(at("git rev-parse HEAD")).toBeLessThan(at("the review's session"));
+    expect(at("git reset --hard abc1234")).toBeGreaterThan(at("the review's session"));
+    expect(at("git clean -fd")).toBeGreaterThan(at("the review's session"));
+  });
+
+  it("test_the_review_puts_the_worktree_back_even_when_its_session_fails", async () => {
+    // A session that failed still leaves what it left behind: the tree goes
+    // back to the tree the reviewer judged. Without the restore the leftover
+    // would ride along with the fix that follows it, and a fix that changed
+    // nothing would look like a fix that changed something.
+    const calls: string[] = [];
+    const factory = async (): Promise<AgentSession> => ({
+      async prompt() {
+        calls.push("the review's session");
+        throw new Error("the session died");
+      },
+      async abort() {},
+      dispose() {},
+    });
+
+    await expect(
+      reviewPullRequest({
+        repo: "gazon1/sing",
+        pullRequest: 1040,
+        cwd: "/tmp/does-not-matter",
+        factory: factory as never,
+        gh: async () => "",
+        run: async () => "",
+        git: stubGit(calls),
+        deadlineMs: 60_000,
+      }),
+    ).rejects.toThrow("the session died");
+
+    // The tree went back after the session, not before it.
+    const at = (prefix: string): number =>
+      calls.findIndex((call) => call.startsWith(prefix));
+    expect(at("git reset --hard abc1234")).toBeGreaterThan(at("the review's session"));
+    expect(at("git clean -fd")).toBeGreaterThan(at("the review's session"));
+  });
+
+  it("test_a_tree_that_could_not_be_put_back_says_so", async () => {
+    // A tree that cannot be put back is a tree that cannot be pushed, and the
+    // review goes with it. The failure says that in the runner's own words:
+    // git's own message says nothing about the review.
+    const factory = async (options: {
+      tools?: readonly unknown[];
+    }): Promise<AgentSession> => ({
+      async prompt() {
+        const tool = options.tools?.[0] as {
+          execute: (id: string, params: unknown) => Promise<unknown>;
+        };
+        await tool.execute("call-1", { verdict: "pass", findings: [] });
+      },
+      async abort() {},
+      dispose() {},
+    });
+
+    await expect(
+      reviewPullRequest({
+        repo: "gazon1/sing",
+        pullRequest: 1040,
+        cwd: "/tmp/does-not-matter",
+        factory: factory as never,
+        gh: async () => "",
+        run: async () => "",
+        git: stubGit([], { fails: "git reset --hard abc1234" }),
+        deadlineMs: 60_000,
+      }),
+    ).rejects.toThrow("the review's tree could not be put back");
+  });
+
+  it("test_a_failed_session_and_a_tree_that_could_not_be_put_back_are_named_together", async () => {
+    // The two failures are one failure: the review did not happen, and the
+    // tree it did not judge is not back either. A reader who has one of them
+    // would not know of the other.
+    const factory = async (): Promise<AgentSession> => ({
+      async prompt() {
+        throw new Error("the session died");
+      },
+      async abort() {},
+      dispose() {},
+    });
+
+    await expect(
+      reviewPullRequest({
+        repo: "gazon1/sing",
+        pullRequest: 1040,
+        cwd: "/tmp/does-not-matter",
+        factory: factory as never,
+        gh: async () => "",
+        run: async () => "",
+        git: stubGit([], { fails: "git reset --hard abc1234" }),
+        deadlineMs: 60_000,
+      }),
+    ).rejects.toThrow(/the review's session failed .*could not be put back/);
+  });
+
+  it("test_the_review_does_not_move_a_branch_the_reviewer_checked_out", async () => {
+    // The reviewer works in the worktree, on the branch the run made. A
+    // reviewer that checked out another branch would have that branch moved by
+    // a plain reset — a branch the review never judged, and one that is not
+    // the runner's to move.
+    const fixture = await createFixtureRepository();
+    try {
+      const git = async (args: readonly string[], options: { readonly cwd: string }) =>
+        gitOutput(args, { cwd: options.cwd, env: fixture.env });
+      const base = await gitOutput(["rev-parse", "main"], {
+        cwd: fixture.repo,
+        env: fixture.env,
+      });
+      const worktreePath = join(fixture.root, "worktree");
+      await addWorktree(git, fixture.repo, {
+        path: worktreePath,
+        branch: "agent/issue-42",
+        baseSha: base,
+      });
+      // A branch of somebody else's, with a commit of its own: a branch that
+      // moved would show it.
+      await git(["commit", "-q", "--allow-empty", "-m", "somebody else's commit"], {
+        cwd: fixture.repo,
+      });
+      const foreign = await gitOutput(["rev-parse", "HEAD"], {
+        cwd: fixture.repo,
+        env: fixture.env,
+      });
+      await git(["branch", "somebody-elses-branch", foreign], { cwd: fixture.repo });
+
+      const factory = async (options: {
+        tools?: readonly unknown[];
+      }): Promise<AgentSession> => ({
+        async prompt() {
+          await git(["checkout", "somebody-elses-branch"], { cwd: worktreePath });
+          const tool = options.tools?.[0] as {
+            execute: (id: string, params: unknown) => Promise<unknown>;
+          };
+          await tool.execute("call-1", { verdict: "pass", findings: [] });
+        },
+        async abort() {},
+        dispose() {},
+      });
+
+      await reviewPullRequest({
+        repo: "gazon1/sing",
+        pullRequest: 1040,
+        cwd: worktreePath,
+        factory: factory as never,
+        gh: async () => "",
+        run: async () => "",
+        git,
+        deadlineMs: 60_000,
+      });
+
+      // The branch the review judged is where it was, and the worktree is on
+      // it again.
+      expect(
+        await gitOutput(["rev-parse", "--abbrev-ref", "HEAD"], {
+          cwd: worktreePath,
+          env: fixture.env,
+        }),
+      ).toBe("agent/issue-42");
+      expect(
+        await gitOutput(["rev-parse", "agent/issue-42"], { cwd: fixture.repo, env: fixture.env }),
+      ).toBe(base);
+      // And the branch the reviewer checked out did not move.
+      expect(
+        await gitOutput(["rev-parse", "somebody-elses-branch"], {
+          cwd: fixture.repo,
+          env: fixture.env,
+        }),
+      ).toBe(foreign);
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("test_the_review_moves_the_branch_it_judged_when_the_reviewer_detached_the_worktree", async () => {
+    // A reviewer that detached the worktree left the branch the review judged
+    // where it was — and a plain reset would not move it back, so a commit the
+    // reviewer made on it would stay on the branch. The branch the review
+    // judged is moved by name, and the worktree goes back onto it.
+    const calls: string[] = [];
+    const factory = async (options: {
+      tools?: readonly unknown[];
+    }): Promise<AgentSession> => ({
+      async prompt() {
+        calls.push("the review's session");
+        const tool = options.tools?.[0] as {
+          execute: (id: string, params: unknown) => Promise<unknown>;
+        };
+        await tool.execute("call-1", { verdict: "pass", findings: [] });
+      },
+      async abort() {},
+      dispose() {},
+    });
+
+    await reviewPullRequest({
+      repo: "gazon1/sing",
+      pullRequest: 1040,
+      cwd: "/tmp/does-not-matter",
+      factory: factory as never,
+      gh: async () => "",
+      run: async () => "",
+      // The worktree is on the branch before the session and detached after it.
+      git: stubGit(calls, { branches: ["agent/issue-42", null] }),
+      deadlineMs: 60_000,
+    });
+
+    const at = (prefix: string): number =>
+      calls.findIndex((call) => call.startsWith(prefix));
+    expect(at("git branch --force agent/issue-42 abc1234")).toBeGreaterThan(
+      at("the review's session"),
+    );
+    expect(at("git checkout --force agent/issue-42")).toBeGreaterThan(
+      at("the review's session"),
+    );
   });
 
   it("test_the_runner_makes_no_bare_ci_claim", async () => {
@@ -2071,6 +2460,7 @@ describe("the review", () => {
           verdict: "ci.yml  run 39888579980  failure  https://github.com/gazon1/sing/actions/runs/39888579980",
           exit: 1,
         }),
+      git: stubGit(),
       deadlineMs: 60_000,
     });
 
@@ -2101,6 +2491,7 @@ describe("the review", () => {
       factory: factory as never,
       gh: async () => "",
       run: async () => "",
+      git: stubGit(),
       deadlineMs: 60_000,
       issue: {
         title: "an issue",
@@ -2164,6 +2555,7 @@ describe("the review", () => {
       factory: factory as never,
       gh,
       run: async () => "",
+      git: stubGit(),
       deadlineMs: 60_000,
     });
 
@@ -2590,7 +2982,7 @@ describe("the CLI's run", () => {
         return JSON.stringify({
           body: "**What this is:** the work\n\n**Fix:** 1. do it",
           comments: [{ body: "a comment" }],
-          title: "an issue",
+          title: issue?.title ?? "an issue",
           labels: [],
           updatedAt: "",
           state: issue?.state ?? "OPEN",
@@ -3319,6 +3711,11 @@ describe("the CLI's run", () => {
     // The fix session changed nothing: the branch's head did not move. There
     // is nothing to push and nothing to review again — the loop stops, and
     // the run says why.
+    //
+    // The reviewer leaves a note behind, because that is the case the
+    // comparison has to survive: a leftover in the tree would be swept into
+    // the fix's commit, the head would move, and an empty fix would look like
+    // a real one.
     const fixture = await fixtureWithSetupScript();
     try {
       const { gh, calls } = stubGh([{ number: 42, title: "an issue" }]);
@@ -3337,6 +3734,8 @@ describe("the CLI's run", () => {
             reviews += 1;
             return {
               async prompt() {
+                // The reviewer leaves a note of its own.
+                await writeFile(join(cwd, "review-note.md"), "a note\n", "utf8");
                 const tool = tools?.[0] as unknown as {
                   execute: (id: string, params: unknown) => Promise<unknown>;
                 };
@@ -3404,6 +3803,9 @@ describe("the CLI's run", () => {
       ).split("\n");
       expect(files).toContain("work.txt");
       expect(files).not.toContain("fix.txt");
+      // And the reviewer's note is not there either: the review put the tree
+      // back to the tree it judged, so the note was never committed.
+      expect(files).not.toContain("review-note.md");
 
       // The branch carries the work and nothing else: the fix was not
       // committed and not pushed.
@@ -3420,6 +3822,87 @@ describe("the CLI's run", () => {
         })
       ).trim();
       expect(commits).toBe("1");
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("test_the_reviewers_leftover_never_rides_along_with_the_fix", async () => {
+    // The reviewer works in the worktree, and whatever it leaves behind — a
+    // note, a scratch file — stays in the tree. The runner's own commits are
+    // made with `git add -A`: the leftover would go to the remote with the
+    // fix that follows it.
+    //
+    // The tree the reviewer judged is the tree that is pushed, so the
+    // leftover never reaches the branch.
+    const fixture = await fixtureWithSetupScript();
+    try {
+      const { gh } = stubGh([{ number: 42, title: "an issue" }]);
+      let reviews = 0;
+
+      await runOnce({
+        ...runOptions(fixture, gh),
+        session: async ({ cwd, tools }) => {
+          if (isReviewer(tools)) {
+            reviews += 1;
+            return {
+              async prompt() {
+                // The reviewer leaves a note of its own.
+                await writeFile(join(cwd, "review-note.md"), "a note\n", "utf8");
+                const tool = tools?.[0] as unknown as {
+                  execute: (id: string, params: unknown) => Promise<unknown>;
+                };
+                // The first review finds something, so the fix runs; the
+                // second one passes.
+                await tool.execute(
+                  "call-1",
+                  reviews === 1
+                    ? { verdict: "fail", findings: ["the fix is missing"] }
+                    : { verdict: "pass", findings: [] },
+                );
+              },
+              async abort() {},
+              dispose: () => {},
+            };
+          }
+          // The fix session is the one without tools.
+          if (tools === undefined) {
+            return {
+              async prompt() {
+                await writeFile(join(cwd, "fix.txt"), "the fix\n", "utf8");
+              },
+              async abort() {},
+              dispose: () => {},
+            };
+          }
+          return {
+            async prompt() {
+              await writeFile(join(cwd, "work.txt"), "the work\n", "utf8");
+            },
+            async abort() {},
+            dispose: () => {},
+          };
+        },
+      });
+
+      const pushed = (
+        await gitOutput(["ls-remote", fixture.remote, workBranch(42)], {
+          cwd: fixture.repo,
+          env: fixture.env,
+        })
+      ).trim();
+      const sha = pushed.split(/\s+/)[0] ?? "";
+      const files = (
+        await gitOutput(["ls-tree", "-r", "--name-only", sha], {
+          cwd: fixture.repo,
+          env: fixture.env,
+        })
+      ).split("\n");
+
+      // The work and the fix are there, and the reviewer's note is not.
+      expect(files).toContain("work.txt");
+      expect(files).toContain("fix.txt");
+      expect(files).not.toContain("review-note.md");
     } finally {
       await fixture.dispose();
     }
@@ -5481,6 +5964,261 @@ describe("the CLI's run", () => {
         ).toBe(false);
         expect(calls.some((call) => call.includes("--add-label agent-in-progress"))).toBe(false);
       } finally {
+        await fixture.dispose();
+      }
+    }, 60_000);
+  });
+
+  describe("the summary a run ends with", () => {
+    /** What the run wrote to the output stream, and a way to stop watching. */
+    function captureStdout(): { readonly lines: string[]; readonly restore: () => void } {
+      const lines: string[] = [];
+      const spy = vi
+        .spyOn(process.stdout, "write")
+        .mockImplementation(((chunk: string | Uint8Array) => {
+          lines.push(String(chunk));
+          return true;
+        }) as typeof process.stdout.write);
+      return { lines, restore: () => spy.mockRestore() };
+    }
+
+    /** The lines the run printed, without the empty ones. */
+    function printed(lines: readonly string[]): string[] {
+      return lines
+        .join("")
+        .split("\n")
+        .filter((line) => line.trim() !== "");
+    }
+
+    /**
+     * A session whose turns report what they cost.
+     *
+     * The report comes the way the real one comes: the session's events carry
+     * the numbers, and the factory passes them on. The work session and the
+     * review session report different amounts, so that a summary which adds
+     * them up is distinguishable from one that reports only the last of them.
+     */
+    function sessionWithUsage(): SessionFactory {
+      const work = workingSession();
+      return async (options) => {
+        const session = await work(options);
+        options.onUsage?.(
+          isReviewer(options.tools)
+            ? { totalTokens: 400, cost: 0.2 }
+            : { totalTokens: 1600, cost: 0.8 },
+        );
+        return session;
+      };
+    }
+
+    /** The command that works one issue in a fixture. */
+    function oneIssue(
+      fixture: Awaited<ReturnType<typeof createFixtureRepository>>,
+      gh: (args: readonly string[]) => Promise<string>,
+      session: SessionFactory,
+    ): Promise<number> {
+      return main(
+        [
+          "--repo",
+          "gazon1/sing",
+          "--checkout",
+          fixture.repo,
+          "--worktree-root",
+          join(fixture.root, "worktrees"),
+          "--lock-dir",
+          join(fixture.root, "afk-runner"),
+          "--issue",
+          "42",
+        ],
+        {
+          gh,
+          session,
+          run: async () => JSON.stringify({ verdict: "ci.yml  run 1  success" }),
+        },
+      );
+    }
+
+    it("test_a_duration_says_the_seconds_and_the_larger_units", () => {
+      // The seconds are always there: a duration without them is a duration a
+      // reader has to guess at.
+      expect(formatDuration(0)).toBe("0s");
+      expect(formatDuration(1_500)).toBe("2s");
+      expect(formatDuration(65_000)).toBe("1m 5s");
+      expect(formatDuration(3_725_000)).toBe("1h 2m 5s");
+    });
+
+    it("test_a_cost_under_a_cent_keeps_its_digits", () => {
+      expect(formatCost(0.42)).toBe("$0.42");
+      // Rounded to two decimals this would read as zero, and zero is a number
+      // a reader would trust.
+      expect(formatCost(0.004)).toBe("$0.004000");
+    });
+
+    it("test_a_summary_says_the_tokens_and_the_cost_it_has", () => {
+      // A provider that reported tokens and no cost: the tokens are said and
+      // the cost is absent — not zero.
+      const lines = runSummary({
+        issue: 42,
+        outcome: "completed",
+        steps: [],
+        record: "/tmp/record.md",
+        title: "the first",
+        pullRequest: 1040,
+        verdict: "pass",
+        durationMs: 65_000,
+        usage: { totalTokens: 12345 },
+      });
+      expect(lines).toEqual([
+        "issue 42 — the first",
+        "pull request: #1040",
+        "review: pass",
+        "duration: 1m 5s",
+        "tokens: 12345",
+        "record: /tmp/record.md",
+      ]);
+    });
+
+    it("test_a_finished_run_ends_with_a_summary", async () => {
+      const fixture = await fixtureWithSetupScript();
+      const stdout = captureStdout();
+      try {
+        const { gh } = stubGh([{ number: 42, title: "the first" }]);
+
+        const code = await oneIssue(fixture, gh, workingSession());
+
+        expect(code).toBe(0);
+        const said = stdout.lines.join("");
+        // The issue and its title.
+        expect(said).toContain("issue 42 — the first");
+        // The pull request the run opened, and the review's verdict.
+        expect(said).toContain("pull request: #1040");
+        expect(said).toContain("review: pass");
+        // How long it took, and where the record is.
+        expect(said).toMatch(/duration: \d+s/);
+        expect(said).toContain("record: ");
+        expect(said).toContain(join("build", "diagnostics", "issue-42"));
+      } finally {
+        stdout.restore();
+        await fixture.dispose();
+      }
+    }, 60_000);
+
+    it("test_the_summary_is_one_fact_per_line", async () => {
+      const fixture = await fixtureWithSetupScript();
+      const stdout = captureStdout();
+      try {
+        const { gh } = stubGh([{ number: 42, title: "the first" }]);
+
+        await oneIssue(fixture, gh, workingSession());
+
+        // The summary is the tail of the output: the steps came before it.
+        const lines = printed(stdout.lines);
+        const first = lines.findIndex((line) => line.startsWith("issue 42"));
+        expect(first).toBeGreaterThan(-1);
+        const summary = lines.slice(first);
+        // Every line is one fact, and every fact is named — a table would
+        // wrap, and a line that says two things is two facts on one line.
+        expect(summary.length).toBeGreaterThan(3);
+        for (const line of summary) {
+          expect(line).toMatch(
+            /^(issue|pull request|review|duration|tokens|cost|record)\b/,
+          );
+        }
+        // And it carries no colour: a pipe reads the same lines a terminal
+        // does.
+        for (const line of summary) {
+          expect(line).not.toContain("\u001b[");
+        }
+      } finally {
+        stdout.restore();
+        await fixture.dispose();
+      }
+    }, 60_000);
+
+    it("test_the_tokens_and_the_cost_are_absent_when_the_provider_reports_none", async () => {
+      const fixture = await fixtureWithSetupScript();
+      const stdout = captureStdout();
+      try {
+        const { gh } = stubGh([{ number: 42, title: "the first" }]);
+
+        // The session reports nothing: no tokens, and no cost.
+        await oneIssue(fixture, gh, workingSession());
+
+        const said = stdout.lines.join("");
+        expect(said).not.toContain("tokens:");
+        expect(said).not.toContain("cost:");
+        // And not a zero either: a zero is a number a reader would trust.
+        expect(said).not.toContain("tokens: 0");
+        expect(said).not.toContain("cost: $0.00");
+      } finally {
+        stdout.restore();
+        await fixture.dispose();
+      }
+    }, 60_000);
+
+    it("test_the_tokens_and_the_cost_are_reported_when_the_provider_reports_them", async () => {
+      const fixture = await fixtureWithSetupScript();
+      const stdout = captureStdout();
+      try {
+        const { gh } = stubGh([{ number: 42, title: "the first" }]);
+
+        await oneIssue(fixture, gh, sessionWithUsage());
+
+        const said = stdout.lines.join("");
+        // The work session's tokens and the review's, added up.
+        expect(said).toContain("tokens: 2000");
+        expect(said).toContain("cost: $1.00");
+      } finally {
+        stdout.restore();
+        await fixture.dispose();
+      }
+    }, 60_000);
+
+    it("test_a_sweep_says_one_line_per_issue_and_a_total", async () => {
+      const fixture = await fixtureWithSetupScript();
+      const stdout = captureStdout();
+      const lockDirectory = join(fixture.root, "afk-runner");
+      try {
+        const { gh } = stubGh([
+          { number: 42, title: "the first" },
+          { number: 43, title: "the second" },
+        ]);
+
+        const code = await main(
+          [
+            "--repo",
+            "gazon1/sing",
+            "--checkout",
+            fixture.repo,
+            "--worktree-root",
+            join(fixture.root, "worktrees"),
+            "--lock-dir",
+            lockDirectory,
+            "--all",
+          ],
+          {
+            gh,
+            session: workingSession(),
+            run: async () => JSON.stringify({ verdict: "ci.yml  run 1  success" }),
+          },
+        );
+
+        expect(code).toBe(0);
+        const lines = printed(stdout.lines);
+        // One line per issue, and a total at the end.
+        const issues = lines.filter((line) => line.startsWith("issue "));
+        expect(issues).toHaveLength(2);
+        expect(issues[0]).toContain("the first");
+        expect(issues[1]).toContain("the second");
+        expect(issues[0]).toContain("pr #1040");
+        expect(issues[0]).toContain("pass");
+        const total = lines[lines.length - 1] ?? "";
+        expect(total).toContain("total: 2 of 2 issues worked");
+        // The tokens and the cost are absent: this provider reported none.
+        expect(total).not.toContain("tokens");
+        expect(total).not.toContain("cost");
+      } finally {
+        stdout.restore();
         await fixture.dispose();
       }
     }, 60_000);

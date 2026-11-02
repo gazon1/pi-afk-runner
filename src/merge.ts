@@ -413,6 +413,7 @@ async function mergeOne(
           factory: options.session,
           gh: options.gh,
           run: options.run,
+          git: options.git,
           deadlineMs: budgetShares(remainingMs()).reviewMs,
           ...(options.stopped === undefined ? {} : { stopped: options.stopped }),
         });
@@ -457,8 +458,10 @@ async function mergeOne(
     },
   ];
 
+  let stoppedAt: string | null = null;
+  let record = "";
   try {
-    await runSteps({
+    const outcome = await runSteps({
       issue: candidate.number,
       runId,
       root: options.checkout,
@@ -475,14 +478,33 @@ async function mergeOne(
       ...(options.poolEvents === undefined ? {} : { pool: options.poolEvents }),
       ...(options.onStep === undefined ? {} : { onStep: options.onStep }),
       ...(options.onStepStart === undefined ? {} : { onStepStart: options.onStepStart }),
+      // The merge's steps ask the flag the work pipeline's ask: a stop that
+      // arrives between two of them ends the merge at the next boundary, and
+      // the step that would have run does not.
+      ...(options.stopped === undefined ? {} : { stopped: options.stopped }),
       release: async () => {
         await removeWorktree(options.git, options.checkout, worktreePath);
       },
     });
+    const stopped = outcome.steps.find((entry) => entry.outcome === "stopped");
+    stoppedAt = stopped?.step ?? null;
+    record = outcome.record;
   } finally {
     // Scratch, on both paths: the branch holds the work.
     await removeWorktree(options.git, options.checkout, worktreePath).catch(() => {
       // A worktree that could not be removed is cleaned up by the next attempt.
+    });
+  }
+
+  if (stoppedAt !== null) {
+    // The merge stopped before this step ran, so nothing was landed: the pull
+    // request stays open, and the step it stopped at is what a reader starts
+    // from.
+    throw new RunFailed({
+      step: stoppedAt,
+      message: "the merge was stopped before this step",
+      cause: new Error("stopped"),
+      record,
     });
   }
 

@@ -27,9 +27,9 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { createWriteStream } from "node:fs";
+import { createWriteStream, existsSync } from "node:fs";
 import { rm } from "node:fs/promises";
-import { join } from "node:path";
+import { resolve, join } from "node:path";
 
 /** Who the claim is attributed to. Part of the tag object's identity. */
 export const CLAIM_TAGGER = {
@@ -953,4 +953,160 @@ export async function pushWorkBranch(
     issueNumber: options.issueNumber,
     ...(options.verify === undefined ? {} : { verify: options.verify }),
   });
+}
+
+/**
+ * What the restore of a worktree did.
+ */
+export interface RestoredWorktree {
+  /** The worktree did not come back — why. */
+  readonly problem: string | null;
+  /** The worktree came back, but the repository's setup script did not run in it — why. */
+  readonly unprepared: string | null;
+}
+
+/**
+ * Put the worktree back where the run had it, so a session whose working
+ * directory is that path can read again.
+ *
+ * A worktree that comes back is **prepared**: the repository's own setup
+ * script runs in it, the same way it runs in a worktree the runner makes. A
+ * worktree without it holds tracked files only — no `.env`, no per-worktree
+ * hooks, no private Gradle home — and the gates fail in a way that is not
+ * about the work.
+ *
+ * A worktree that is still there is left as it is: the runner prepared it
+ * when it made it, and preparing it again would be the runner's own step
+ * done twice.
+ */
+export async function restoreWorktree(
+  git: GitRunner,
+  options: {
+    readonly worktreePath: string;
+    readonly branch: string;
+    readonly remote: string;
+    readonly checkout: string;
+  },
+  /**
+   * The repository's own preparation, run in the worktree that came back.
+   *
+   * The caller runs it, so this module does not know which script the
+   * repository has. It answers with the reason it could not run, or null when
+   * it did.
+   */
+  prepare: (worktreePath: string) => Promise<string | null>,
+): Promise<RestoredWorktree> {
+  const targetPath = resolve(options.worktreePath);
+  const prune = async (): Promise<void> => {
+    try {
+      await git(["worktree", "prune"], { cwd: options.checkout });
+    } catch {
+      // The registration is still there. The `worktree add` below says "already
+      // exists", and the retry is what answers it.
+    }
+  };
+  let listError: string | null = null;
+  const registered = async (): Promise<boolean | null> => {
+    try {
+      const list = await git(["worktree", "list", "--porcelain"], { cwd: options.checkout });
+      listError = null;
+      return list.split("\n").some((line) => {
+        if (!line.startsWith("worktree ")) return false;
+        // Git prints absolute paths, so one comparison of resolved paths is
+        // the whole question.
+        return resolve(line.slice("worktree ".length).trim()) === targetPath;
+      });
+    } catch (failure) {
+      listError = errorMessage(failure);
+      return null;
+    }
+  };
+  /**
+   * Forget the worktree: the directory, and the registration of it.
+   *
+   * A directory git does not know makes `worktree add` refuse, and a
+   * registration git still knows makes it refuse too. Both have to go.
+   */
+  const reset = async (): Promise<void> => {
+    try {
+      await rm(targetPath, { recursive: true, force: true });
+    } catch {
+      // The directory is still there. The `worktree add` below says so, and
+      // the retry is what answers it.
+    }
+    await prune();
+  };
+  const add = async (args: readonly string[]): Promise<string | null> => {
+    try {
+      await git(args, { cwd: options.checkout });
+      return null;
+    } catch (failure) {
+      return errorMessage(failure);
+    }
+  };
+  const addBranch = (): Promise<string | null> =>
+    add(["worktree", "add", targetPath, options.branch]);
+  // A review-only run leaves a detached worktree and may have no local branch.
+  // On a single-branch clone the branch also has no remote-tracking ref, so put
+  // the chat on the fetched commit itself.
+  const addDetached = async (): Promise<string | null> => {
+    const tracking = `refs/remotes/${options.remote}/${options.branch}`;
+    await git(["fetch", options.remote, `${options.branch}:${tracking}`], {
+      cwd: options.checkout,
+    }).catch(() => {});
+    return add(["worktree", "add", "--detach", targetPath, tracking]);
+  };
+  /**
+   * The repository's own preparation, run from the worktree's own copy of the
+   * script — the script works on the checkout it lives in.
+   */
+  const prepared = async (): Promise<string | null> => await prepare(targetPath);
+
+  await prune();
+  if (existsSync(targetPath)) {
+    const isRegistered = await registered();
+    if (isRegistered === true) {
+      // It is still there, and the runner prepared it when it made it.
+      return { problem: null, unprepared: null };
+    }
+    if (isRegistered === null) {
+      // The checkout could not say whether the worktree is registered. Do not
+      // remove it: a directory git does not know would make `worktree add`
+      // refuse, but here we cannot tell, and removing it would destroy the
+      // run's work.
+      return {
+        problem: `could not tell whether the worktree is registered (${listError ?? "unknown error"}); left as it was`,
+        unprepared: null,
+      };
+    }
+    // A directory git does not know would make `worktree add` refuse.
+    await reset();
+  }
+  const first = await addBranch();
+  if (first === null) {
+    return { problem: null, unprepared: await prepared() };
+  }
+  if (first.includes("already exists")) {
+    // A registration prune missed: forget the tree and try once more.
+    await reset();
+    const second = await addBranch();
+    if (second === null) {
+      return { problem: null, unprepared: await prepared() };
+    }
+  }
+  const detached = await addDetached();
+  if (detached !== null) {
+    return { problem: detached, unprepared: null };
+  }
+  return { problem: null, unprepared: await prepared() };
+}
+
+/**
+ * The message of a failure.
+ *
+ * The CLI has a copy of this, and it cannot be the same one: the CLI imports
+ * this module, and an import that goes both ways is a cycle.
+ */
+function errorMessage(failure: unknown): string {
+  return failure instanceof Error ? failure.message : String(failure);
 }

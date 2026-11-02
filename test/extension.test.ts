@@ -118,6 +118,16 @@ function fakeContext(
 /** Where the fake session says its transcript is. */
 const TRANSCRIPT = "/tmp/afk-e2e/transcript.jsonl";
 
+/** The host's own words for "the context you hold is stale". */
+const STALE_SESSION =
+  "This extension ctx is stale after session replacement or reload.";
+
+/** The host's UI, as a test needs it: it can be made to fail. */
+type FakeUi = {
+  setStatus: (key: string, text: string | undefined) => void;
+  notify: (message: string, kind?: string) => void;
+};
+
 /**
  * The repository's own setup script, as a fixture.
  *
@@ -354,7 +364,7 @@ describe("the run the front door owns", () => {
         outcome: "unworkable",
         steps: [],
         record: "",
-        derivedState: "Claimed",
+        reason: unworkableReason("Claimed"),
       });
 
       const door = liveFrontDoor(host.pi, { session: async () => fake.session, work });
@@ -816,6 +826,177 @@ describe("the run the front door owns", () => {
 
       expect(reply).toEqual({ action: "continue" });
 
+      release.resolve();
+      await vi.waitFor(() => {
+        expect(host.entries.length).toBeGreaterThan(0);
+      });
+    } finally {
+      await rm(checkout, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps a worktree that git still knows, and the work in it", async () => {
+    const fixture = await createFixtureRepository();
+    const worktreeRoot = join(fixture.root, "worktrees");
+    const worktreePath = join(worktreeRoot, "issue-42");
+    try {
+      const git = (args: readonly string[]) =>
+        gitOutput(args, { cwd: fixture.repo, env: fixture.env });
+      await git(["branch", "agent/issue-42"]);
+      await mkdir(worktreeRoot, { recursive: true });
+      await git(["worktree", "add", worktreePath, "agent/issue-42"]);
+      // The run's work: a file the worktree holds and git does not know.
+      await writeFile(join(worktreePath, "notes.md"), "the work of the run\n");
+
+      const host = fakePi();
+      const fake = fakeSession();
+      const created = deferred();
+      const release = deferred();
+      const work = async (options: RunOptions): Promise<RunResult> => {
+        options.onIssue?.({ number: 42, title: "Fix the thing" });
+        await options.session({ cwd: worktreePath, systemPromptSections: {} });
+        created.resolve();
+        await release.promise;
+        return { issue: 42, outcome: "completed", steps: [], record: "" };
+      };
+
+      const door = liveFrontDoor(host.pi, { session: async () => fake.session, work });
+      const { ctx, switches } = fakeContext();
+      await door.start(
+        `--repo gazon1/cardinalfish --checkout ${fixture.repo} --worktree-root ${worktreeRoot}`,
+        ctx,
+      );
+      await created.promise;
+
+      // The auto-attach puts the worktree back before it switches this chat:
+      // wait for the switch, so the assertion below is about the worktree and
+      // not about how far the attach has come.
+      await vi.waitFor(() => expect(switches).toEqual([TRANSCRIPT]));
+
+      release.resolve();
+      await vi.waitFor(() => {
+        expect(host.entries.length).toBeGreaterThan(0);
+      });
+
+      // The worktree is registered, so it carries the run's work: putting it
+      // back is leaving it alone.
+      expect(existsSync(worktreePath)).toBe(true);
+      expect(existsSync(join(worktreePath, "notes.md"))).toBe(true);
+      expect(await git(["worktree", "list", "--porcelain"])).toContain(worktreePath);
+    } finally {
+      await fixture.dispose();
+    }
+  });
+});
+
+describe("a host that stops answering", () => {
+  it("lets a failure that is not a gone session out", async () => {
+    const checkout = await mkdtemp(join(tmpdir(), "afk-live-"));
+    try {
+      const host = fakePi();
+      const door = liveFrontDoor(host.pi);
+      const { ctx } = fakeContext();
+      const ui = ctx.ui as unknown as FakeUi;
+      ui.notify = () => {
+        throw new Error("the notification is broken");
+      };
+
+      await expect(
+        door.start(`--repo gazon1/cardinalfish --checkout ${checkout} --all`, ctx),
+      ).rejects.toThrow("the notification is broken");
+    } finally {
+      await rm(checkout, { recursive: true, force: true });
+    }
+  });
+
+  it("lets a failure of the status line out as well", async () => {
+    const checkout = await mkdtemp(join(tmpdir(), "afk-live-"));
+    try {
+      const host = fakePi();
+      const door = liveFrontDoor(host.pi);
+      const { ctx } = fakeContext();
+      const ui = ctx.ui as unknown as FakeUi;
+      ui.setStatus = () => {
+        throw new Error("the footer is broken");
+      };
+
+      await expect(
+        door.start(`--repo gazon1/cardinalfish --checkout ${checkout}`, ctx),
+      ).rejects.toThrow("the footer is broken");
+    } finally {
+      await rm(checkout, { recursive: true, force: true });
+    }
+  });
+
+  it("says what failed even when the status line cannot be written", async () => {
+    const checkout = await mkdtemp(join(tmpdir(), "afk-live-"));
+    try {
+      const host = fakePi();
+      const work = async (options: RunOptions): Promise<RunResult> => {
+        options.onIssue?.({ number: 42, title: "Fix the thing" });
+        throw new Error("the run broke");
+      };
+      const door = liveFrontDoor(host.pi, { work });
+
+      const { ctx, notes } = fakeContext();
+      const ui = ctx.ui as unknown as FakeUi;
+      const said: string[] = [];
+      const notify = ui.notify;
+      ui.notify = (message, kind) => {
+        said.push(message);
+        notify(message, kind);
+      };
+      ui.setStatus = (_key, text) => {
+        // The stage cannot be written; the notification still can.
+        if (text !== undefined && text.includes("failed")) {
+          said.push("the stage");
+          throw new Error("the footer is broken");
+        }
+      };
+
+      await door.start(`--repo gazon1/cardinalfish --checkout ${checkout}`, ctx);
+      // The human hears what failed, even though the footer is broken.
+      await vi.waitFor(() => {
+        expect(notes.map((note) => note.message)).toContain("afk-runner: the run broke");
+      });
+      // And what failed was said before the stage was published.
+      expect(said[0]).toBe("afk-runner: the run broke");
+      // The stage that could not be written is not swallowed either: it is
+      // written where a human can find it.
+      expect(said).toContain("the stage");
+    } finally {
+      await rm(checkout, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps quiet when the session it reports through is gone", async () => {
+    const checkout = await mkdtemp(join(tmpdir(), "afk-live-"));
+    try {
+      const host = fakePi();
+      const fake = fakeSession();
+      const created = deferred();
+      const release = deferred();
+      const work = async (options: RunOptions): Promise<RunResult> => {
+        options.onIssue?.({ number: 42, title: "Fix the thing" });
+        await options.session({ cwd: checkout, systemPromptSections: {} });
+        created.resolve();
+        await release.promise;
+        return { issue: 42, outcome: "completed", steps: [], record: "" };
+      };
+
+      const door = liveFrontDoor(host.pi, { session: async () => fake.session, work });
+      const { ctx } = fakeContext();
+      const ui = ctx.ui as unknown as FakeUi;
+      ui.setStatus = () => {
+        throw new Error(STALE_SESSION);
+      };
+      ui.notify = () => {
+        throw new Error(STALE_SESSION);
+      };
+
+      // The session is gone; the run is not. It goes on without the footer.
+      await door.start(`--repo gazon1/cardinalfish --checkout ${checkout}`, ctx);
+      await created.promise;
       release.resolve();
       await vi.waitFor(() => {
         expect(host.entries.length).toBeGreaterThan(0);

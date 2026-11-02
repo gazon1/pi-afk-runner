@@ -41,22 +41,18 @@ import {
   prepareRun,
   runOptionsFrom,
 } from "./cli.js";
-import { existsSync, rmSync } from "node:fs";
-import { resolve } from "node:path";
 
-import { issueWorktreePath, runCommand, runGit, workBranch, type CommandRunner } from "./git.js";
+import { issueWorktreePath, restoreWorktree, runCommand, runGit, workBranch, type CommandRunner } from "./git.js";
 import { RUN_STATUS_ENTRY, statusFromEntries, statusLine, type RunStatus } from "./live.js";
 import { newPoolState } from "./pool.js";
 import {
   RunFailed,
   SETUP_SCRIPT,
   prepareWorktreeSetup,
-  blockedReason,
   newRunId,
   runOnce,
   type RunOptions,
   type RunResult,
-  unworkableReason,
   emptyQueueSentence,
   workedIssueSentence,
 } from "./runner.js";
@@ -166,10 +162,12 @@ function assistantLine(message: SessionEvent["message"]): string | null {
   const text = message.content
     .flatMap((block) => (isTextBlock(block) ? [block.text] : []))
     .join("\n");
-  const line = text.split("\n").find((part) => part.trim() !== "")?.trim() ?? "";
-  if (line === "") {
+  // The first line that has something on it: the line the agent would say out loud.
+  const found = text.match(/^\s*\S.*$/m);
+  if (found === null) {
     return null;
   }
+  const line = found[0].trim();
   return line.length > 200 ? `${line.slice(0, 200)}…` : line;
 }
 
@@ -243,14 +241,6 @@ export interface LiveDependencies {
    * gives it to the whole run.
    */
   readonly run?: CommandRunner;
-}
-
-/** What the restore of a worktree did. */
-interface Restored {
-  /** The worktree did not come back — why. */
-  readonly problem: string | null;
-  /** The worktree came back, but the repository's setup script did not run in it — why. */
-  readonly unprepared: string | null;
 }
 
 /** The run in flight, as the host session sees it. */
@@ -348,17 +338,28 @@ export function liveFrontDoor(
    * reads.
    */
   const publish = (ctx: ExtensionContext, run: LiveRun): void => {
-    try {
-      if (run.status !== null) {
-        pi.appendEntry(RUN_STATUS_ENTRY, run.status);
+    const status = run.status;
+    // The line is made before the calls: a mistake in it is ours, and it has
+    // nothing to do with the host's "the session is gone".
+    const line = status === null ? undefined : statusLine(status);
+    if (status !== null) {
+      try {
+        pi.appendEntry(RUN_STATUS_ENTRY, status);
+      } catch (failure) {
+        if (!isStaleContext(failure)) {
+          throw failure;
+        }
+        // The session this context was made for is gone. The run goes on, and
+        // the line is restored from the entry when the session is opened again.
       }
-      ctx.ui.setStatus(STATUS_KEY, run.status === null ? undefined : statusLine(run.status));
+    }
+    try {
+      ctx.ui.setStatus(STATUS_KEY, line);
     } catch (failure) {
-      // A session switch deactivates the runner this context was made for. The run
-      // goes on, and the line is restored from the entry when the session is opened.
       if (!isStaleContext(failure)) {
         throw failure;
       }
+      // The session is gone; its footer went with it.
     }
   };
 
@@ -416,6 +417,68 @@ export function liveFrontDoor(
     }
   };
 
+  /**
+   * What the door says about a worktree that came back unprepared.
+   *
+   * One wording for the two places the door says it, so the two copies cannot
+   * drift apart. It says what happened rather than what was meant: the setup
+   * script may not have been there at all, and it may have run and failed —
+   * the reason in the brackets says which.
+   */
+  const unpreparedMessage = (subject: string, reason: string): string =>
+    `afk-runner: ${subject} came back unprepared — ${SETUP_SCRIPT} did not prepare it (${reason}). Run it in the worktree before the gates.`;
+
+  /**
+   * Open the run's session as this chat.
+   *
+   * The work session is headless while it runs, but its transcript is a Pi
+   * session file: switching to it gives the human a real chat with the same
+   * history — a session they can read, and carry on from. The worktree is
+   * restored first when the run's own cleanup has removed it, because a session
+   * whose working directory is gone can read nothing.
+   */
+  const attach = async (ctx: ExtensionCommandContext, force = false): Promise<void> => {
+    if (last === null || last.transcript === null) {
+      talk(ctx, "afk-runner: this session has no run to attach to yet", "info");
+      return;
+    }
+    if (working && !force) {
+      talk(
+        ctx,
+        "afk-runner: the agent is working — /afk-runner-stop first, or /afk-runner-attach when it settles",
+        "warning",
+      );
+      return;
+    }
+    const target = last;
+    const restored = await restoreWorktree(runGit, target, (path) =>
+      prepareWorktreeSetup(command, path),
+    );
+    if (restored.problem !== null) {
+      talk(
+        ctx,
+        `afk-runner: the worktree would not come back, so the session would have nowhere to work: ${restored.problem}`,
+        "error",
+      );
+      return;
+    }
+    if (restored.unprepared !== null) {
+      talk(ctx, unpreparedMessage("the worktree", restored.unprepared), "warning");
+    }
+    try {
+      const switched = await ctx.switchSession(target.transcript as string);
+      if (switched.cancelled) {
+        talk(ctx, "afk-runner: the switch was cancelled", "info");
+      }
+    } catch (failure) {
+      talk(
+        ctx,
+        `afk-runner: the session could not be opened: ${errorMessage(failure)}`,
+        "error",
+      );
+    }
+  };
+
   let hostContext: ExtensionCommandContext | null = null;
   /** The auto-attach of the run under way, so the run can wait for it before the worktree goes. */
   let autoAttach: Promise<void> | null = null;
@@ -427,7 +490,7 @@ export function liveFrontDoor(
       return;
     }
 
-    const argv = args.trim().split(/\s+/).filter((token) => token !== "");
+    const argv = args.trim().split(/\s+/).filter(Boolean);
     const prepared = await prepareRun(argv);
     if (!prepared.ok) {
       talk(ctx, `afk-runner: ${errorMessage(prepared.failure)}`, "error");
@@ -572,11 +635,9 @@ export function liveFrontDoor(
         const result = await (dependencies.work ?? runOnce)(runOptions);
         if (result.outcome === "unworkable") {
           const issueNum = result.issue ?? options.issue;
-          const reason =
-            blockedReason(result.blockedBy) ?? unworkableReason(result.derivedState);
           talk(
             ctx,
-            `afk-runner: issue ${issueNum ?? ""} could not be worked — ${reason}`,
+            `afk-runner: issue ${issueNum ?? ""} could not be worked — ${result.reason}`,
             "warning",
           );
           finish(ctx, run, "done");
@@ -596,20 +657,24 @@ export function liveFrontDoor(
           finish(ctx, run, "done");
         }
       } catch (failure) {
+        // What failed is said before the stage is published, and the stage is
+        // published either way: a status line that cannot be written must not
+        // keep the human from hearing what failed.
+        //
         // Reporting can itself fail (a gone session is fine; anything else is
         // not). Either way the failure is not left unhandled: it is written
         // where a human can find it after the fact, and the run still ends.
+        try {
+          talk(ctx, `afk-runner: ${errorMessage(failure)}`, "error");
+        } catch (reportFailure) {
+          console.error("afk-runner: reporting the run's failure failed:", reportFailure);
+        }
         try {
           finish(
             ctx,
             run,
             failure instanceof RunFailed ? `failed (${failure.step})` : "failed",
           );
-        } catch (reportFailure) {
-          console.error("afk-runner: reporting the run's failure failed:", reportFailure);
-        }
-        try {
-          talk(ctx, `afk-runner: ${errorMessage(failure)}`, "error");
         } catch (reportFailure) {
           console.error("afk-runner: reporting the run's failure failed:", reportFailure);
         }
@@ -635,7 +700,9 @@ export function liveFrontDoor(
         if (autoAttach !== null) {
           await autoAttach;
           if (last !== null) {
-            const restored = await restoreWorktree(last);
+            const restored = await restoreWorktree(runGit, last, (path) =>
+              prepareWorktreeSetup(command, path),
+            );
             if (restored.problem !== null) {
               talk(
                 ctx,
@@ -751,180 +818,6 @@ export function liveFrontDoor(
         console.error(`afk-runner: the abort failed: ${errorMessage(failure)}`);
       }
     });
-    }
-  };
-
-  /**
-   * What the door says about a worktree that came back unprepared.
-   *
-   * One wording for the two places the door says it, so the two copies cannot
-   * drift apart. It says what happened rather than what was meant: the setup
-   * script may not have been there at all, and it may have run and failed —
-   * the reason in the brackets says which.
-   */
-  const unpreparedMessage = (subject: string, reason: string): string =>
-    `afk-runner: ${subject} came back unprepared — ${SETUP_SCRIPT} did not prepare it (${reason}). Run it in the worktree before the gates.`;
-
-  /**
-   * Put the worktree back where the run had it, so a session whose working
-   * directory is that path can read again.
-   *
-   * A worktree that comes back is **prepared**: the repository's own setup
-   * script runs in it, the same way it runs in a worktree the runner makes. A
-   * worktree without it holds tracked files only — no `.env`, no per-worktree
-   * hooks, no private Gradle home — and the gates fail in a way that is not
-   * about the work.
-   *
-   * A worktree that is still there is left as it is: the runner prepared it
-   * when it made it, and preparing it again would be the runner's own step
-   * done twice.
-   */
-  const restoreWorktree = async (target: {
-    readonly worktreePath: string;
-    readonly branch: string;
-    readonly remote: string;
-    readonly checkout: string;
-  }): Promise<Restored> => {
-    const targetPath = resolve(target.worktreePath);
-    const prune = async (): Promise<void> => {
-      try {
-        await runGit(["worktree", "prune"], { cwd: target.checkout });
-      } catch {}
-    };
-    let listError: string | null = null;
-    const registered = async (): Promise<boolean | null> => {
-      try {
-        const list = await runGit(["worktree", "list", "--porcelain"], { cwd: target.checkout });
-        listError = null;
-        return list.split("\n").some((line) => {
-          if (!line.startsWith("worktree ")) return false;
-          // Git prints absolute paths, so one comparison of resolved paths is
-          // the whole question.
-          return resolve(line.slice("worktree ".length).trim()) === targetPath;
-        });
-      } catch (failure) {
-        listError = errorMessage(failure);
-        return null;
-      }
-    };
-    const add = async (args: readonly string[]): Promise<string | null> => {
-      try {
-        await runGit(args, { cwd: target.checkout });
-        return null;
-      } catch (failure) {
-        return errorMessage(failure);
-      }
-    };
-    const addBranch = (): Promise<string | null> =>
-      add(["worktree", "add", targetPath, target.branch]);
-    // A review-only run leaves a detached worktree and may have no local branch.
-    // On a single-branch clone the branch also has no remote-tracking ref, so put
-    // the chat on the fetched commit itself.
-    const addDetached = async (): Promise<string | null> => {
-      const tracking = `refs/remotes/${target.remote}/${target.branch}`;
-      await runGit(["fetch", target.remote, `${target.branch}:${tracking}`], {
-        cwd: target.checkout,
-      }).catch(() => {});
-      return add(["worktree", "add", "--detach", targetPath, tracking]);
-    };
-    /**
-     * The repository's own preparation, run from the worktree's own copy of the
-     * script — the script works on the checkout it lives in.
-     */
-    const prepare = async (): Promise<string | null> =>
-      prepareWorktreeSetup(command, targetPath);
-
-    await prune();
-    if (existsSync(targetPath)) {
-      const isRegistered = await registered();
-      if (isRegistered === true) {
-        // It is still there, and the runner prepared it when it made it.
-        return { problem: null, unprepared: null };
-      }
-      if (isRegistered === null) {
-        // The checkout could not say whether the worktree is registered. Do not
-        // remove it: a directory git does not know would make `worktree add`
-        // refuse, but here we cannot tell, and removing it would destroy the
-        // run's work.
-        return {
-          problem: `could not tell whether the worktree is registered (${listError ?? "unknown error"}); left as it was`,
-          unprepared: null,
-        };
-      }
-      // A directory git does not know would make `worktree add` refuse.
-      try {
-        rmSync(targetPath, { recursive: true, force: true });
-      } catch {}
-      await prune();
-    }
-    const first = await addBranch();
-    if (first === null) {
-      return { problem: null, unprepared: await prepare() };
-    }
-    if (first.includes("already exists")) {
-      // A registration prune missed: forget the tree and try once more.
-      try {
-        rmSync(targetPath, { recursive: true, force: true });
-      } catch {}
-      await prune();
-      const second = await addBranch();
-      if (second === null) {
-        return { problem: null, unprepared: await prepare() };
-      }
-    }
-    const detached = await addDetached();
-    if (detached !== null) {
-      return { problem: detached, unprepared: null };
-    }
-    return { problem: null, unprepared: await prepare() };
-  };
-
-  /**
-   * Open the run's session as this chat.
-   *
-   * The work session is headless while it runs, but its transcript is a Pi
-   * session file: switching to it gives the human a real chat with the same
-   * history — a session they can read, and carry on from. The worktree is
-   * restored first when the run's own cleanup has removed it, because a session
-   * whose working directory is gone can read nothing.
-   */
-  const attach = async (ctx: ExtensionCommandContext, force = false): Promise<void> => {
-    if (last === null || last.transcript === null) {
-      talk(ctx, "afk-runner: this session has no run to attach to yet", "info");
-      return;
-    }
-    if (working && !force) {
-      talk(
-        ctx,
-        "afk-runner: the agent is working — /afk-runner-stop first, or /afk-runner-attach when it settles",
-        "warning",
-      );
-      return;
-    }
-    const target = last;
-    const restored = await restoreWorktree(target);
-    if (restored.problem !== null) {
-      talk(
-        ctx,
-        `afk-runner: the worktree would not come back, so the session would have nowhere to work: ${restored.problem}`,
-        "error",
-      );
-      return;
-    }
-    if (restored.unprepared !== null) {
-      talk(ctx, unpreparedMessage("the worktree", restored.unprepared), "warning");
-    }
-    try {
-      const switched = await ctx.switchSession(target.transcript as string);
-      if (switched.cancelled) {
-        talk(ctx, "afk-runner: the switch was cancelled", "info");
-      }
-    } catch (failure) {
-      talk(
-        ctx,
-        `afk-runner: the session could not be opened: ${errorMessage(failure)}`,
-        "error",
-      );
     }
   };
 

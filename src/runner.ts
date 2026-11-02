@@ -38,12 +38,15 @@ import { GateFailed, runGates } from "./gates.js";
 import {
   UNTRUSTED_INPUT_RULE,
   UNTRUSTED_INPUT_SECTION,
+  addUsage,
   briefFence,
   createVerdictTool,
   cutOffMessage,
   runPromptArray,
   startAgent,
+  type PromptArrayResult,
   type ReviewVerdict,
+  type RunUsage,
   type Scheduler,
   type SessionFactory,
 } from "./session.js";
@@ -604,6 +607,84 @@ export interface ReviewOutcome {
   readonly findings: readonly string[];
   /** The CI line, when the runner read one. */
   readonly ciVerdict: string | null;
+  /** The tokens and the cost of the review, when the provider reported them. */
+  readonly usage?: RunUsage;
+}
+
+/**
+ * The branch the worktree is on, or `null` when the worktree is detached.
+ *
+ * Git answers `HEAD` for a detached worktree, which is not a branch and is
+ * said here as what it is.
+ */
+async function currentBranch(git: GitRunner, cwd: string): Promise<string | null> {
+  const name = (await git(["rev-parse", "--abbrev-ref", "HEAD"], { cwd })).trim();
+  return name === "" || name === "HEAD" ? null : name;
+}
+
+/**
+ * Put the tree the review judged back.
+ *
+ * The tree goes back to the head the reviewer read, on the branch the reviewer
+ * read it on. The branch matters: a plain reset moves **whatever branch is
+ * checked out**, so a reviewer that checked out another branch would have that
+ * branch moved to the reviewed head — a branch the review never judged. So the
+ * branch the review judged is moved by name, and the branch the reviewer
+ * checked out is left where it is.
+ *
+ * The branch is detached first, because a branch that is checked out in a
+ * worktree cannot be moved.
+ */
+async function restoreTheTree(
+  git: GitRunner,
+  cwd: string,
+  head: string,
+  branch: string | null,
+): Promise<void> {
+  const now = await currentBranch(git, cwd);
+  if (now === branch) {
+    // The worktree is still on the branch the review judged: a reset moves
+    // that branch back to the head the review judged.
+    await restoreTree(git, cwd, head);
+    return;
+  }
+  await git(["checkout", "--force", "--detach", head], { cwd });
+  if (branch !== null) {
+    await git(["branch", "--force", branch, head], { cwd });
+    await git(["checkout", "--force", branch], { cwd });
+  }
+  await git(["clean", "-fd"], { cwd });
+}
+
+/**
+ * Put the tree the review judged back, and name the failure when it cannot.
+ *
+ * The session's failure and the restore's failure are one failure: the review
+ * did not happen, and the tree it did not judge is not back either. Both are
+ * named, because a reader who has one of them would not know of the other.
+ */
+async function putBackTheTree(options: {
+  readonly git: GitRunner;
+  readonly cwd: string;
+  /** The head the reviewer judged. */
+  readonly head: string;
+  /** The branch the review judged, when the worktree was on one. */
+  readonly branch: string | null;
+  /** The session's own failure, when the session failed. */
+  readonly sessionFailure?: unknown;
+}): Promise<void> {
+  try {
+    await restoreTheTree(options.git, options.cwd, options.head, options.branch);
+  } catch (restoreError) {
+    const because =
+      options.sessionFailure === undefined
+        ? ""
+        : `the review's session failed (${errorMessage(options.sessionFailure)}) and `;
+    throw new Error(
+      `${because}the review's tree could not be put back (${errorMessage(restoreError)})`,
+      { cause: options.sessionFailure ?? restoreError },
+    );
+  }
 }
 
 /**
@@ -623,6 +704,10 @@ export interface ReviewOutcome {
  * A `fail` verdict is not a retry. The pull request stays red, no second
  * comment is posted, and no other issue is taken: the findings have to be
  * dealt with, and a later review has to say `pass` again.
+ *
+ * The tree the reviewer judged is the tree that is pushed: whatever the
+ * review session leaves behind is put back the way the gates put their build
+ * back, before the verdict is even read.
  */
 export async function reviewPullRequest(options: {
   readonly repo: string;
@@ -633,6 +718,8 @@ export async function reviewPullRequest(options: {
   readonly factory: SessionFactory;
   readonly gh: GhRunner;
   readonly run: CommandRunner;
+  /** The git the tree the reviewer judged is restored with. */
+  readonly git: GitRunner;
   readonly deadlineMs: number;
   /** Whether somebody has stopped the run. */
   readonly stopped?: () => boolean;
@@ -647,12 +734,36 @@ export async function reviewPullRequest(options: {
   readonly issue?: IssueDetail;
 }): Promise<ReviewOutcome> {
   const holder: { value?: ReviewVerdict } = {};
+  // What the review cost, when the provider said: the session's events carry
+  // the numbers, and the factory is the one that sees them.
+  let usage: RunUsage | undefined;
+
+  // The tree the reviewer judged is the tree that is pushed. The review
+  // session runs in the worktree, and whatever it leaves behind — a note, a
+  // scratch file, the artifacts of a build it ran — is not part of the
+  // change: the runner's next commit stages everything in the tree, so a
+  // leftover would ride along with the fix that follows it, and a fix that
+  // changed nothing would look like a fix that changed something.
+  //
+  // The head is read **before** the session: a reviewer that committed
+  // something of its own would have moved it, and the tree that is pushed has
+  // to be the tree the reviewer judged.
+  //
+  // The branch is read too, for the same reason: the tree goes back on the
+  // branch the review judged, and not on whatever branch the reviewer left
+  // checked out.
+  const reviewedHead = await headSha(options.git, options.cwd);
+  const reviewedBranch = await currentBranch(options.git, options.cwd);
+
   const session = await options.factory({
     cwd: options.cwd,
     systemPromptSections: {
       [UNTRUSTED_INPUT_SECTION]: UNTRUSTED_INPUT_RULE,
     },
     tools: [createVerdictTool(holder)],
+    onUsage: (reported) => {
+      usage = addUsage(usage, reported);
+    },
   });
 
   const fence = options.issue === undefined ? "" : briefFence(options.issue);
@@ -670,15 +781,41 @@ export async function reviewPullRequest(options: {
   // The session belongs to `runPromptArray` once it is given one: it disposes
   // of it when the run is over. A second owner would make the session's life
   // the business of two places that do not agree on who is responsible.
-  const result = await runPromptArray({
-    session,
-    prompts: [prompt],
-    // The review is one state: the verdict, in one turn.
-    states: [{ name: "review", phase: "Review" }],
-    deadlineMs: options.deadlineMs,
-    ...(options.stopped === undefined ? {} : { stopped: options.stopped }),
-    ...(options.schedule === undefined ? {} : { schedule: options.schedule }),
+  let result: PromptArrayResult;
+  try {
+    result = await runPromptArray({
+      session,
+      prompts: [prompt],
+      // The review is one state: the verdict, in one turn.
+      states: [{ name: "review", phase: "Review" }],
+      deadlineMs: options.deadlineMs,
+      ...(options.stopped === undefined ? {} : { stopped: options.stopped }),
+      ...(options.schedule === undefined ? {} : { schedule: options.schedule }),
+    });
+  } catch (error) {
+    // A session that failed still leaves what it left behind: the tree goes
+    // back to the tree the reviewer judged. A restore that fails is a tree
+    // that cannot be pushed, and it is said so — the session's own failure
+    // is named beside it.
+    await putBackTheTree({
+      git: options.git,
+      cwd: options.cwd,
+      head: reviewedHead,
+      branch: reviewedBranch,
+      sessionFailure: error,
+    });
+    throw error;
+  }
+
+  // The tree goes back to the tree the reviewer judged, whatever the session
+  // left behind.
+  await putBackTheTree({
+    git: options.git,
+    cwd: options.cwd,
+    head: reviewedHead,
+    branch: reviewedBranch,
   });
+
   if (result.aborted) {
     // The same cut the work session reports; a review that did not finish is
     // not a review that stated no verdict.
@@ -731,6 +868,7 @@ export async function reviewPullRequest(options: {
     comment,
     findings: verdict.findings,
     ciVerdict: ciLine === null ? null : `${CI_BEFORE_RECOUNT}: ${ciLine}`,
+    ...(usage === undefined ? {} : { usage }),
   };
 }
 
@@ -743,6 +881,9 @@ export const REVIEW_PROMPT = [
   "under load, is the risky code tested, is it fast enough, and is every line needed.",
   "",
   "Report defects with a location, not a summary. Say what you did not reach.",
+  "",
+  "Do not change the tree. It is put back to the tree you judged when you finish, and the verdict is the",
+  "only thing that leaves this session.",
   "",
   "Then end with the verdict tool. It is your last action.",
 ].join("\n");
@@ -1538,28 +1679,60 @@ export interface RunOptions {
   readonly runId?: string;
 }
 
-/** What a run did. */
-export interface RunResult {
+/**
+ * The facts a run carries, whatever it did.
+ *
+ * They are the same for every outcome: a run that worked an issue, a run that
+ * found nothing and a run that found the issue unworkable all say how long
+ * they took and what they cost.
+ */
+export interface RunResultFacts {
   /** The issue the run worked, or null when it worked none. */
   readonly issue: number | null;
-  /**
-   * What the run did with the issue.
-   *
-   * `skipped` and `split` are finished runs: the triage or the scope turn
-   * decided the issue is not one run's work, the run closed it, and the queue
-   * moves on. Neither is a failure.
-   */
-  readonly outcome: "completed" | "empty" | "unworkable" | "skipped" | "split";
   readonly steps: readonly StepRecord[];
   /** Where the record was written. */
   readonly record: string;
-  /** The derived state that made a named issue unworkable. */
-  readonly derivedState?: DerivedState;
-  /** Why the issue was skipped or split, when it was. */
-  readonly reason?: string;
-  /** The parent issues that are still open, when that is why the issue waits. */
-  readonly blockedBy?: readonly number[];
+  /** The issue's title, when the run knows it. */
+  readonly title?: string;
+  /** The pull request the run opened, or found. */
+  readonly pullRequest?: number;
+  /**
+   * The verdict the review reached.
+   *
+   * Absent when there was no review — a run that was cut short before the
+   * reviewer answered has no verdict, and saying `pass` would be a lie.
+   */
+  readonly verdict?: "pass" | "fail";
+  /** How long the run took, in milliseconds. */
+  readonly durationMs?: number;
+  /** The tokens and the cost, when the provider reported them. */
+  readonly usage?: RunUsage;
 }
+
+/** What a run did. */
+export type RunResult =
+  | (RunResultFacts & {
+      readonly outcome: "completed";
+      /** Why the run ended the way it did, when it said. */
+      readonly reason?: string;
+    })
+  | (RunResultFacts & {
+      readonly issue: null;
+      readonly outcome: "empty";
+    })
+  | (RunResultFacts & {
+      readonly outcome: "unworkable";
+      /** Why the issue could not be worked. */
+      readonly reason: string;
+      /** The parent issues that are still open, when that is why the issue waits. */
+      readonly blockedBy?: readonly number[];
+    })
+  | (RunResultFacts & {
+      readonly outcome: "skipped" | "split";
+      /** Why the issue was skipped or split. */
+      readonly reason?: string;
+      readonly blockedBy?: readonly number[];
+    });
 
 /**
  * Why an issue could not be worked, in the words the front doors say.
@@ -1567,7 +1740,7 @@ export interface RunResult {
  * One mapping, so the CLI and the live door say the same thing about the
  * same derived state.
  */
-export function unworkableReason(derivedState: DerivedState | undefined): string {
+export function unworkableReason(derivedState: DerivedState): string {
   switch (derivedState) {
     case "Claimed":
       return "it is held by another runner";
@@ -1575,8 +1748,15 @@ export function unworkableReason(derivedState: DerivedState | undefined): string
       return "already reviewed";
     case "Counted":
       return "already counted";
-    default:
-      return "check whether it is claimed by another runner, already reviewed, or already counted";
+    case "Queue":
+    case "Orphaned":
+    case "Pushed":
+    case "Opened":
+      throw new Error("not an unworkable state");
+    default: {
+      const _exhaustive: never = derivedState;
+      throw new Error(`unworkable reason missing for state ${String(_exhaustive)}`);
+    }
   }
 }
 
@@ -1840,9 +2020,17 @@ async function gateTheTree(options: {
  *
  * The ignored files stay: the worktree's own Gradle home, its `.env` copy
  * and its build outputs are the repository's, not the runner's to delete.
+ *
+ * The head is **named** when the tree to go back to is not the current one: a
+ * reviewer that committed something of its own moved the branch, and the tree
+ * that is pushed has to be the tree the reviewer judged.
  */
-export async function restoreTree(git: GitRunner, cwd: string): Promise<void> {
-  await git(["reset", "--hard"], { cwd });
+export async function restoreTree(
+  git: GitRunner,
+  cwd: string,
+  head?: string,
+): Promise<void> {
+  await git(head === undefined ? ["reset", "--hard"] : ["reset", "--hard", head], { cwd });
   await git(["clean", "-fd"], { cwd });
 }
 
@@ -1929,6 +2117,7 @@ export async function runOnce(options: RunOptions): Promise<RunResult> {
         outcome: "unworkable",
         steps: [],
         record: "",
+        reason: "the issue could not be read, or it turned out to hold nothing to work",
       };
     }
     return { issue: null, outcome: "empty", steps: [], record: "" };
@@ -1939,7 +2128,12 @@ export async function runOnce(options: RunOptions): Promise<RunResult> {
       outcome: "unworkable",
       steps: [],
       record: "",
-      derivedState: planOrUnworkable.derivedState,
+      // The reason the result carries: the parents that have not landed are
+      // the reason, and the state that stopped the run is the reason when
+      // there are no parents.
+      reason:
+        blockedReason(planOrUnworkable.blockedBy) ??
+        unworkableReason(planOrUnworkable.derivedState),
       ...(planOrUnworkable.blockedBy === undefined
         ? {}
         : { blockedBy: planOrUnworkable.blockedBy }),
@@ -2254,7 +2448,11 @@ async function runPlan(
     pullRequest: plan.pullRequest?.number ?? 0,
     reviewedSha: "",
     slug: null as string | null,
-    verdict: "pass" as "pass" | "fail",
+    // The verdict is null until a review states one: a run that never got one
+    // has no verdict, and the re-count falls back to the pass it always wrote.
+    verdict: null as "pass" | "fail" | null,
+    /** The tokens and the cost, when the provider reported them. */
+    usage: undefined as RunUsage | undefined,
     /** The issue, once the work session read it; a resume reads it itself. */
     issue: plan.issueDetail ?? (null as IssueDetail | null),
     /** What the work session decided to do with the issue. */
@@ -2384,6 +2582,9 @@ async function runPlan(
           .split("\n")
           .map((line) => line.trim())
           .filter((line) => line !== "");
+        // What the work cost, when the provider said what it cost: the
+        // session's events carry the numbers, and the factory reports them.
+        let usage: RunUsage | undefined;
         const result = await startAgent({
           factory: options.session,
           cwd: state.worktreePath,
@@ -2403,8 +2604,12 @@ async function runPlan(
           // to run with.
           deadlineMs: sessionBudgetMs,
           ...(options.stopped === undefined ? {} : { stopped: options.stopped }),
+          onUsage: (reported) => {
+            usage = addUsage(usage, reported);
+          },
         });
         const workElapsedMs = workSessionStartedAt === undefined ? 0 : Date.now() - workSessionStartedAt;
+        state.usage = addUsage(state.usage, usage);
         if (workElapsedMs >= sessionBudgetMs) {
           reviews = false;
         }
@@ -2583,6 +2788,8 @@ async function runPlan(
               exhausted = true;
               return "fail";
             }
+            // The head the review is about to judge: the tree the reviewer
+            // reads is the tree the verdict names.
             state.reviewedSha = await headSha(options.git, state.worktreePath);
             const reviewed = await reviewPullRequest({
               repo: options.repo,
@@ -2591,11 +2798,14 @@ async function runPlan(
               factory: options.session,
               gh: options.gh,
               run: options.run,
+              git: options.git,
               deadlineMs: budget,
               ...(options.stopped === undefined ? {} : { stopped: options.stopped }),
               issue: detail,
             });
             state.verdict = reviewed.verdict;
+            // And what the review cost, on top of the work's own.
+            state.usage = addUsage(state.usage, reviewed.usage);
             state.findings = reviewed.findings;
             state.reviewCount += 1;
             return reviewed.verdict;
@@ -2745,7 +2955,7 @@ async function runPlan(
         join(directory, `${state.slug}.md`),
         verdictFile({
           slug: state.slug,
-          verdict: state.verdict,
+          verdict: state.verdict ?? "pass",
           date: now.toISOString().slice(0, 10),
           pullRequest: state.pullRequest,
           reviewed: state.reviewedSha,
@@ -2853,6 +3063,11 @@ async function runPlan(
           : "completed",
     steps: runOutcome.steps,
     record: runOutcome.record,
+    title: issue.title,
+    ...(state.pullRequest === 0 ? {} : { pullRequest: state.pullRequest }),
+    ...(state.verdict === null ? {} : { verdict: state.verdict }),
+    durationMs: Date.now() - runStartedAt,
+    ...(state.usage === undefined ? {} : { usage: state.usage }),
     ...(state.reason === "" ? {} : { reason: state.reason }),
   };
 }
