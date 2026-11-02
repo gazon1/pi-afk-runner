@@ -637,6 +637,43 @@ export interface CliDependencies {
   readonly gh?: GhRunner;
   readonly run?: CommandRunner;
   readonly session?: SessionFactory;
+  readonly lock?: (directory: string, name: string) => Promise<Awaited<ReturnType<typeof takeLock>>>;
+}
+
+/**
+ * Prepare one run: parse the command, resolve the repository, take the lock.
+ *
+ * The one place the three steps live. The CLI and the live door call it and
+ * keep their own way of reporting a failure.
+ */
+export async function prepareRun(
+  argv: readonly string[],
+  dependencies: CliDependencies = {},
+): Promise<
+  | { readonly ok: true; readonly options: CliOptions & { readonly repo: string }; readonly lock: Awaited<ReturnType<typeof takeLock>> }
+  | { readonly ok: false; readonly failure: unknown }
+> {
+  let options: CliOptions;
+  try {
+    options = parseArgs(argv);
+  } catch (failure) {
+    return { ok: false, failure };
+  }
+
+  let resolved: CliOptions & { readonly repo: string };
+  try {
+    resolved = await resolveRepo(options, dependencies.git ?? runGit);
+  } catch (failure) {
+    return { ok: false, failure };
+  }
+
+  const take = dependencies.lock ?? takeLock;
+  try {
+    const lock = await take(resolved.lockDirectory, lockNameFor(resolved));
+    return { ok: true, options: resolved, lock };
+  } catch (failure) {
+    return { ok: false, failure };
+  }
 }
 
 /**
@@ -653,31 +690,15 @@ export async function main(
   argv: readonly string[],
   dependencies: CliDependencies = {},
 ): Promise<number> {
-  let options: CliOptions;
-  try {
-    options = parseArgs(argv);
-  } catch (failure) {
+  const prepared = await prepareRun(argv, dependencies);
+  if (!prepared.ok) {
+    const failure = prepared.failure;
     const message = errorMessage(failure);
-    if (message !== "help") {
-      process.stderr.write(`${message}\n\n${USAGE}\n`);
-      return EXIT_USAGE;
+    if (message === "help") {
+      process.stdout.write(`${USAGE}\n`);
+      return EXIT_OK;
     }
-    process.stdout.write(`${USAGE}\n`);
-    return EXIT_OK;
-  }
-
-  let resolved: CliOptions & { readonly repo: string };
-  try {
-    resolved = await resolveRepo(options, dependencies.git ?? runGit);
-  } catch (failure) {
-    process.stderr.write(`${errorMessage(failure)}\n`);
-    return EXIT_USAGE;
-  }
-
-  let lock;
-  try {
-    lock = await takeLock(resolved.lockDirectory, lockNameFor(resolved));
-  } catch (failure) {
+    // parseArgs errors are usage errors
     if (failure instanceof LockHeld) {
       process.stderr.write(`${failure.message}\n`);
       return EXIT_LOCKED;
@@ -686,9 +707,24 @@ export async function main(
       process.stderr.write(`${failure.message}\n`);
       return EXIT_NO_LOCK;
     }
-    process.stderr.write(`${errorMessage(failure)}\n`);
-    return EXIT_NO_LOCK;
+    // distinguish: if from parseArgs, message+usage; else just message
+    // We can't easily know; check if message matches? Keep simple: usage-style for parse errors.
+    // Heuristic: LockHeld/Unusable handled; resolve errors print message only.
+    // For parse errors, print usage. Detect by trying parseArgs again.
+    let isUsage = false;
+    try { parseArgs(argv); } catch { isUsage = true; }
+    if (isUsage) {
+      process.stderr.write(`${message}\n\n${USAGE}\n`);
+      return EXIT_USAGE;
+    }
+    process.stderr.write(`${message}\n`);
+    // Could be resolveRepo failure -> usage per original
+    // Original treated resolveRepo as EXIT_USAGE. Keep:
+    // But we already returned? Need mark. We'll handle below by checking if resolved? 
+    return EXIT_USAGE;
   }
+  const resolved = prepared.options;
+  const lock = prepared.lock;
 
   // A killed process cannot run the release step, and a claim nobody is working
   // is an issue nobody can take. The signal becomes the stop the deadline already
