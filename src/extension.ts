@@ -552,12 +552,23 @@ export function liveFrontDoor(
           finish(ctx, run, "done");
         }
       } catch (failure) {
-        finish(
-          ctx,
-          run,
-          failure instanceof RunFailed ? `failed (${failure.step})` : "failed",
-        );
-        talk(ctx, `afk-runner: ${errorMessage(failure)}`, "error");
+        // Reporting can itself fail (a gone session is fine; anything else is
+        // not). Either way the failure is not left unhandled: it is written
+        // where a human can find it after the fact, and the run still ends.
+        try {
+          finish(
+            ctx,
+            run,
+            failure instanceof RunFailed ? `failed (${failure.step})` : "failed",
+          );
+        } catch (reportFailure) {
+          console.error("afk-runner: reporting the run's failure failed:", reportFailure);
+        }
+        try {
+          talk(ctx, `afk-runner: ${errorMessage(failure)}`, "error");
+        } catch (reportFailure) {
+          console.error("afk-runner: reporting the run's failure failed:", reportFailure);
+        }
       } finally {
         // A correction typed after the session's last boundary has nowhere to go.
         const undelivered = run.controller.snapshot().rows.length;
@@ -601,9 +612,18 @@ export function liveFrontDoor(
         } catch {
           // The session is gone; so is its log.
         }
-        await lock.release();
+        try {
+          await lock.release();
+        } catch (releaseFailure) {
+          console.error("afk-runner: releasing the lock failed:", releaseFailure);
+        }
       }
-    })();
+    })().catch((failure) => {
+      // Last line of defence: nothing this run does may end the host process.
+      try {
+        console.error("afk-runner: unhandled run failure:", failure);
+      } catch {}
+    });
   };
 
   const steer = async (
