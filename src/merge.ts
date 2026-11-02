@@ -74,6 +74,15 @@ export { WORK_BRANCH_PATTERN };
 /** The repository's own gate — the command the work prompt names. */
 export const GATE_SCRIPT = "./check.sh";
 
+/**
+ * How many gates the merge pipeline runs: one.
+ *
+ * The work pipeline runs no gate unless it is told to, but the merge door
+ * always runs the repository's own gate, and the budget it gets is a gate's
+ * share.
+ */
+const MERGE_GATE_COUNT = 1;
+
 /** A marker a resolved conflict must not leave behind. */
 const CONFLICT_MARKER = "^<<<<<<< ";
 
@@ -349,7 +358,7 @@ async function mergeOne(
           await resolveWithAgent(
             options,
             worktreePath,
-            budgetShares(remainingMs()).sessionMs,
+            budgetShares(remainingMs(), MERGE_GATE_COUNT).sessionMs,
           );
         }
         state.after = await headSha(options.git, worktreePath);
@@ -412,7 +421,7 @@ async function mergeOne(
           gh: options.gh,
           run: options.run,
           git: options.git,
-          deadlineMs: budgetShares(remainingMs()).reviewMs,
+          deadlineMs: budgetShares(remainingMs(), MERGE_GATE_COUNT).reviewMs,
           ...(options.stopped === undefined ? {} : { stopped: options.stopped }),
         });
         if (outcome.verdict !== "pass") {
@@ -528,7 +537,7 @@ async function verifyGate(
   remainingMs: () => number,
 ): Promise<string> {
   const startedAt = Date.now();
-  const budgetMs = budgetShares(remainingMs()).gatesMs;
+  const budgetMs = budgetShares(remainingMs(), MERGE_GATE_COUNT).gatesMs;
   const left = (): number => Math.max(0, budgetMs - (Date.now() - startedAt));
   const invocation = gateInvocation(GATE_SCRIPT);
   const run = async (): Promise<void> => {
@@ -587,7 +596,7 @@ async function verifyGate(
     await resolveWithAgent(
       options,
       worktreePath,
-      budgetShares(remainingMs()).sessionMs,
+      budgetShares(remainingMs(), MERGE_GATE_COUNT).sessionMs,
       prompt,
     );
     const remaining = left();

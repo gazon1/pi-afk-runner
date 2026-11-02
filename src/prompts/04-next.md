@@ -1,6 +1,6 @@
 # Say what follows from the work
 
-The change is made, the gates have run, and you have checked your own work. Now
+The change is made, and you have checked your own work. Now
 ask the question this work leaves open:
 
 **What logical steps of improvement and refactoring follow from what was just
@@ -15,12 +15,10 @@ nobody else is going to notice them.
    Two or three candidates are enough. A list of twenty is a list nobody reads,
    and most of it is not yours to decide.
 
-2. **Fix the cheap ones yourself.** A leftover is cheap when it is small, when
-   it stays inside the brief's scope — does the change do what the brief asked,
-   and only that? — and when the gates stay green. Fix it now, and run the
-   gates again, with the same commands the implementing turn ran: what you
-   change in this turn goes into the same pull request, so it is gated like
-   everything else in it. A fix that was not gated is not a fix.
+2. **Fix the cheap ones yourself.** A leftover is cheap when it is small and
+   when it stays inside the brief's scope. Fix it now: what you change in this
+   turn goes into the same pull request. Do not build and do not run the
+   checks to find out whether the fix is right — read it instead.
 
 3. **File the rest as issues in the target repository.** Use the
    `agent_leftover` tool, not a shell command: the tool is what keeps the queue
@@ -68,5 +66,4 @@ nobody else is going to notice them.
 
 5. **Report.** One short report at the end: what you fixed, and what you filed
    (one line per issue). Nothing else. If you changed anything in this turn,
-   run the gates again first: the runner runs them when you stop, on the tree
-   you leave, and a gate that fails there ends the run.
+   say so.

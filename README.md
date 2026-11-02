@@ -110,35 +110,62 @@ A model has to resolve, too: `--model <provider/id>` names one; without it the r
 MiniMax's own default. The key comes from the environment — `MINIMAX_API_KEY` — and the runner
 holds no credential of its own.
 
-### The gates the runner runs
+### The gates a run runs
 
-The **runner** runs the target repository's own gates — `./check.sh`, `just tcheck-evals` and
-`just docs-audit` — in the worktree, on the tree the agent left, as the `gates` step between the
-session and the push. A gate that does not pass ends the run there: the claim is released, the
-work stays on the local branch, and nothing is pushed. The record carries the tail of what the
-gate printed, so a failed run says which gate failed and why. The whole of what the gate printed
-goes to a file beside the record — `<the run's id>-gates.log` — and the record names it: the
-record is a document a person reads, and the whole build log is kept without being read. A gate
-that passed leaves no log behind.
+**A run runs no gate, and nothing in it builds.** The tree the agent leaves is the tree that is
+pushed, and the pull request's own CI is what judges it. The work pipeline does not spend minutes
+in a Gradle daemon before the review even starts — the speed is the point, and what is not checked
+is said, not hidden.
 
-The agent runs the gates too — it has to, to fix what they report — and the runner runs them
-again, because an agent that skipped them is not a gate. The list is written down **once**, in
-`src/gates.ts`, and a test holds it against the contract copy the target repository owns.
+**The agent may not build either.** The guard refuses the commands that build or gate — `./gw`,
+`./gradlew`, `./check.sh`, `just gate`, `just tcheck-evals`, `just docs-audit` — and the
+implement, verify and next turns say the same in words: do not build, do not compile, do not run
+the checks; judge the change by reading it. The verify turn reports **what it did not check**.
 
-A review's **fix** changes the tree, so the gates run again on it: a fix that does not pass them
-is not pushed, and the tree on the remote is the tree the gates judged.
+**Which gates run is the repository's own business**, in two layers. The command line wins:
+
+```bash
+pi-afk-runner --gate "./check.sh --fast,just docs-audit" --gate-timeout-ms 900000
+```
+
+Then the repository's own file, in the root of the checkout the run works — `.afk-runner.json`:
+
+```json
+{ "gates": ["./check.sh --fast", "just docs-audit"], "gateTimeoutMs": 900000 }
+```
+
+Nothing else: a run that nobody told to gate runs no gate, and the contract's list is not a
+fallback. A file that cannot be read ends the run where it stands — a runner that quietly fell
+back to a list the repository did not ask for would judge a tree by somebody else's rules.
+
+When a run *is* told to run gates, they run in the worktree, on the tree the agent left, in the
+`gates` step between the session and the push. A gate that does not pass ends the run there: the
+claim is released, the work stays on the local branch, and nothing is pushed. The record carries
+the tail of what the gate printed, so a failed run says which gate failed and why. The whole of
+what the gate printed goes to a file beside the record — `<the run's id>-gates.log` — and the
+record names it: the record is a document a person reads, and the whole build log is kept without
+being read. A gate that passed leaves no log behind.
+
+The **agent does not run the gates** either: an instruction to run a gate is not a gate. A gate
+that refuses the change goes back to the agent as a turn, with the gate's own output, and the
+gates run again on what it fixed; a gate that refuses twice ends the run.
 
 The run's budget is divided into three **reserved** shares: the session keeps two hours, the gates
 keep an hour each — the same the merge door gives the same gate — and the review keeps what is
-left. A session that spends its whole budget cannot leave the gates nothing to run with, and a
-gate that is killed half-way through leaves a run that pushes nothing. A smaller ceiling
+left. A run with no gate reserves no gate budget and carries a smaller ceiling. A smaller ceiling
 (`--deadline-ms`) is a smaller run all the way through. A gate that is killed, or that never
 started, has no exit code, and the record does not claim one.
 
-**The host needs the repository's own tools.** `just` and whatever the target's gates call —
-`bash`, `python3`, the target's build — have to be on the machine the run works on. A gate that
-could not run says so: `the gate just tcheck-evals could not run: just is not on this host` is
-not the same as a gate that refused the change.
+**The host needs the repository's own tools** — for the gates a run was told to run. `just` and
+whatever those gates call have to be on the machine the run works on. A gate that could not run
+says so: `the gate just tcheck-evals could not run: just is not on this host` is not the same as
+a gate that refused the change. The tools of a checkout live in **that checkout's own** venv, and
+the repository's setup script says where: the gates run with the PATH it printed — or with the
+venv it names when that venv was already there — so the gate CLI of that worktree is found rather
+than somebody else's.
+
+**The merge door is a separate mode and keeps its gate.** `--merge` still runs the full
+`./check.sh` before it lands anything: that is the contract of the merge mode, and it is opt-in.
 
 ### The command — unattended
 

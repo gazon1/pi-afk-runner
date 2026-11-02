@@ -192,6 +192,31 @@ describe("the guard on the Mastra engine", () => {
     expect(reason).toContain("agent_leftover");
   });
 
+  it("refuses every way of building or checking", () => {
+    // This run does not compile and does not gate the tree, so the commands
+    // that would do either are refused: the wrappers, the script, and the
+    // recipes.
+    for (const command of [
+      "./gw :shared:compileDebugKotlinAndroid",
+      "./gw",
+      "./gradlew build",
+      "./check.sh --fast",
+      "just build-debug",
+      "just check",
+      "just test-unit",
+      "just lint-changed",
+      "just detekt",
+      "just gate",
+      "just tcheck-evals",
+      "just docs-audit",
+    ]) {
+      expect(denyReason({ command }) ?? "").toContain("Refused");
+    }
+    // And the work itself is still allowed.
+    expect(denyReason({ command: "git status" })).toBeNull();
+    expect(denyReason({ command: "rg --files" })).toBeNull();
+  });
+
   it("lets every other command through", () => {
     expect(denyReason({ command: "npm run check" })).toBeNull();
     expect(denyReason({ path: "src/cli.ts" })).toBeNull();

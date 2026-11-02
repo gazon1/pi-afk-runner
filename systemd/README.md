@@ -63,16 +63,25 @@ A key that changed needs nothing: the file is read at every start of the unit,
 so the next tick picks the new value up. `daemon-reload` is for the unit files
 themselves, not for the key.
 
-**The host needs the target repository's own tools.** The runner runs the
-repository's gates — `./check.sh`, `just tcheck-evals`, `just docs-audit` — in
-the worktree, so `just` and whatever those gates call have to be on the machine
-the timer runs on, and on the PATH the unit gives it. A gate that could not run
-says so and ends the run (`45`); it does not look like a gate that refused the
-change. The run's budget is divided into three shares: the session keeps two
-hours, the gates keep an hour each — the same the merge door gives the same
-gate — and the review keeps what is left. A sweep that works several issues
-takes several hours — the timer fires hourly, and the lock keeps the ticks
-from overlapping.
+**A timed run gates nothing and builds nothing.** The tree the agent leaves is
+the tree that is pushed, and the pull request's own CI judges it. Nothing in the
+run compiles either: the guard refuses the build commands, so the unit needs no
+Gradle daemon and no build minutes. A repository that wants gates says so in
+`.afk-runner.json` in the root of the checkout — the unit needs no change for that
+— and the command line wins over that file.
+
+**The host needs the target repository's own tools** for the gates a run is told
+to run: `just` and whatever those gates call have to be on the machine the timer
+runs on, and on the PATH the unit gives it. The tools of a checkout live in that
+checkout's own venv, and the repository's setup script says where: the gates run
+with the PATH it printed. A gate that could not run says so and ends the run
+(`45`); it does not look like a gate that refused the change.
+
+The run's budget is divided into three shares: the session keeps two hours, the
+gates keep an hour each — the same the merge door gives the same gate — and the
+review keeps what is left. A run with no gate reserves no gate budget. A sweep
+that works several issues takes several hours — the timer fires hourly, and the
+lock keeps the ticks from overlapping.
 
 ## What the exit code says
 

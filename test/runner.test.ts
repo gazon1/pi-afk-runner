@@ -33,7 +33,7 @@ import {
   resolveRepo,
   runSummary,
 } from "../src/cli.js";
-import { budgetShares } from "../src/budget.js";
+import { budgetShares, defaultDeadlineMs } from "../src/budget.js";
 import { type StateName } from "../src/workflow.js";
 import { createLeftoverTool, LEFTOVER_TOOL_NAME, MAX_LEFTOVERS_PER_RUN } from "../src/leftovers.js";
 import { pullRequestArgs } from "../src/gh.js";
@@ -129,6 +129,9 @@ import {
   type Step,
 } from "../src/runner.js";
 import { GATE_OUTPUT_LIMIT_BYTES, GATE_TIMEOUT_MS } from "../src/gates.js";
+
+/** The gates a run is told to run, in these tests. */
+const GATES = ["./check.sh --fast", "just tcheck-evals", "just docs-audit"];
 import { HOLDER_COMMAND, takeLock, workLockName } from "../src/lock.js";
 import {
   EXIT_LOCKED,
@@ -2997,13 +3000,13 @@ describe("the CLI's run", () => {
         return JSON.stringify({ verdict: "ci.yml  run 1  success" });
       };
 
-      await runOnce({ ...runOptions(fixture, gh), run });
+      await runOnce({ ...runOptions(fixture, gh), run, gates: GATES });
 
       // They ran in the worktree — where the repository runs them — and not in
       // the runner's own checkout.
       const worktree = issueWorktreePath(join(fixture.root, "worktrees"), 42);
       expect(gates).toEqual([
-        `bash ./check.sh in ${worktree}`,
+        `bash ./check.sh --fast in ${worktree}`,
         `just tcheck-evals in ${worktree}`,
         `just docs-audit in ${worktree}`,
       ]);
@@ -3014,6 +3017,159 @@ describe("the CLI's run", () => {
         expect(budget).toBeGreaterThan(0);
         expect(budget).toBeLessThanOrEqual(GATE_TIMEOUT_MS);
       }
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("test_the_gates_run_with_the_path_the_repositories_own_setup_named", async () => {
+    // The gate CLI is an editable install of that checkout's own venv: the
+    // setup script says where it is, and the gates run with that PATH — a
+    // gate that cannot find its tools never got to answer.
+    const fixture = await createFixtureRepository({
+      files: {
+        "scripts/setup-worktree.sh":
+          '#!/usr/bin/env bash\nset -euo pipefail\necho \'ready: export PATH="/the/venv/bin:$PATH"\'\n',
+      },
+    });
+    try {
+      const { gh } = stubGh([{ number: 42, title: "an issue" }]);
+      const paths: (string | undefined)[] = [];
+      const run: CommandRunner = async (spec) => {
+        // The setup script says where the tools are; the gates read it.
+        if (spec.command === "bash" && spec.args[0] === "scripts/setup-worktree.sh") {
+          return 'ready: export PATH="/the/venv/bin:$PATH"';
+        }
+        if (isGate(spec)) {
+          paths.push(spec.env?.["PATH"]);
+        }
+        return JSON.stringify({ verdict: "ci.yml  run 1  success" });
+      };
+
+      await runOnce({ ...runOptions(fixture, gh), run, gates: GATES });
+
+      expect(paths.length).toBeGreaterThan(0);
+      for (const path of paths) {
+        expect(path).toContain("/the/venv/bin");
+      }
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("test_the_gates_run_with_the_path_of_a_venv_that_was_already_there", async () => {
+    // The setup script says where the venv is and says nothing about PATH when
+    // it did not make it. The gates still need that venv: the gate CLI lives
+    // there, and without it the gate reports a missing tool instead of a
+    // verdict.
+    const fixture = await createFixtureRepository({
+      files: {
+        "scripts/setup-worktree.sh":
+          "#!/usr/bin/env bash\nset -euo pipefail\necho 'Python venv  -> /the/venv (already there)'\n",
+      },
+    });
+    try {
+      const { gh } = stubGh([{ number: 42, title: "an issue" }]);
+      const paths: (string | undefined)[] = [];
+      const run: CommandRunner = async (spec) => {
+        if (spec.command === "bash" && spec.args[0] === "scripts/setup-worktree.sh") {
+          return "Python venv  -> /the/venv (already there)";
+        }
+        if (isGate(spec)) {
+          paths.push(spec.env?.["PATH"]);
+        }
+        return JSON.stringify({ verdict: "ci.yml  run 1  success" });
+      };
+
+      await runOnce({ ...runOptions(fixture, gh), run, gates: GATES });
+
+      expect(paths.length).toBeGreaterThan(0);
+      for (const path of paths) {
+        expect(path).toContain("/the/venv/bin");
+      }
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("test_a_gate_that_refuses_the_change_goes_back_to_the_agent_and_the_gates_run_again", async () => {
+    // The gates are the runner's: the agent does not run them. A gate that
+    // refuses the change therefore goes back to the agent as a turn, with the
+    // gate's own output, and the gates run again on what it fixed.
+    const fixture = await fixtureWithSetupScript();
+    try {
+      const { gh } = stubGh([{ number: 42, title: "an issue" }]);
+      const gateRuns: string[] = [];
+      const prompts: string[] = [];
+      const run: CommandRunner = async (spec) => {
+        if (isGate(spec)) {
+          gateRuns.push(`${spec.command} ${spec.args.join(" ")}`);
+          // The first gate refuses the change; the second one passes.
+          if (gateRuns.length === 1) {
+            throw new CommandFailed(1, spec.command, [...spec.args], "the gate says no", "");
+          }
+        }
+        return JSON.stringify({ verdict: "ci.yml  run 1  success" });
+      };
+
+      let sessions = 0;
+      const result = await runOnce({
+        ...runOptions(fixture, gh),
+        run,
+        gates: GATES,
+        session: async ({ cwd, tools }) => {
+          sessions += 1;
+          if (isReviewer(tools)) {
+            return {
+              async prompt() {
+                const tool = tools?.[0] as unknown as {
+                  execute: (id: string, params: unknown) => Promise<unknown>;
+                };
+                await tool.execute("call-1", { verdict: "pass", findings: [] });
+              },
+              async abort() {},
+              dispose() {},
+            };
+          }
+          const first = sessions === 1;
+          return {
+            async prompt(text: string) {
+              prompts.push(text);
+              if (first) {
+                await writeFile(join(cwd, "work.txt"), "the work\n", "utf8");
+                return;
+              }
+              // The gate's fix turn: it answers what the gate reported.
+              await writeFile(join(cwd, "gate-fix.txt"), "the fix\n", "utf8");
+            },
+            async abort() {},
+            dispose() {},
+          };
+        },
+      });
+
+      expect(result.outcome).toBe("completed");
+      // The gate ran twice: once refused the change, once judged the fix.
+      expect(gateRuns.length).toBeGreaterThanOrEqual(2);
+      // And the agent was given the gate's own words to fix.
+      const fix = prompts.find((text) => text.includes("gates refused this change"));
+      expect(fix).toContain("the gate says no");
+      expect(fix).toContain("Do not run the gate yourself");
+      // What the fix turn left is in the pushed branch.
+      const pushed = (
+        await gitOutput(["ls-remote", fixture.remote, workBranch(42)], {
+          cwd: fixture.repo,
+          env: fixture.env,
+        })
+      ).trim();
+      const sha = pushed.split(/\s+/)[0] ?? "";
+      const files = (
+        await gitOutput(["ls-tree", "-r", "--name-only", sha], {
+          cwd: fixture.repo,
+          env: fixture.env,
+        })
+      ).split("\n");
+      expect(files).toContain("gate-fix.txt");
     } finally {
       await fixture.dispose();
     }
@@ -3039,6 +3195,7 @@ describe("the CLI's run", () => {
       const failure = await runOnce({
         ...runOptions(fixture, gh),
         run,
+        gates: GATES,
         session: async ({ cwd, tools }) => {
           if (isReviewer(tools)) {
             return {
@@ -3141,7 +3298,7 @@ describe("the CLI's run", () => {
         return JSON.stringify({ verdict: "ci.yml  run 1  success" });
       };
 
-      const failure = await runOnce({ ...runOptions(fixture, gh), run }).then(
+      const failure = await runOnce({ ...runOptions(fixture, gh), run, gates: GATES }).then(
         () => null,
         (error: unknown) => error,
       );
@@ -3194,7 +3351,7 @@ describe("the CLI's run", () => {
         return JSON.stringify({ verdict: "ci.yml  run 1  success" });
       };
 
-      const failure = await runOnce({ ...runOptions(fixture, gh), run }).then(
+      const failure = await runOnce({ ...runOptions(fixture, gh), run, gates: GATES }).then(
         () => null,
         (error: unknown) => error,
       );
@@ -3242,7 +3399,7 @@ describe("the CLI's run", () => {
         return JSON.stringify({ verdict: "ci.yml  run 1  success" });
       };
 
-      const failure = await runOnce({ ...runOptions(fixture, gh), run }).then(
+      const failure = await runOnce({ ...runOptions(fixture, gh), run, gates: GATES }).then(
         () => null,
         (error: unknown) => error,
       );
@@ -3280,6 +3437,7 @@ describe("the CLI's run", () => {
       const failure = await runOnce({
         ...runOptions(fixture, gh),
         run,
+        gates: GATES,
         session: async ({ cwd, tools }) => {
           if (isReviewer(tools)) {
             reviews += 1;
@@ -3373,7 +3531,7 @@ describe("the CLI's run", () => {
           return JSON.stringify({ verdict: "ci.yml  run 1  success" });
         };
 
-        const failure = await runOnce({ ...runOptions(fixture, gh), run }).then(
+        const failure = await runOnce({ ...runOptions(fixture, gh), run, gates: GATES }).then(
           () => null,
           (error: unknown) => error,
         );
@@ -3408,7 +3566,7 @@ describe("the CLI's run", () => {
         return JSON.stringify({ verdict: "ci.yml  run 1  success" });
       };
 
-      await runOnce({ ...runOptions(fixture, gh), run });
+      await runOnce({ ...runOptions(fixture, gh), run, gates: GATES });
 
       const pushed = (
         await gitOutput(["ls-remote", fixture.remote, workBranch(42)], {
@@ -3453,6 +3611,7 @@ describe("the CLI's run", () => {
       const failure = await runOnce({
         ...runOptions(fixture, gh),
         run,
+        gates: GATES,
         session: async ({ cwd, tools }) => {
           if (isReviewer(tools)) {
             // The reviewer finds something, so the fix runs.
@@ -3951,26 +4110,32 @@ describe("the CLI's run", () => {
   });
 
   it("test_the_gates_keep_their_own_share_of_the_runs_budget", () => {
-    // The gates keep what the merge door gives the same gate — an hour each,
-    // because the gate has the same work to do there — and the session and
-    // the review keep what is left. The shares are reserved: a session that
-    // spends its whole budget must not leave the gates nothing to run with.
+    // A run that runs no gate reserves no gate budget: the gates' share is
+    // nothing, and the session and the review keep the rest. A run that is
+    // told to run three gates reserves an hour each — what the merge door
+    // gives the same gate, because the gate has the same work to do there.
     const shares = budgetShares(DEFAULT_DEADLINE_MS);
-    expect(shares.gatesMs).toBe(3 * GATE_TIMEOUT_MS);
+    expect(shares.gatesMs).toBe(0);
     // The session's share is the two hours the target's work costs: it
-    // implements, it runs the gates, and on a screen change it runs the
-    // desktop suite, which is a quarter of an hour on its own.
+    // implements, and on a screen change it runs the desktop suite, which is
+    // a quarter of an hour on its own.
     expect(shares.sessionMs).toBe(2 * 60 * 60 * 1000);
     expect(shares.reviewMs).toBeGreaterThan(0);
     expect(shares.sessionMs + shares.gatesMs + shares.reviewMs).toBe(DEFAULT_DEADLINE_MS);
 
+    // A run told to run gates reserves their share, and the ceiling follows
+    // the gates it runs.
+    const gated = budgetShares(defaultDeadlineMs(3), 3);
+    expect(gated.gatesMs).toBe(3 * GATE_TIMEOUT_MS);
+    expect(gated.sessionMs).toBe(2 * 60 * 60 * 1000);
+
     // A smaller ceiling is a smaller run all the way through, and not a run
     // whose gates are the part that starves.
-    const small = budgetShares(DEFAULT_DEADLINE_MS / 10);
+    const small = budgetShares(defaultDeadlineMs(3) / 10, 3);
     expect(small.gatesMs).toBe(Math.floor((3 * GATE_TIMEOUT_MS) / 10));
     expect(small.gatesMs).toBeGreaterThan(0);
     expect(small.sessionMs + small.gatesMs + small.reviewMs).toBeLessThanOrEqual(
-      DEFAULT_DEADLINE_MS / 10,
+      defaultDeadlineMs(3) / 10,
     );
   });
 
@@ -4553,6 +4718,10 @@ describe("the CLI's run", () => {
           lockDirectory,
           "--issue",
           "42",
+          // A run that nobody told to gate runs no gate: the gate is named
+          // here, and then the run stops at it.
+          "--gate",
+          "./check.sh",
         ],
         {
           gh,
@@ -6047,22 +6216,24 @@ describe("the leftovers a run files", () => {
     expect(last).toContain("improvement and refactoring");
     expect(last).toContain("## Agent Brief");
     expect(last).toContain(LEFTOVER_TOOL_NAME);
-    // The cheap ones are fixed in the run, and the gates run again.
-    expect(last).toContain("gates again");
+    // The cheap ones are fixed in the run, and the run does not build either.
+    expect(flatten(last)).toContain("Do not build and do not run the checks");
     // And the bound is in the prompt, not only in the tool.
     expect(last).toContain("three");
   });
 
-  it("test_the_prompt_says_that_the_runner_runs_the_gates_too", async () => {
-    // The prompt and the runner must not disagree. The runner runs the whole
-    // list before it pushes, whatever the size of the change; the
-    // small-change rule is the repository's pre-push hook's, and the prompt
-    // says so where the agent reads it.
+  it("test_the_prompt_says_that_the_agent_does_not_build", async () => {
+    // The prompt and the guard must not disagree. This run does not compile
+    // and does not gate the tree, and the agent is told so where it reads it:
+    // a build in the middle of a run costs minutes and says nothing the code
+    // does not.
     const prompts = await readPrompts();
     const implement = prompts[3] ?? "";
+    const verify = prompts[4] ?? "";
 
-    expect(implement).toContain("The runner runs the whole list again");
-    expect(implement).toContain("`./check.sh` only");
+    for (const turn of [implement, verify]) {
+      expect(flatten(turn)).toContain("Do not build, do not compile, do not run the checks");
+    }
   });
 
   it("test_the_verify_prompt_says_the_work_is_the_tree_s", async () => {
@@ -6074,7 +6245,9 @@ describe("the leftovers a run files", () => {
 
     expect(verify).toContain("The work is the tree's");
     expect(verify).toContain("not part of what the next run continues");
-    expect(verify).toContain("stashed tree");
+    // And what was not checked is said: a change that was not compiled is
+    // said so, not hidden.
+    expect(verify).toContain("what you did not check");
   });
 
   it("test_the_implement_prompt_says_the_work_is_the_tree_s", async () => {

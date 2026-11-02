@@ -30,6 +30,13 @@
  * run, and never a second copy of something already open — and a shell command
  * is a way around those bounds. The reason says what to do instead, so the
  * agent is not left guessing.
+ *
+ * The build is denied too. A run that compiles spends its minutes in a Gradle
+ * daemon and its tokens in a build log, and the tree that is pushed is the
+ * tree the agent left either way — the repository's own CI judges it. The
+ * agent reads the code and writes the change; it does not build it. Every way
+ * the target builds or checks is refused: the wrappers, the script, and the
+ * recipes.
  */
 export const GUARD_POLICY = {
   "*": "allow",
@@ -39,6 +46,50 @@ export const GUARD_POLICY = {
       action: "deny",
       reason:
         "File a leftover with the `agent_leftover` tool — it holds the bounds on the queue.",
+    },
+    "*./gw*": {
+      action: "deny",
+      reason: "Do not build: this run does not compile. Change the code and stop.",
+    },
+    "*./gradlew*": {
+      action: "deny",
+      reason: "Do not build: this run does not compile. Change the code and stop.",
+    },
+    "*./check.sh*": {
+      action: "deny",
+      reason: "Do not run the checks: this run does not gate the tree. Change the code and stop.",
+    },
+    "*just build*": {
+      action: "deny",
+      reason: "Do not build: this run does not compile. Change the code and stop.",
+    },
+    "*just check*": {
+      action: "deny",
+      reason: "Do not run the checks: this run does not gate the tree. Change the code and stop.",
+    },
+    "*just test*": {
+      action: "deny",
+      reason: "Do not run the checks: this run does not gate the tree. Change the code and stop.",
+    },
+    "*just lint*": {
+      action: "deny",
+      reason: "Do not run the checks: this run does not gate the tree. Change the code and stop.",
+    },
+    "*just detekt*": {
+      action: "deny",
+      reason: "Do not run the checks: this run does not gate the tree. Change the code and stop.",
+    },
+    "*just gate*": {
+      action: "deny",
+      reason: "Do not run the checks: this run does not gate the tree. Change the code and stop.",
+    },
+    "*just tcheck-evals*": {
+      action: "deny",
+      reason: "Do not run the checks: this run does not gate the tree. Change the code and stop.",
+    },
+    "*just docs-audit*": {
+      action: "deny",
+      reason: "Do not run the checks: this run does not gate the tree. Change the code and stop.",
     },
   },
   path: {

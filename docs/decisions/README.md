@@ -15,6 +15,8 @@ for the rule that the copies follow.
 
 | Decision | What it settles |
 |---|---|
+| `2026-11-05-a-run-gates-nothing-and-builds-nothing.md` | a run gates nothing and builds nothing: the gates are off by default and the agent may not compile — **supersedes** `2026-11-05-the-workflow-runs-the-gates.md` |
+| `2026-11-05-the-workflow-runs-the-gates.md` | the workflow runs the gates and the agent does not: a refusal comes back to the agent as a turn, which gates run is the repository's own business, and the gates run with the repository's own PATH — **superseded** by `2026-11-05-a-run-gates-nothing-and-builds-nothing.md`: the gates are off by default |
 | `2026-11-05-pi-is-gone.md` | Pi is out: the SDK, the workflow engine and the permission system go, Mastra is the only engine, and the graph is the runner's own TypeScript |
 | `2026-11-05-the-runner-is-a-command-and-not-a-pi-extension.md` | the door goes: the runner is a command, and what survives of the Pi extension record — **superseded** by `2026-11-05-pi-is-gone.md`: the command stands, the version gate goes with Pi |
 | `2026-11-05-the-run-runs-on-mastra.md` | the run runs on Mastra: the agent, the graph and the memory are Mastra's, and the seams and the contract stay — **superseded** by `2026-11-05-pi-is-gone.md`: the seams stand, the graph is the runner's own |

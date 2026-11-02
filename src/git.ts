@@ -65,6 +65,14 @@ export interface CommandSpec {
    */
   readonly outputFile?: string;
   /**
+   * The environment the command runs with, over the runner's own.
+   *
+   * A gate needs the tools of the checkout it runs in: the repository's gate
+   * CLI lives in a venv of that checkout's own, and a gate that cannot find
+   * it is a gate that never got to answer.
+   */
+  readonly env?: Readonly<Record<string, string>>;
+  /**
    * Whether a timeout kills the command's whole tree, not just the command.
    *
    * The command leads a process group of its own, and the group is what the
@@ -231,6 +239,10 @@ export const runCommand: CommandRunner = (spec) =>
     const child = spawn(spec.command, [...spec.args], {
       cwd: spec.cwd,
       stdio: ["pipe", "pipe", "pipe"],
+      // The runner's own environment, with the caller's on top of it: a gate
+      // that needs the tools of the checkout it runs in has to be able to
+      // find them.
+      ...(spec.env === undefined ? {} : { env: { ...process.env, ...spec.env } }),
       // The command leads its own process group, when the caller asks for it:
       // a gate that is killed half-way through must take its build with it,
       // or the build keeps writing into the worktree the runner restores and

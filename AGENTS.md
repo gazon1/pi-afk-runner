@@ -54,6 +54,25 @@ stop, the cut-off, the review loop) are the runner's own.
 The decision is in
 [docs/decisions/2026-11-05-pi-is-gone.md](docs/decisions/2026-11-05-pi-is-gone.md).
 
+## A run gates nothing and builds nothing
+
+A run runs **no** gate unless it is told to: the command line (`--gate`) or the repository's own
+`.afk-runner.json` in the root of the checkout. The tree the agent leaves is the tree that is
+pushed, and the pull request's own CI judges it.
+
+Nothing in a run builds either: the guard refuses `./gw`, `./gradlew`, `./check.sh` and the
+`just` gates, and the prompts say the same. The agent judges its change by reading it, and the
+verify turn says what it did not check.
+
+A run that *is* told to run gates runs them in the `gates` step, and the **agent does not run
+them**: an instruction to run a gate is not a gate. A gate that refuses the change goes back to
+the agent as a turn, with the gate's own output, and the gates run again on what it fixed.
+
+The merge door is a separate, opt-in mode and keeps the full `./check.sh`. The decisions are in
+[docs/decisions/2026-11-05-a-run-gates-nothing-and-builds-nothing.md](docs/decisions/2026-11-05-a-run-gates-nothing-and-builds-nothing.md)
+and
+[docs/decisions/2026-11-05-the-workflow-runs-the-gates.md](docs/decisions/2026-11-05-the-workflow-runs-the-gates.md).
+
 ## The contract comes first
 
 Before changing anything that **binds** — the queue selector, the labels, the brief's marker, the
