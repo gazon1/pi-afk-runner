@@ -382,7 +382,7 @@ export function liveFrontDoor(
       // The session is gone; the record on disk still has the run. A failure of
       // the door's own is seen, but the run keeps going to the next boundary.
       if (!isStaleContext(failure)) {
-        talk(ctx, `afk-runner: the log widget failed: ${errorMessage(failure)}`, "error");
+        console.error(`afk-runner: the log widget failed: ${errorMessage(failure)}`);
       }
     }
   };
@@ -518,7 +518,13 @@ export function liveFrontDoor(
             autoAttach = attach(hostContext, true).catch((failure: unknown) => {
             if (!isStaleContext(failure)) {
               if (hostContext !== null) {
-                talk(hostContext, `afk-runner: the auto-attach failed: ${errorMessage(failure)}`, "error");
+                try {
+                  talk(hostContext, `afk-runner: the auto-attach failed: ${errorMessage(failure)}`, "error");
+                } catch (talkFailure) {
+                  if (!isStaleContext(talkFailure)) {
+                    console.error(`afk-runner: the auto-attach failed: ${errorMessage(failure)}`);
+                  }
+                }
               }
             }
           });
