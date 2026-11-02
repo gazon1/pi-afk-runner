@@ -16,8 +16,14 @@ checkEveryMs: 300000
 models:
   # The bigger the priority, the more the model is preferred. Two models with
   # the same priority are settled by the order of this file.
+  #
+  # `effort` is the level the model thinks at: `off`, `minimal`, `low`,
+  # `medium`, `high`, `xhigh` or `max`. A model without it runs at the level
+  # the SDK gives it, and a level the model does not have becomes the nearest
+  # one it has.
   - model: anthropic/claude-sonnet-4-5
     priority: 100
+    effort: high
 
   # A model that is only reachable through the host's own proxy — the one the
   # environment names. A host that has no proxy cannot use it, and the runner

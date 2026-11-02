@@ -15,6 +15,7 @@ import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 
 import {
   NoModelAvailable,
+  type EffortLevel,
   type Pool,
   type PoolModel,
   type PoolState,
@@ -35,6 +36,13 @@ export interface PoolHost {
   dispose(): void;
   readonly messages?: readonly TurnMessage[];
   setModel(model: PooledModel): Promise<void>;
+  /**
+   * The level the session thinks at.
+   *
+   * The SDK's session has one, and it clamps the level to what the model can
+   * do: a level the model does not have becomes the nearest one it has.
+   */
+  setThinkingLevel(level: EffortLevel): void;
 }
 
 /**
@@ -70,6 +78,7 @@ export class PoolSession implements AgentSession {
   ) {
     this.current = options.reference;
     this.pool = options.pool;
+    this.applyEffort(this.entry(this.current));
     this.useProxyFor(this.current);
     this.options.onEvent?.(`the model is now ${this.current}`);
     this.startTimer();
@@ -323,8 +332,30 @@ export class PoolSession implements AgentSession {
     }
     await this.options.host.setModel(target);
     this.current = model.reference;
+    // The model was set first: the SDK gives the new model its own level, and
+    // the file's level is the last word about it.
+    this.applyEffort(model);
     this.useProxyFor(this.current);
     this.options.onEvent?.(`${reason} — the model is now ${model.reference}`);
+  }
+
+  /** The pool's own entry for the model the session runs on. */
+  private entry(reference: string): PoolModel | undefined {
+    return this.pool.models.find((model) => model.reference === reference);
+  }
+
+  /**
+   * Set the level the file names for this model.
+   *
+   * A model the file says nothing about keeps the level the SDK gave it when
+   * the model was set: the SDK knows what its own models can do, and the file
+   * did not say otherwise.
+   */
+  private applyEffort(model: PoolModel | undefined): void {
+    if (model?.effort === undefined) {
+      return;
+    }
+    this.options.host.setThinkingLevel(model.effort);
   }
 
   /**
@@ -334,7 +365,7 @@ export class PoolSession implements AgentSession {
    * without one goes direct.
    */
   private useProxyFor(reference: string): void {
-    const model = this.pool.models.find((entry) => entry.reference === reference);
+    const model = this.entry(reference);
     useProxy(typeof model?.proxy === "string" ? model.proxy : undefined);
   }
 }

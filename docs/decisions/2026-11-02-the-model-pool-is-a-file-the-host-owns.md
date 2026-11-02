@@ -43,8 +43,10 @@ is gone, and towards a model that has become available.
 another one. The agent's directory is already the host's own place, and it is known to both
 doors: the CLI and the live chat. The file says which models the runner may use, each one's
 `priority` (the bigger number wins, the order of the file settles a tie), its `peak` hours
-(`HH:MM-HH:MM`, with a `timezone` that says where they are counted), and the `proxy` its requests
-go through. `checkEveryMs` says how often the pool is looked at again; five minutes by default.
+(`HH:MM-HH:MM`, with a `timezone` that says where they are counted), the `proxy` its requests
+go through, and the `effort` it thinks at (see
+`2026-11-02-the-file-names-the-effort-of-each-model.md`). `checkEveryMs` says how often the pool
+is looked at again; five minutes by default.
 
 **Every model may have a proxy of its own.** `proxy: true` is the **host's** own proxy — the one
 the environment names — and a model that needs it cannot be used without one. A URL is a proxy of
