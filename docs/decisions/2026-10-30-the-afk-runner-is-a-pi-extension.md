@@ -1,7 +1,8 @@
 ---
 title: The AFK runner is a Pi extension, assembled from ready-made parts
 date: 2026-10-30
-status: accepted
+status: superseded
+superseded-by: 2026-11-05-the-runner-is-a-command-and-not-a-pi-extension
 tags: [process, tooling, agent, github]
 ---
 

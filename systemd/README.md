@@ -15,6 +15,10 @@ systemctl --user enable --now pi-afk-runner.timer
 systemctl --user enable --now pi-afk-runner-merge.timer
 ```
 
+The units read `MINIMAX_API_KEY` from `%h/.config/afk-runner/env` — create it
+before the first tick, or the unit will not start ([The key's
+file](#the-keys-file)).
+
 The merge timer is optional: with it, the runner also lands the reviewed pull
 requests it opened (see [Merging](#merging) below). Without it, the work timer
 opens and reviews, and a human lands — the work pipeline's own guarantee.
@@ -29,20 +33,55 @@ The unit needs two things from the environment that systemd does not have:
   `agent/issue-<N>`, to open a pull request and to label an issue. The
   runner's own token is not the maintainer's session token — an unattended run
   that dies with the session that authorized it is an unattended run that
-  stops.
-- `PI_AGENT_DIR` must point at Pi's agent directory, so that the session the
-  runner creates has its settings and its credentials.
+  stops. `gh` keeps that token in its own store (`~/.config/gh/hosts.yml`),
+  and the runner does not need it in its environment.
+- `MINIMAX_API_KEY` must be set, so that the model gateway can resolve a model.
+  The runner holds no credential of its own.
 
-**The host needs the target repository's own tools.** The runner runs the
-repository's gates — `./check.sh`, `just tcheck-evals`, `just docs-audit` — in
-the worktree, so `just` and whatever those gates call have to be on the machine
-the timer runs on, and on the PATH the unit gives it. A gate that could not run
-says so and ends the run (`45`); it does not look like a gate that refused the
-change. The run's budget is divided into three shares: the session keeps two
-hours, the gates keep an hour each — the same the merge door gives the same
-gate — and the review keeps what is left. A sweep that works several issues
-takes several hours — the timer fires hourly, and the lock keeps the ticks
-from overlapping.
+### The key's file
+
+Both units read it from one file — `%h/.config/afk-runner/env` — and the file
+is what the unit's `EnvironmentFile=` names:
+
+```bash
+mkdir -p ~/.config/afk-runner
+printf 'MINIMAX_API_KEY=%s\n' "$MINIMAX_API_KEY" > ~/.config/afk-runner/env
+chmod 600 ~/.config/afk-runner/env
+```
+
+One `NAME=value` per line, no `export`. The file is the only place the key
+lives: `systemctl --user` reads neither `~/.bashrc` nor the shell's
+environment, and a key typed into a terminal is a key the timer never sees.
+Mode 600 — the file holds a credential, and the units read it as the user.
+
+**The file is required.** With it missing, the unit does not start, and the
+timer's journal says why. A runner with no key is a runner that cannot resolve
+a model, and starting it anyway only moves the failure later and further from
+its cause.
+
+A key that changed needs nothing: the file is read at every start of the unit,
+so the next tick picks the new value up. `daemon-reload` is for the unit files
+themselves, not for the key.
+
+**A timed run gates nothing and builds nothing.** The tree the agent leaves is
+the tree that is pushed, and the pull request's own CI judges it. Nothing in the
+run compiles either: the guard refuses the build commands, so the unit needs no
+Gradle daemon and no build minutes. A repository that wants gates says so in
+`.afk-runner.json` in the root of the checkout — the unit needs no change for that
+— and the command line wins over that file.
+
+**The host needs the target repository's own tools** for the gates a run is told
+to run: `just` and whatever those gates call have to be on the machine the timer
+runs on, and on the PATH the unit gives it. The tools of a checkout live in that
+checkout's own venv, and the repository's setup script says where: the gates run
+with the PATH it printed. A gate that could not run says so and ends the run
+(`45`); it does not look like a gate that refused the change.
+
+The run's budget is divided into three shares: the session keeps two hours, the
+gates keep an hour each — the same the merge door gives the same gate — and the
+review keeps what is left. A run with no gate reserves no gate budget. A sweep
+that works several issues takes several hours — the timer fires hourly, and the
+lock keeps the ticks from overlapping.
 
 ## What the exit code says
 

@@ -1,29 +1,22 @@
 /**
- * The session's workflow: the states it moves through, and the engine that
- * moves it.
+ * The session's workflow: the states it moves through, and the graph that moves
+ * them.
  *
- * The engine is `@quintinshaw/pi-dynamic-workflows`. Its own agents are
- * **separate sessions, in separate worktrees** — a fleet of subagents, each
- * with a model of its own. That is a different thing from what the runner
- * needs: the work session is **one** session — one system prompt, one set of
- * tools, one context that every turn sees — and the runner's own rules (the
- * deadline, the stop, the turn whose model call failed) are the runner's to
- * hold, not the engine's.
+ * The graph is the runner's own code. It used to be an engine of its own —
+ * `@quintinshaw/pi-dynamic-workflows` — but that engine was built for Pi and
+ * pulled Pi's SDK in with it, and the runner used three things of it: `phase()`,
+ * `agent()` and `gate()`. Those are three pieces of control flow, and they are
+ * here now, in the runner's own words.
  *
- * So the engine is given a **turn runner** instead of subagents: the engine
- * decides what runs next and in which phase, and the runner's code decides
- * what a turn does. The scripts below are written out of the engine's own
- * blocks — `phase()`, `agent()` and `gate()` — rather than out of a traversal
- * of our own: the flow is fixed, and these are the blocks it is made of.
+ * What the engine gave the runner is kept, because the runner's rules depend on
+ * it: a failed turn **stops** the run, a cut-off run comes back as an aborted
+ * run with the states that finished, and the review loop retries until the
+ * verdict passes or the attempts run out.
+ *
+ * The engine's own subagents are not used, and never were: they are separate
+ * sessions in separate worktrees, and the work session is **one** session — one
+ * system prompt, one set of tools, one context that every turn sees.
  */
-
-import {
-  runWorkflow,
-  WorkflowError,
-  WorkflowErrorCode,
-  type AgentRunOptions,
-} from "@quintinshaw/pi-dynamic-workflows";
-import type { TSchema } from "typebox";
 
 import { GateFailed } from "./gates.js";
 
@@ -50,8 +43,8 @@ export const WORKFLOW_STATES = [
  * The nodes that do not run a turn.
  *
  * They are the runner's own work — closing an issue, filing smaller ones — and
- * they run inside the same workflow so that the branch that reaches them is the
- * workflow's decision, not a condition beside it.
+ * they run inside the same graph so that the branch that reaches them is the
+ * graph's decision, not a condition beside it.
  */
 export const WORKFLOW_ACTIONS = [
   { name: "close-skip", phase: "Close", action: "close-skip" },
@@ -65,7 +58,7 @@ export const WORKFLOW_ACTIONS = [
  * prompt files, and the review session's states run one prompt of their own.
  */
 export interface StateName {
-  /** The state's name — the label the engine runs it under. */
+  /** The state's name — the label the graph runs it under. */
   readonly name: string;
   /** The phase the turn runs in. */
   readonly phase: string;
@@ -92,8 +85,8 @@ export interface WorkflowState extends StateName {
 /**
  * What one state did.
  *
- * A state either finished — with the token the script branches on — or failed,
- * and the failure is a value the runtime handles: the engine stops the run on
+ * A state either finished — with the token the branch is keyed by — or failed,
+ * and the failure is a value the runtime handles: the graph stops the run on
  * it, and the runner reports it.
  */
 export type StateOutcome =
@@ -111,122 +104,65 @@ export interface StatesResult {
   readonly aborted: boolean;
 }
 
-/**
- * The script a session without branches runs: one turn per state, in order.
- *
- * It is the review, the merge resolution, and the tests that say what a turn
- * does. It uses the engine's `phase` and `agent` blocks directly.
- */
-const LINEAR_SCRIPT = `export const meta = {
-  name: 'afk_session',
-  description: "The runner's session: one turn per state, in one session.",
-}
-
-const outcomes = []
-for (const state of args.states) {
-  phase(state.phase)
-  outcomes.push(await agent(state.text, { label: state.name }))
-}
-return outcomes
-`;
+/** The codes the graph's own errors carry. */
+export const WORKFLOW_ERROR_CODE = {
+  /** The run was cut off — the deadline, or a stop. */
+  aborted: "workflow_aborted",
+  /** The graph ran a state the session does not declare. */
+  script: "script_validation_error",
+  /** A turn failed. */
+  execution: "agent_execution_error",
+} as const;
 
 /**
- * The script the work session runs.
+ * The graph's own error.
  *
- * It is the branch the issue takes, in the engine's own blocks: the intake
- * data, a triage that may close the issue instead of working it, a scope check
- * that may split it into smaller issues, and then the four work turns. A
- * decision is the token the turn returned, and the `if` is what follows it.
+ * `details` is the failure underneath: the one the runner reports, with the
+ * message the caller expects. `recoverable` says whether the run may carry on
+ * past it — a failed turn is not recoverable, because a run that carries on
+ * past a failed turn looks like a run that worked.
  */
-const WORK_SCRIPT = `export const meta = {
-  name: 'afk_work_session',
-  description: "The runner's work session: triage, scope, then the work.",
-}
+export class WorkflowError extends Error {
+  /** The code the failure is told apart by. */
+  readonly code: string;
+  /** The failure underneath, when there is one. */
+  readonly details: unknown;
+  /** Whether the run may carry on past this failure. */
+  readonly recoverable: boolean;
 
-const run = async (name) => {
-  const state = args.nodes[name]
-  phase(state.phase)
-  return await agent(state.text, { label: name })
+  constructor(
+    message: string,
+    code: string,
+    options: { readonly recoverable?: boolean; readonly details?: unknown } = {},
+  ) {
+    super(message);
+    this.name = "WorkflowError";
+    this.code = code;
+    this.recoverable = options.recoverable ?? true;
+    this.details = options.details;
+  }
 }
-
-if (args.nodes['issue-body']) {
-  await run('issue-body')
-}
-if (args.nodes['issue-comments']) {
-  await run('issue-comments')
-}
-
-if (args.nodes['related']) {
-  await run('related')
-}
-
-const triage = await run('triage')
-if (triage === 'skip') {
-  await run('close-skip')
-  return { decision: 'skip' }
-}
-
-const scope = await run('scope')
-if (scope === 'split') {
-  await run('split')
-  return { decision: 'split' }
-}
-
-await run('brief')
-await run('implement')
-await run('verify')
-await run('next')
-return { decision: 'work' }
-`;
-
-/**
- * The script the review loop runs.
- *
- * `gate()` is the engine's own retry-until-pass block: it runs the review, the
- * validator decides whether the verdict passed, and a failure's feedback is fed
- * to the next attempt, which fixes before it reviews again. The runner's
- * callbacks do the work; the loop is the engine's.
- */
-const REVIEW_SCRIPT = `export const meta = {
-  name: 'afk_review',
-  description: "Review the pull request until it passes, fixing what failed.",
-}
-
-phase('Review')
-const result = await gate(
-  async (feedback) => {
-    if (feedback) {
-      await agent(feedback, { label: 'fix' })
-    }
-    return await agent('review', { label: 'review' })
-  },
-  (value) => value === 'pass' ? { ok: true } : { ok: false, feedback: 'the review said fail' },
-  { attempts: args.attempts },
-)
-return result
-`;
 
 /**
  * The error that says the run was cut off.
  *
- * It is the engine's own abort error, so the engine stops the run on it
- * instead of treating it as a recoverable failure and carrying on to the next
- * state.
+ * It is the graph's own abort error, so the run stops on it instead of
+ * treating it as a recoverable failure and carrying on to the next state.
  */
 export function cutOffError(message: string): WorkflowError {
-  return new WorkflowError(message, WorkflowErrorCode.WORKFLOW_ABORTED, { recoverable: false });
+  return new WorkflowError(message, WORKFLOW_ERROR_CODE.aborted, { recoverable: false });
 }
 
 /** Whether an error says the run was cut off. */
 export function isCutOff(error: unknown): boolean {
-  return error instanceof WorkflowError && error.code === WorkflowErrorCode.WORKFLOW_ABORTED;
+  return error instanceof WorkflowError && error.code === WORKFLOW_ERROR_CODE.aborted;
 }
 
 /**
- * The error a state failed with, when the engine is carrying one.
+ * The error a state failed with.
  *
- * The engine wraps a failed turn in its own error; the failure underneath it
- * is the one the runner reports, with the message the caller expects.
+ * The failure underneath the graph's own error is the one the runner reports,
+ * with the message the caller expects.
  */
 export function stateFailure(error: unknown): Error | null {
   if (error instanceof WorkflowError && error.details instanceof Error) {
@@ -235,106 +171,162 @@ export function stateFailure(error: unknown): Error | null {
   return null;
 }
 
-/**
- * The host's `agent` wrapper around a turn runner.
- *
- * The engine runs a node by its label, so the label is what finds the state.
- * A label the runner did not declare is a graph that has drifted from the
- * runner, and it fails rather than running a turn nobody waited for. A failed
- * turn is made **unrecoverable**: the engine's own default is to log it and
- * carry on, and a run that carries on past a failed turn looks like a run that
- * worked.
- */
-function turnAgent(options: {
-  readonly byName: ReadonlyMap<string, WorkflowState>;
-  readonly run: TurnRunner;
-  readonly completed: WorkflowState[];
-}): { run(prompt: string, agentOptions?: AgentRunOptions<TSchema>): Promise<unknown> } {
-  const runNode = async (state: WorkflowState): Promise<StateOutcome> => {
-    try {
-      return await options.run(state);
-    } catch (error) {
-      if (isCutOff(error)) {
-        throw error;
-      }
-      return {
-        state: "error",
-        error: error instanceof Error ? error : new Error(String(error)),
-      };
-    }
-  };
-
-  return {
-    async run(_prompt: string, agentOptions?: AgentRunOptions<TSchema>): Promise<unknown> {
-      const name = agentOptions?.label ?? "";
-      const state = options.byName.get(name);
-      if (state === undefined) {
-        throw new WorkflowError(
-          `the workflow ran a state the session does not declare: ${name}`,
-          WorkflowErrorCode.SCRIPT_VALIDATION_ERROR,
-          { recoverable: false },
-        );
-      }
-      const outcome = await runNode(state);
-      if (outcome.state === "error") {
-        // The failure says which state it happened in: the states are what the
-        // session is made of, and a failure without a place is a failure the
-        // record cannot point at.
-        throw new WorkflowError(
-          `the ${state.phase} phase failed: ${outcome.error.message}`,
-          WorkflowErrorCode.AGENT_EXECUTION_ERROR,
-          {
-            recoverable: false,
-            details: outcome.error,
-          },
-        );
-      }
-      options.completed.push(state);
-      // The engine reads an empty answer as a state that produced nothing, and
-      // treats it as a recoverable failure: a state that finished says so.
-      return outcome.result ?? "ok";
-    },
-  };
+/** The message of a failure, whatever it was thrown as. */
+function messageOf(failure: unknown): string {
+  return failure instanceof Error ? failure.message : String(failure);
 }
 
 /**
- * Run one script in one session.
+ * The states' names, checked for duplicates.
  *
- * It is the one place the engine is called: the names are checked for
- * duplicates, the turns are run through the host's `agent`, and a run that is
- * cut off comes back as an aborted run with the nodes that finished.
+ * The graph runs a state by its name, so two states with one name are one
+ * state: the second one's turn would never run, and the first one's would run
+ * twice.
  */
-async function runEngine(options: {
-  readonly script: string;
-  readonly args: unknown;
+function uniqueNames(states: readonly WorkflowState[]): void {
+  const seen = new Set<string>();
+  for (const state of states) {
+    if (seen.has(state.name)) {
+      throw new Error(`the session declares two states named ${state.name}`);
+    }
+    seen.add(state.name);
+  }
+}
+
+/**
+ * Run one state and record what it did.
+ *
+ * It answers the token the branch is keyed by — the triage's `skip`, the
+ * scope's `split`, `ok` for everything else. A failed state stops the run: the
+ * failure is raised as the graph's own error, with the failure underneath it
+ * kept, because the record and the exit code must name it.
+ */
+async function runState(
+  state: WorkflowState,
+  run: TurnRunner,
+  completed: WorkflowState[],
+): Promise<string> {
+  let outcome: StateOutcome;
+  try {
+    outcome = await run(state);
+  } catch (failure) {
+    if (isCutOff(failure)) {
+      throw failure;
+    }
+    throw new WorkflowError(
+      `the ${state.phase} phase failed: ${messageOf(failure)}`,
+      WORKFLOW_ERROR_CODE.execution,
+      { recoverable: false, details: failure },
+    );
+  }
+  if (outcome.state === "error") {
+    // The failure says which state it happened in: the states are what the
+    // session is made of, and a failure without a place is a failure the
+    // record cannot point at.
+    throw new WorkflowError(
+      `the ${state.phase} phase failed: ${outcome.error.message}`,
+      WORKFLOW_ERROR_CODE.execution,
+      { recoverable: false, details: outcome.error },
+    );
+  }
+  completed.push(state);
+  // The graph reads an empty answer as a state that produced nothing, and
+  // treats it as a recoverable failure: a state that finished says so.
+  return outcome.result ?? "ok";
+}
+
+/**
+ * Run the states, in order, in one session.
+ *
+ * The runner's `run` runs the turns. A state that fails stops the run and the
+ * failure comes back out of it; a run that is cut off comes back as an aborted
+ * run, with the states that finished.
+ */
+export async function runStates(options: {
+  readonly states: readonly WorkflowState[];
+  readonly run: TurnRunner;
+  /**
+   * A state the run says it does not need is not run.
+   *
+   * The answer is asked before the state runs, so a state that depends on what
+   * the earlier states did — a second chance, given only when the first one
+   * did not do its job — is skipped or not, and the run says which.
+   */
+  readonly skip?: (state: WorkflowState) => boolean;
+}): Promise<StatesResult> {
+  const completed: WorkflowState[] = [];
+  uniqueNames(options.states);
+
+  for (const state of options.states) {
+    if (options.skip?.(state) === true) {
+      continue;
+    }
+    try {
+      await runState(state, options.run, completed);
+    } catch (error) {
+      if (isCutOff(error)) {
+        return { completed, aborted: true };
+      }
+      throw error;
+    }
+  }
+  return { completed, aborted: false };
+}
+
+/**
+ * Run the work session's graph.
+ *
+ * The branch is the issue's own: the intake data, a triage that may close the
+ * issue instead of working it, a scope check that may split it into smaller
+ * issues, and then the four work turns. A decision is the token the turn
+ * returned, and what follows it is the branch.
+ */
+export async function runWorkSession(options: {
   readonly nodes: readonly WorkflowState[];
   readonly run: TurnRunner;
 }): Promise<StatesResult> {
   const completed: WorkflowState[] = [];
-  const byName = new Map<string, WorkflowState>();
-  for (const node of options.nodes) {
-    if (byName.has(node.name)) {
-      // The engine runs a state by its name, so two states with one name are
-      // one state: the second one's turn would never run, and the first one's
-      // would run twice.
-      throw new Error(`the session declares two states named ${node.name}`);
+  const byName = new Map(options.nodes.map((node) => [node.name, node]));
+
+  /** The node the branch names, or a failure that says the graph drifted. */
+  const node = (name: string): WorkflowState => {
+    const found = byName.get(name);
+    if (found === undefined) {
+      throw new WorkflowError(
+        `the workflow ran a state the session does not declare: ${name}`,
+        WORKFLOW_ERROR_CODE.script,
+        { recoverable: false },
+      );
     }
-    byName.set(node.name, node);
-  }
+    return found;
+  };
+
+  /** Run one node of the branch and answer the token it returned. */
+  const step = async (name: string): Promise<string> =>
+    await runState(node(name), options.run, completed);
 
   try {
-    await runWorkflow(options.script, {
-      args: options.args,
-      agent: turnAgent({ byName, run: options.run, completed }),
-      // The runner's deadline is the run's timeout: a second one here would
-      // cut a turn the runner still wants, and a retry here would send a turn
-      // twice.
-      agentTimeoutMs: null,
-      agentRetries: 0,
-      // The record of a run belongs to the runner, under
-      // `build/diagnostics/`: the engine's own logs are not it.
-      persistLogs: false,
-    });
+    for (const name of ["issue-body", "issue-comments", "related"]) {
+      if (byName.has(name)) {
+        await step(name);
+      }
+    }
+
+    const triage = await step("triage");
+    if (triage === "skip") {
+      await step("close-skip");
+      return { completed, aborted: false };
+    }
+
+    const scope = await step("scope");
+    if (scope === "split") {
+      await step("split");
+      return { completed, aborted: false };
+    }
+
+    for (const name of ["brief", "implement", "verify", "next"]) {
+      await step(name);
+    }
     return { completed, aborted: false };
   } catch (error) {
     if (isCutOff(error)) {
@@ -345,62 +337,15 @@ async function runEngine(options: {
 }
 
 /**
- * Run the states, in order, in one session.
- *
- * The engine runs the linear script; the runner's `run` runs the turns. A
- * state that fails stops the run and the failure comes back out of it; a run
- * that is cut off comes back as an aborted run, with the states that finished.
- */
-export async function runStates(options: {
-  readonly states: readonly WorkflowState[];
-  readonly run: TurnRunner;
-}): Promise<StatesResult> {
-  return runEngine({
-    script: LINEAR_SCRIPT,
-    args: { states: options.states },
-    nodes: options.states,
-    run: options.run,
-  });
-}
-
-/**
- * Run the work session's graph.
- *
- * The script is the branch; the `nodes` are what it runs. A node the session
- * did not declare is not in the map, and the script only names the ones it
- * knows: the intake turns when the issue has them, and the two actions on the
- * branches that reach them.
- */
-export async function runWorkSession(options: {
-  readonly nodes: readonly WorkflowState[];
-  readonly run: TurnRunner;
-}): Promise<StatesResult> {
-  const nodes: Record<string, { phase: string; text: string }> = {};
-  for (const node of options.nodes) {
-    nodes[node.name] = { phase: node.phase, text: node.text };
-  }
-  return runEngine({
-    script: WORK_SCRIPT,
-    args: { nodes },
-    nodes: options.nodes,
-    run: options.run,
-  });
-}
-
-/**
  * The error a fix raises when it changed nothing.
  *
  * The review loop stops on it: a fix that moved nothing has nothing to push
  * and nothing to review again, and the loop would spend a review on the same
  * diff to hear the same verdict.
- *
- * It is a `WorkflowError` that is **not recoverable**, like the run's cut-off:
- * the engine's `gate` has no break, so the only way out of the loop is a
- * failure the engine stops the run on.
  */
 export class FixChangedNothing extends WorkflowError {
   constructor(message = "the fix changed nothing") {
-    super(message, WorkflowErrorCode.AGENT_EXECUTION_ERROR, { recoverable: false });
+    super(message, WORKFLOW_ERROR_CODE.execution, { recoverable: false });
     this.name = "FixChangedNothing";
   }
 }
@@ -408,7 +353,7 @@ export class FixChangedNothing extends WorkflowError {
 /** The error a review raises when it ended without stating a verdict. */
 export class ReviewStatedNoVerdict extends WorkflowError {
   constructor(message = "the review stated no verdict") {
-    super(message, WorkflowErrorCode.AGENT_EXECUTION_ERROR, { recoverable: false });
+    super(message, WORKFLOW_ERROR_CODE.execution, { recoverable: false });
     this.name = "ReviewStatedNoVerdict";
   }
 }
@@ -423,7 +368,7 @@ export type ReviewGateStopReason =
 
 /** What the review loop did. */
 export interface ReviewGateResult {
-  /** How many reviews the engine asked for. */
+  /** How many reviews the loop asked for. */
   readonly reviews: number;
   /** Why the loop stopped. */
   readonly stopReason: ReviewGateStopReason;
@@ -431,7 +376,7 @@ export interface ReviewGateResult {
 
 /**
  * Review, fix, and review again until the verdict passes or the attempts run
- * out — the engine's `gate`, not a loop of our own.
+ * out.
  *
  * `review` returns the verdict; `fix` gets the feedback the failed verdict
  * produced and does the correcting. The number of attempts bounds the loop, and
@@ -441,12 +386,9 @@ export interface ReviewGateResult {
  * nothing to push and nothing to review again, and the loop comes back with
  * `noChange` set.
  *
- * A review that was cut off stops the loop too. The cut-off is the engine's
- * own abort error — an unknown failure is **recoverable**, and a recoverable
- * failure is swallowed: the engine logs it, returns nothing, and the loop
- * carries on to the next attempt. A review that was cut off stated no
- * verdict, so there is nothing to fix and nothing to review again, and the
- * loop comes back with `cutOff` set.
+ * A review that was cut off stops the loop too. A cut-off review stated no
+ * verdict, so there is nothing to fix and nothing to review again, and the loop
+ * comes back with `cutOff` set.
  */
 export async function runReviewGate(options: {
   readonly attempts: number;
@@ -454,79 +396,61 @@ export async function runReviewGate(options: {
   readonly fix: (feedback: string | undefined) => Promise<void>;
 }): Promise<ReviewGateResult> {
   let reviews = 0;
-  const agent = {
-    async run(prompt: string, agentOptions?: AgentRunOptions<TSchema>): Promise<unknown> {
-      const label = agentOptions?.label ?? "";
-      if (label === "review") {
-        reviews += 1;
-        // A review that was cut off raises the engine's own abort error: the
-        // engine stops the run on it and the loop ends where it is. A plain
-        // failure would be swallowed — an unknown failure is recoverable —
-        // and the loop would buy another fix turn and another review of the
-        // same diff.
-        return await options.review();
-      }
-      if (label === "fix") {
-        try {
-          await options.fix(prompt === "" ? undefined : prompt);
-        } catch (error) {
-          if (error instanceof GateFailed) {
-            // A gate that refused the fix is not a failure the engine may
-            // swallow: it would carry on to the next review, and the review
-            // would pass on a tree that was never pushed — the run would say
-            // it worked, and nothing would name the gate. The failure under
-            // it is kept, so the record and the exit code can name it.
-            throw new WorkflowError(
-              error.message,
-              WorkflowErrorCode.AGENT_EXECUTION_ERROR,
-              { recoverable: false, details: error },
-            );
-          }
-          // A fix that changed nothing carries its own way out: it is not
-          // recoverable, so the engine stops the run on it and the loop ends.
-          throw error;
-        }
-        return "ok";
-      }
-      throw new WorkflowError(
-        `the review workflow ran an unexpected state: ${label}`,
-        WorkflowErrorCode.SCRIPT_VALIDATION_ERROR,
-        { recoverable: false },
-      );
-    },
-  };
+  let feedback: string | undefined;
 
   try {
-    const run = await runWorkflow<{ ok?: boolean }>(REVIEW_SCRIPT, {
-      args: { attempts: options.attempts },
-      agent,
-      agentTimeoutMs: null,
-      agentRetries: 0,
-      persistLogs: false,
-    });
-    return {
-      reviews,
-      stopReason: run.result?.ok === true ? { kind: "passed" } : { kind: "failed" },
-    };
+    for (let attempt = 0; attempt < options.attempts; attempt += 1) {
+      if (feedback !== undefined) {
+        try {
+          await options.fix(feedback);
+        } catch (error) {
+          if (error instanceof GateFailed) {
+            // A gate that refused the fix is not a failure the loop may carry
+            // on from: it would carry on to the next review, and the review
+            // would pass on a tree that was never pushed — the run would say it
+            // worked, and nothing would name the gate. The failure under it is
+            // kept, so the record and the exit code can name it.
+            throw new WorkflowError(error.message, WORKFLOW_ERROR_CODE.execution, {
+              recoverable: false,
+              details: error,
+            });
+          }
+          if (isCutOff(error)) {
+            return {
+              reviews,
+              stopReason: { kind: "cutOff", message: messageOf(error) },
+            };
+          }
+          // A fix that changed nothing carries its own way out, and a fix that
+          // failed is a failure the run reports.
+          throw error;
+        }
+      }
+
+      reviews += 1;
+      let verdict: "pass" | "fail";
+      try {
+        verdict = await options.review();
+      } catch (error) {
+        if (error instanceof ReviewStatedNoVerdict) {
+          return { reviews, stopReason: { kind: "statedNoVerdict" } };
+        }
+        if (isCutOff(error)) {
+          return { reviews, stopReason: { kind: "cutOff", message: messageOf(error) } };
+        }
+        throw error;
+      }
+      if (verdict === "pass") {
+        return { reviews, stopReason: { kind: "passed" } };
+      }
+      feedback = "the review said fail";
+    }
+    return { reviews, stopReason: { kind: "failed" } };
   } catch (error) {
     // The fix that changed nothing stops the loop, and the loop's verdict is
     // a failure: the review did not pass, and the fix did not answer it.
     if (error instanceof FixChangedNothing) {
       return { reviews, stopReason: { kind: "noChange" } };
-    }
-    if (error instanceof ReviewStatedNoVerdict) {
-      return { reviews, stopReason: { kind: "statedNoVerdict" } };
-    }
-    // The run was cut off — the review's session or the fix's. The engine
-    // stopped on it: it is the engine's own abort error, and an unknown
-    // failure would have been swallowed and the loop would have carried on.
-    // There is no verdict to answer, so the loop ends where it is and the
-    // reason comes back with it.
-    if (isCutOff(error)) {
-      return {
-        reviews,
-        stopReason: { kind: "cutOff", message: error instanceof Error ? error.message : String(error) },
-      };
     }
     throw error;
   }

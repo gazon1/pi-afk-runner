@@ -11,15 +11,12 @@
  * dead model again on the next issue.
  */
 
-import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
-
 import {
   NoModelAvailable,
-  type EffortLevel,
+  type ModelCatalogue,
   type Pool,
   type PoolModel,
   type PoolState,
-  type PooledModel,
   isLimitFailure,
   knownModel,
   pickPoolModel,
@@ -29,20 +26,23 @@ import {
 import { useProxy } from "./proxy.js";
 import { type AgentSession, type TurnMessage, lastAssistant, turnFailure } from "./session.js";
 
-/** The session the pool drives — the SDK's own, as far as the pool is concerned. */
+/** The session the pool drives — the engine's own, as far as the pool is concerned. */
 export interface PoolHost {
+  /** Send one turn and resolve when it settles. */
   prompt(text: string): Promise<void>;
+  /** Interrupt the turn that is running. */
   abort(): Promise<void>;
+  /** Release the session. */
   dispose(): void;
-  readonly messages?: readonly TurnMessage[];
-  setModel(model: PooledModel): Promise<void>;
+  /** The session's messages, when it keeps them. */
+  readonly messages?: readonly TurnMessage[] | undefined;
   /**
-   * The level the session thinks at.
+   * Move the session onto another model — `provider/id`.
    *
-   * The SDK's session has one, and it clamps the level to what the model can
-   * do: a level the model does not have becomes the nearest one it has.
+   * The session keeps its conversation: the move is a new model on the same
+   * memory, not a new session.
    */
-  setThinkingLevel(level: EffortLevel): void;
+  setModel(reference: string): Promise<void>;
 }
 
 /**
@@ -66,7 +66,8 @@ export class PoolSession implements AgentSession {
   constructor(
     private readonly options: {
       readonly host: PoolHost;
-      readonly runtime: ModelRuntime;
+      /** What the runner knows about the models it may use. */
+      readonly catalogue: ModelCatalogue;
       readonly pool: Pool;
       /** What the pool remembers for the whole run. */
       readonly state: PoolState;
@@ -78,7 +79,6 @@ export class PoolSession implements AgentSession {
   ) {
     this.current = options.reference;
     this.pool = options.pool;
-    this.applyEffort(this.entry(this.current));
     this.useProxyFor(this.current);
     this.options.onEvent?.(`the model is now ${this.current}`);
     this.startTimer();
@@ -129,7 +129,7 @@ export class PoolSession implements AgentSession {
   /**
    * The failure the turn ended on — or null when it ended well.
    *
-   * The SDK resolves a turn whose model call failed, and throws when the
+   * The engine resolves a turn whose model call failed, and throws when the
    * provider's credential is gone. Both are the model's problem, and both say
    * the same thing: this model cannot answer.
    */
@@ -180,7 +180,7 @@ export class PoolSession implements AgentSession {
       exhausted: this.options.state.exhausted,
       proxyConfigured: this.options.proxyConfigured,
       now: new Date(),
-      usable: (model) => knownModel(this.options.runtime, model.reference),
+      usable: (model) => knownModel(this.options.catalogue, model.reference),
     });
   }
 
@@ -313,28 +313,27 @@ export class PoolSession implements AgentSession {
   }
 
   /** The models of the provider that can be reached right now. */
-  private async available(provider: string): Promise<readonly string[]> {
-    try {
-      const models = await this.options.runtime.getAvailable(provider);
-      return models.map((model) => model.id);
-    } catch {
-      // A provider that cannot be reached has no models to offer.
-      return [];
+  private available(provider: string): readonly string[] {
+    const models: string[] = [];
+    for (const model of this.pool.models) {
+      const { provider: own, id } = splitReference(model.reference, "the pool's model");
+      if (own !== provider) {
+        continue;
+      }
+      if (knownModel(this.options.catalogue, model.reference)) {
+        models.push(id);
+      }
     }
+    return models;
   }
 
   /** Move the session onto another model, and say so. */
   private async switchTo(model: PoolModel, reason: string): Promise<void> {
-    const { provider, id } = splitReference(model.reference, "the pool's model");
-    const target = this.options.runtime.getModel(provider, id);
-    if (target === undefined) {
-      throw new NoModelAvailable(`the provider ${provider} has no model ${id}`);
+    if (!knownModel(this.options.catalogue, model.reference)) {
+      throw new NoModelAvailable(`the runner carries no model ${model.reference}`);
     }
-    await this.options.host.setModel(target);
+    await this.options.host.setModel(model.reference);
     this.current = model.reference;
-    // The model was set first: the SDK gives the new model its own level, and
-    // the file's level is the last word about it.
-    this.applyEffort(model);
     this.useProxyFor(this.current);
     this.options.onEvent?.(`${reason} — the model is now ${model.reference}`);
   }
@@ -345,17 +344,14 @@ export class PoolSession implements AgentSession {
   }
 
   /**
-   * Set the level the file names for this model.
+   * The level the file names for this model.
    *
-   * A model the file says nothing about keeps the level the SDK gave it when
-   * the model was set: the SDK knows what its own models can do, and the file
-   * did not say otherwise.
+   * The engine has no thinking level to set — a Mastra agent runs the model
+   * it was given — so the level is the host's policy and the pool reports it
+   * rather than applying it. `--show-pool` says what the file means.
    */
-  private applyEffort(model: PoolModel | undefined): void {
-    if (model?.effort === undefined) {
-      return;
-    }
-    this.options.host.setThinkingLevel(model.effort);
+  private effort(model: PoolModel | undefined): string | undefined {
+    return model?.effort;
   }
 
   /**

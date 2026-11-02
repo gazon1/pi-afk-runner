@@ -1,6 +1,6 @@
 name: CI
 
-# The extension's own gate. It is not the repository's gate suite — this repository is a
+# The package's own gate. It is not the repository's gate suite — this repository is a
 # package, not an application — so it is one job that runs everything the package declares:
 # the type check, the lint, the tests, and the build.
 
@@ -45,11 +45,23 @@ jobs:
       - name: build
         run: npm run build
 
-      # The built package is what Pi loads, so the gate checks that the build produced the
-      # entry point the manifest promises.
-      - name: the built package has the entry point its manifest names
+      # The built package is what the command runs, so the gate checks that the
+      # build produced the entry points the manifest promises. The manifest is
+      # the list: a gate that names them itself is a second list, and the two
+      # drift — the first drift was a gate that still asked for the library
+      # entry points a command does not have.
+      - name: the built package has the entry points its manifest names
         run: |
           set -euo pipefail
-          test -f dist/extension.js
-          test -f dist/index.js
-          test -f dist/index.d.ts
+          node -e '
+            const { existsSync, readFileSync } = require("node:fs");
+            const manifest = JSON.parse(readFileSync("package.json", "utf8"));
+            const entries = typeof manifest.bin === "string"
+              ? [manifest.bin]
+              : Object.values(manifest.bin || {});
+            for (const entry of entries) {
+              if (!existsSync(entry)) {
+                throw new Error("the build did not produce " + entry);
+              }
+            }
+          '

@@ -1,6 +1,7 @@
 ---
 title: The chat the auto-attach opens keeps its worktree
-status: accepted
+status: superseded
+superseded-by: 2026-11-05-the-runner-is-a-command-and-not-a-pi-extension
 date: 2026-10-31
 authors: Command Code
 deciders: Singularity Developer

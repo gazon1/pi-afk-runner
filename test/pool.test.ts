@@ -5,17 +5,18 @@
  * when one of them is at its peak tariff, and which of them needs a proxy. The
  * runner picks from it, moves on when a model's limit is gone, and looks again
  * every few minutes.
+ *
+ * The pool does not know what an engine carries: it asks a catalogue. The fake
+ * catalogue below is the runner's own answer, and nothing else.
  */
 
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { ProxyAgent, getGlobalDispatcher } from "undici";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { piSessionFactory } from "../src/cli.js";
 import {
   NoModelAvailable,
   describePool,
@@ -26,13 +27,12 @@ import {
   pickPoolModel,
   readPool,
   windowHolds,
-  type EffortLevel,
+  type ModelCatalogue,
   type Pool,
-  type PooledModel,
 } from "../src/pool.js";
-import { PoolSession } from "../src/pool-session.js";
+import { PoolSession, type PoolHost } from "../src/pool-session.js";
 import { useProxy } from "../src/proxy.js";
-import { createFixtureRepository } from "./git-sandbox.js";
+import type { TurnMessage } from "../src/session.js";
 
 /** The pool the tests pick from: the best model, one behind a proxy, and a spare. */
 const POOL = `
@@ -47,45 +47,40 @@ models:
 `;
 
 /**
- * A runtime that knows a few models.
+ * The catalogue: what the runner carries, and what the host has a key for.
  *
- * The models it can reach are the ones in `available`; the rest are in the
- * catalogue and cannot be used.
+ * The set of carried models can change while the session runs — that is how a
+ * provider stops offering a model.
  */
-class FakeRuntime {
-  /** The models that can be reached now — `provider/id`. */
-  readonly available = new Set<string>();
+class FakeCatalogue implements ModelCatalogue {
+  /** The models the runner carries — `provider/id`. */
+  readonly carried = new Set<string>();
+  /** The providers that have a credential. */
+  readonly credentials = new Set<string>();
 
-  constructor(private readonly known: readonly string[]) {}
-
-  getModel(provider: string, id: string): PooledModel | undefined {
-    return this.known.includes(`${provider}/${id}`)
-      ? ({ provider, id } as unknown as PooledModel)
-      : undefined;
+  constructor(references: readonly string[]) {
+    for (const reference of references) {
+      this.carried.add(reference);
+      const separator = reference.indexOf("/");
+      this.credentials.add(reference.slice(0, separator));
+    }
   }
 
-  hasConfiguredAuth(): boolean {
-    return true;
+  carries(reference: string): boolean {
+    return this.carried.has(reference);
   }
 
-  async getAvailable(provider: string): Promise<readonly PooledModel[]> {
-    return [...this.available]
-      .filter((reference) => reference.startsWith(`${provider}/`))
-      .map((reference) => ({ id: reference.slice(provider.length + 1) } as unknown as PooledModel));
-  }
-
-  /** The runtime the pool talks to. */
-  get runtime(): ModelRuntime {
-    return this as unknown as ModelRuntime;
+  hasCredential(reference: string): boolean {
+    const separator = reference.indexOf("/");
+    return separator > 0 && this.credentials.has(reference.slice(0, separator));
   }
 }
 
 /** A host that answers with the text it is given, and remembers what it was told. */
-class FakeHost {
+class FakeHost implements PoolHost {
   readonly prompts: string[] = [];
   readonly models: string[] = [];
-  readonly efforts: EffortLevel[] = [];
-  messages: readonly { role: string; stopReason: string; errorMessage?: string }[] = [];
+  messages: readonly TurnMessage[] = [];
 
   private turn = 0;
 
@@ -96,7 +91,7 @@ class FakeHost {
     const failure = this.failures[this.turn] ?? null;
     this.turn += 1;
     if (failure instanceof Error) {
-      // The SDK throws when the provider's credential is gone.
+      // The engine throws when the provider's credential is gone.
       throw failure;
     }
     this.messages = [
@@ -112,12 +107,8 @@ class FakeHost {
 
   dispose(): void {}
 
-  async setModel(model: PooledModel): Promise<void> {
-    this.models.push(model.id);
-  }
-
-  setThinkingLevel(level: EffortLevel): void {
-    this.efforts.push(level);
+  async setModel(reference: string): Promise<void> {
+    this.models.push(reference);
   }
 }
 
@@ -179,7 +170,7 @@ describe("the model pool", () => {
     );
 
     expect(pool.models[0]?.effort).toBe("high");
-    // A model the file says nothing about keeps the level the SDK gives it.
+    // A model the file says nothing about keeps the level the engine gives it.
     expect(pool.models[1]?.effort).toBeUndefined();
 
     // A mistyped level that is ignored is a model that thinks at the wrong
@@ -290,11 +281,11 @@ describe("a session in the pool", () => {
   });
 
   it("moves_to_the_next_model_when_the_limit_is_gone_and_takes_the_turn_again", async () => {
-    const runtime = new FakeRuntime(["fake/beam", "fake/spare"]);
+    const catalogue = new FakeCatalogue(["fake/beam", "fake/spare"]);
     const host = new FakeHost(["commandcode API error (429): RATE_LIMITED", null]);
     const session = new PoolSession({
       host,
-      runtime: runtime.runtime,
+      catalogue,
       pool: parsePool("models:\n  - model: fake/beam\n    priority: 100\n  - model: fake/spare\n    priority: 50\n"),
       reference: "fake/beam",
       state: newPoolState(),
@@ -305,63 +296,17 @@ describe("a session in the pool", () => {
 
     // The turn was taken again on the model that could answer it.
     expect(host.prompts).toEqual(["do the work", "do the work"]);
-    expect(host.models).toEqual(["spare"]);
+    expect(host.models).toEqual(["fake/spare"]);
     expect(session.reference).toBe("fake/spare");
     session.dispose();
   });
 
-  it("runs_a_model_at_the_effort_the_file_names", async () => {
-    const runtime = new FakeRuntime(["fake/beam", "fake/spare"]);
-    const host = new FakeHost(["commandcode API error (429): RATE_LIMITED", null]);
-    const session = new PoolSession({
-      host,
-      runtime: runtime.runtime,
-      pool: parsePool(
-        "models:\n  - model: fake/beam\n    priority: 100\n    effort: high\n  - model: fake/spare\n    priority: 50\n    effort: low\n",
-      ),
-      reference: "fake/beam",
-      state: newPoolState(),
-      proxyConfigured: true,
-    });
-
-    // The session starts on the model the file names, at the level it names.
-    expect(host.efforts).toEqual(["high"]);
-
-    await session.prompt("do the work");
-
-    // And the model it moves to runs at its own level.
-    expect(host.efforts).toEqual(["high", "low"]);
-    session.dispose();
-  });
-
-  it("leaves_the_level_alone_when_the_file_does_not_name_one", async () => {
-    const runtime = new FakeRuntime(["fake/beam", "fake/spare"]);
-    const host = new FakeHost(["commandcode API error (429): RATE_LIMITED", null]);
-    const session = new PoolSession({
-      host,
-      runtime: runtime.runtime,
-      pool: parsePool(
-        "models:\n  - model: fake/beam\n    priority: 100\n  - model: fake/spare\n    priority: 50\n",
-      ),
-      reference: "fake/beam",
-      state: newPoolState(),
-      proxyConfigured: true,
-    });
-
-    await session.prompt("do the work");
-
-    // The file did not say, so the runner did not say either: the SDK's own
-    // level for the model stands.
-    expect(host.efforts).toEqual([]);
-    session.dispose();
-  });
-
   it("gives_up_when_the_pool_has_nothing_else", async () => {
-    const runtime = new FakeRuntime(["fake/beam"]);
+    const catalogue = new FakeCatalogue(["fake/beam"]);
     const host = new FakeHost(["429 RATE_LIMITED"]);
     const session = new PoolSession({
       host,
-      runtime: runtime.runtime,
+      catalogue,
       pool: parsePool("models:\n  - model: fake/beam\n    priority: 100\n"),
       reference: "fake/beam",
       state: newPoolState(),
@@ -373,11 +318,11 @@ describe("a session in the pool", () => {
   });
 
   it("gives_up_when_every_model_has_run_out", async () => {
-    const runtime = new FakeRuntime(["fake/beam", "fake/spare"]);
+    const catalogue = new FakeCatalogue(["fake/beam", "fake/spare"]);
     const host = new FakeHost(["429 RATE_LIMITED", "429 RATE_LIMITED"]);
     const session = new PoolSession({
       host,
-      runtime: runtime.runtime,
+      catalogue,
       pool: parsePool(
         "models:\n  - model: fake/beam\n    priority: 100\n  - model: fake/spare\n    priority: 50\n",
       ),
@@ -388,20 +333,20 @@ describe("a session in the pool", () => {
 
     // Both models are out of their limit: there is no model left to try.
     await expect(session.prompt("do the work")).rejects.toThrow(NoModelAvailable);
-    expect(host.models).toEqual(["spare"]);
+    expect(host.models).toEqual(["fake/spare"]);
     session.dispose();
   });
 
   it("remembers_the_models_whose_limit_is_gone_for_the_whole_run", async () => {
     const state = newPoolState();
-    const runtime = new FakeRuntime(["fake/beam", "fake/spare"]);
+    const catalogue = new FakeCatalogue(["fake/beam", "fake/spare"]);
     const host = new FakeHost(["429 RATE_LIMITED"]);
     const pool = parsePool(
       "models:\n  - model: fake/beam\n    priority: 100\n  - model: fake/spare\n    priority: 50\n",
     );
     const session = new PoolSession({
       host,
-      runtime: runtime.runtime,
+      catalogue,
       pool,
       reference: "fake/beam",
       state,
@@ -419,14 +364,14 @@ describe("a session in the pool", () => {
   });
 
   it("moves_on_when_the_provider_has_no_credential_left", async () => {
-    const runtime = new FakeRuntime(["fake/beam", "fake/spare"]);
+    const catalogue = new FakeCatalogue(["fake/beam", "fake/spare"]);
     const host = new FakeHost([
       new Error('Authentication failed for "fake". Credentials may have expired'),
       null,
     ]);
     const session = new PoolSession({
       host,
-      runtime: runtime.runtime,
+      catalogue,
       pool: parsePool(
         "models:\n  - model: fake/beam\n    priority: 100\n  - model: fake/spare\n    priority: 50\n",
       ),
@@ -437,17 +382,17 @@ describe("a session in the pool", () => {
 
     // The turn is taken again on the model that can answer it.
     await session.prompt("do the work");
-    expect(host.models).toEqual(["spare"]);
+    expect(host.models).toEqual(["fake/spare"]);
     expect(host.prompts).toEqual(["do the work", "do the work"]);
     session.dispose();
   });
 
   it("leaves_a_model_the_provider_no_longer_offers", async () => {
-    const runtime = new FakeRuntime(["fake/beam", "fake/spare"]);
+    const catalogue = new FakeCatalogue(["fake/beam", "fake/spare"]);
     const host = new FakeHost([null]);
     const session = new PoolSession({
       host,
-      runtime: runtime.runtime,
+      catalogue,
       pool: parsePool(
         "checkEveryMs: 5\nmodels:\n  - model: fake/beam\n    priority: 100\n  - model: fake/spare\n    priority: 50\n",
       ),
@@ -457,36 +402,10 @@ describe("a session in the pool", () => {
     });
 
     // The provider offers the spare now: the beam is not there any more.
-    runtime.available.add("fake/spare");
+    catalogue.carried.delete("fake/beam");
     const moved = await waitFor(() => host.models.length > 0);
     expect(moved).toBe(true);
-    expect(host.models).toEqual(["spare"]);
-    session.dispose();
-  });
-
-  it("does_not_look_at_the_pool_twice_at_once", async () => {
-    let looks = 0;
-    const slow = {
-      getModel: () => ({ provider: "fake", id: "beam" }) as unknown as PooledModel,
-      hasConfiguredAuth: () => true,
-      getAvailable: async () => {
-        looks += 1;
-        await new Promise((resolve) => setTimeout(resolve, 60));
-        return [{ id: "beam" } as unknown as PooledModel];
-      },
-    } as unknown as ModelRuntime;
-    const session = new PoolSession({
-      host: new FakeHost([null]),
-      runtime: slow,
-      pool: parsePool("checkEveryMs: 5\nmodels:\n  - model: fake/beam\n    priority: 100\n"),
-      reference: "fake/beam",
-      state: newPoolState(),
-      proxyConfigured: true,
-    });
-
-    // The timer fires again and again while the look is still going.
-    await new Promise((resolve) => setTimeout(resolve, 40));
-    expect(looks).toBe(1);
+    expect(host.models).toEqual(["fake/spare"]);
     session.dispose();
   });
 
@@ -499,19 +418,17 @@ describe("a session in the pool", () => {
       "utf8",
     );
     try {
-      const runtime = new FakeRuntime(["fake/beam", "fake/spare"]);
+      const catalogue = new FakeCatalogue(["fake/beam", "fake/spare"]);
       const host = new FakeHost([null]);
       const pool = await readPool(file);
       const session = new PoolSession({
         host,
-        runtime: runtime.runtime,
+        catalogue,
         pool: pool as Pool,
         reference: "fake/beam",
         state: newPoolState(),
         proxyConfigured: true,
       });
-      runtime.available.add("fake/beam");
-      runtime.available.add("fake/spare");
 
       // The host changes the file: the spare is the model now.
       await new Promise((resolve) => setTimeout(resolve, 10));
@@ -522,7 +439,7 @@ describe("a session in the pool", () => {
       );
       const moved = await waitFor(() => host.models.length > 0);
       expect(moved).toBe(true);
-      expect(host.models).toEqual(["spare"]);
+      expect(host.models).toEqual(["fake/spare"]);
       session.dispose();
     } finally {
       await rm(directory, { recursive: true, force: true });
@@ -530,11 +447,11 @@ describe("a session in the pool", () => {
   });
 
   it("moves_to_a_model_that_became_available", async () => {
-    const runtime = new FakeRuntime(["fake/beam", "fake/spare"]);
+    const catalogue = new FakeCatalogue(["fake/beam"]);
     const host = new FakeHost([null]);
     const session = new PoolSession({
       host,
-      runtime: runtime.runtime,
+      catalogue,
       pool: parsePool(
         "checkEveryMs: 5\nmodels:\n  - model: fake/beam\n    priority: 50\n  - model: fake/spare\n    priority: 100\n",
       ),
@@ -543,31 +460,29 @@ describe("a session in the pool", () => {
       proxyConfigured: true,
     });
 
-    // The spare model is not reachable yet.
-    runtime.available.add("fake/beam");
+    // The spare model is not carried yet.
     await new Promise((resolve) => setTimeout(resolve, 30));
     expect(host.models).toEqual([]);
 
     // And now it is: the session moves onto it.
-    runtime.available.add("fake/spare");
+    catalogue.carried.add("fake/spare");
     const moved = await waitFor(() => host.models.length > 0);
     expect(moved).toBe(true);
-    expect(host.models).toEqual(["spare"]);
+    expect(host.models).toEqual(["fake/spare"]);
     expect(session.reference).toBe("fake/spare");
     session.dispose();
   });
 
   it("survives_a_look_at_the_pool_that_fails", async () => {
     const events: string[] = [];
-    const runtime = new FakeRuntime(["fake/beam", "fake/spare"]);
-    runtime.available.add("fake/spare");
+    const catalogue = new FakeCatalogue(["fake/beam", "fake/spare"]);
     const host = new FakeHost([null]);
     host.setModel = async () => {
       throw new Error("the provider refused the model");
     };
     const session = new PoolSession({
       host,
-      runtime: runtime.runtime,
+      catalogue,
       pool: parsePool(
         "checkEveryMs: 5\nmodels:\n  - model: fake/beam\n    priority: 100\n  - model: fake/spare\n    priority: 120\n",
       ),
@@ -587,10 +502,10 @@ describe("a session in the pool", () => {
   });
 
   it("gives_the_proxy_back_when_the_session_is_released", () => {
-    const runtime = new FakeRuntime(["fake/beam"]);
+    const catalogue = new FakeCatalogue(["fake/beam"]);
     const session = new PoolSession({
       host: new FakeHost([null]),
-      runtime: runtime.runtime,
+      catalogue,
       pool: parsePool(
         "models:\n  - model: fake/beam\n    priority: 100\n    proxy: http://127.0.0.1:3128\n",
       ),
@@ -606,92 +521,6 @@ describe("a session in the pool", () => {
     // in the same process must not go through the model's proxy.
     session.dispose();
     expect(getGlobalDispatcher()).not.toBeInstanceOf(ProxyAgent);
-  });
-});
-
-describe("the pool and a real session", () => {
-  it("runs the session on the model the pool prefers", async () => {
-    const fixture = await createFixtureRepository();
-    const agentDirectory = join(fixture.root, "agent");
-    const previous = process.env.PI_CODING_AGENT_DIR;
-    try {
-      await mkdir(agentDirectory, { recursive: true });
-      await writeFile(
-        join(agentDirectory, "models.json"),
-        JSON.stringify({
-          providers: {
-            fake: {
-              api: "openai-completions",
-              baseUrl: "http://127.0.0.1:1",
-              apiKey: "test",
-              models: [{ id: "beam" }, { id: "spare" }],
-            },
-          },
-        }),
-        "utf8",
-      );
-      process.env.PI_CODING_AGENT_DIR = agentDirectory;
-
-      const pool = parsePool(
-        "models:\n  - model: fake/beam\n    priority: 100\n  - model: fake/spare\n    priority: 50\n",
-      );
-      const session = await piSessionFactory({ agentDirectory, pool })({
-        cwd: fixture.repo,
-        systemPromptSections: {},
-      });
-
-      expect(session.reference).toBe("fake/beam");
-      session.dispose();
-    } finally {
-      if (previous === undefined) {
-        delete process.env.PI_CODING_AGENT_DIR;
-      } else {
-        process.env.PI_CODING_AGENT_DIR = previous;
-      }
-      await fixture.dispose();
-    }
-  });
-
-  it("runs the session on the other model when the first one is at its peak", async () => {
-    const fixture = await createFixtureRepository();
-    const agentDirectory = join(fixture.root, "agent");
-    const previous = process.env.PI_CODING_AGENT_DIR;
-    try {
-      await mkdir(agentDirectory, { recursive: true });
-      await writeFile(
-        join(agentDirectory, "models.json"),
-        JSON.stringify({
-          providers: {
-            fake: {
-              api: "openai-completions",
-              baseUrl: "http://127.0.0.1:1",
-              apiKey: "test",
-              models: [{ id: "beam" }, { id: "spare" }],
-            },
-          },
-        }),
-        "utf8",
-      );
-      process.env.PI_CODING_AGENT_DIR = agentDirectory;
-
-      const pool = parsePool(
-        "models:\n  - model: fake/beam\n    priority: 100\n    peak: ['00:00-23:59']\n  - model: fake/spare\n    priority: 50\n",
-      );
-      const session = await piSessionFactory({ agentDirectory, pool })({
-        cwd: fixture.repo,
-        systemPromptSections: {},
-      });
-
-      expect(session.reference).toBe("fake/spare");
-      session.dispose();
-    } finally {
-      if (previous === undefined) {
-        delete process.env.PI_CODING_AGENT_DIR;
-      } else {
-        process.env.PI_CODING_AGENT_DIR = previous;
-      }
-      await fixture.dispose();
-    }
   });
 });
 

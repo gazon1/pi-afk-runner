@@ -25,7 +25,6 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
 import {
@@ -41,6 +40,7 @@ import {
   type IssueDetail,
 } from "./gh.js";
 import { createLeftoverTool, normaliseTitle } from "./leftovers.js";
+import { defineTool, type ToolSpec } from "./tools.js";
 import {
   cutOffError,
   runStates,
@@ -326,50 +326,6 @@ export interface RunUsage {
 }
 
 /**
- * The usage an assistant message carries, when the provider reported any.
- *
- * The numbers live on the message the session's **events** carry — the same
- * `message_end` event the CLI already handles — and a provider that reports
- * no token counts leaves them at zero. So **zero is not a report**: a turn
- * that reads zero has nothing to say, and a summary that says "0 tokens"
- * would be a number a reader would trust.
- */
-export function usageFromMessage(message: unknown): RunUsage | undefined {
-  const usage = (
-    message as
-      | {
-          readonly usage?: {
-            readonly totalTokens?: unknown;
-            readonly cost?: { readonly total?: unknown };
-          };
-        }
-      | null
-      | undefined
-  )?.usage;
-  const tokens = reportedNumber(usage?.totalTokens);
-  const cost = reportedNumber(usage?.cost?.total);
-  if (tokens <= 0 && cost <= 0) {
-    // The provider said nothing about this turn.
-    return undefined;
-  }
-  return {
-    totalTokens: tokens,
-    ...(cost > 0 ? { cost } : {}),
-  };
-}
-
-/**
- * A number a provider reported, or zero.
- *
- * The SDK's usage is read structurally — the runner does not depend on the
- * SDK's package — so the numbers arrive as `unknown`, and a number that is
- * not one is no number at all.
- */
-function reportedNumber(value: unknown): number {
-  return typeof value === "number" && Number.isFinite(value) ? value : 0;
-}
-
-/**
  * Two runs' usage, added.
  *
  * The cost is added only when one of them reported one: a run whose work
@@ -441,15 +397,41 @@ export interface AgentSession {
    * The pool's session knows it, because the pool moves it between models; a
    * session on a single model may leave it out.
    */
-  readonly reference?: string;
+  readonly reference?: string | undefined;
+  /**
+   * Move the session onto another model — `provider/id`.
+   *
+   * The pool's session moves between the models of the pool: a model whose
+   * limit is gone is left for the next one, and the conversation the session
+   * has is kept. A session that cannot be moved leaves this out.
+   */
+  setModel?(reference: string): Promise<void>;
 }
 
 /** Creates a session bound to a directory. */
 export type SessionFactory = (options: {
   readonly cwd: string;
   readonly systemPromptSections: Record<string, string>;
+  /**
+   * The model this session runs on — `provider/id`.
+   *
+   * Absent when the run does not name one: the session then runs on the
+   * factory's own model. The pool names one per session, because the pool
+   * picks the model the session starts on.
+   */
+  readonly model?: string;
   /** The tools the session is given — the verdict tool, for a review. */
-  readonly tools?: readonly ToolDefinition[];
+  readonly tools?: readonly ToolSpec[];
+  /**
+   * The tool the turn must end on.
+   *
+   * A turn that reads the tree can go on for as long as it likes: the model
+   * finds something else to look at, and the turn ends when the engine cuts it
+   * off — with nothing decided. The engine that can push the model between its
+   * steps is told which tool ends the turn, and says so when the model has read
+   * enough.
+   */
+  readonly finalTool?: string;
   /**
    * Told what a turn cost, when the provider reported it.
    *
@@ -725,6 +707,14 @@ export async function runPromptArray(options: {
    * `skip`, the scope's `fits` or `split`. A turn without one returns `ok`.
    */
   readonly after?: (state: WorkflowState) => string;
+  /**
+   * A state the run says it does not need is not run.
+   *
+   * Asked before each turn: a turn that is only needed when the earlier ones
+   * did not do their job — the second chance a review gets when it stated no
+   * verdict — is skipped when the run says so.
+   */
+  readonly skip?: (state: WorkflowState) => boolean;
 }): Promise<PromptArrayResult> {
   const schedule = options.schedule ?? defaultScheduler;
   let aborted = false;
@@ -789,7 +779,7 @@ export async function runPromptArray(options: {
         );
       }
       // The action's failure is a failed turn: it is thrown here and the
-      // engine's runner turns it into the same failure a turn makes.
+      // graph turns it into the same failure a turn makes.
       return { state: "ok", result: await options.action(state) };
     }
     const sent = options.session.prompt(state.text);
@@ -815,11 +805,15 @@ export async function runPromptArray(options: {
   try {
     const result = branched
       ? await runWorkSession({ nodes, run })
-      : await runStates({ states: nodes, run });
+      : await runStates({
+          states: nodes,
+          run,
+          ...(options.skip === undefined ? {} : { skip: options.skip }),
+        });
     const completed = result.completed.filter((state) => state.counts).length;
     return { completed, total, aborted: aborted || result.aborted, cutReason, abortError };
   } catch (error) {
-    // The engine wraps a failed turn and says which state it failed in. The
+    // The graph wraps a failed turn and says which state it failed in. The
     // failure underneath it is the cause; the caller reads the message.
     const cause = stateFailure(error);
     if (cause === null) {
@@ -1347,7 +1341,10 @@ export function createVerdictTool(holder: { value?: ReviewVerdict }) {
         verdict: params.verdict,
         findings: params.findings,
       };
-      holder.value = verdict;
+      // The first verdict stands. A review that ends on the tool and then gets
+      // asked for the verdict again must not change what it already decided:
+      // the review is one verdict, and the comment the runner posts is one.
+      holder.value ??= verdict;
       return {
         content: [
           {

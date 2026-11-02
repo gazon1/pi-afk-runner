@@ -17,6 +17,7 @@ checkouts it is the difference between 5 and 40 minutes.
 ```bash
 just gate         # every gate: check.sh → detekt → just cr → just gm agenda (SKIP_MAESTRO=1 — no flows)
 ./check.sh        # the gate registry + tests + Android + detekt
+./check.sh --fast    # the fast lane: the checks this change can break (≈5 min, no JVM suite)
 bash scripts/ci/static-gates.sh   # the script gates only (≈1 min, no JVM)
 just tests::impact    # the tests this change can break (a map over the tree)
 ./gw :shared:jvmTest     # the fast cycle (no -Ptest.tags = only fast)

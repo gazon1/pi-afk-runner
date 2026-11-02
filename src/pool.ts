@@ -6,23 +6,32 @@
  * proxy. The rules here are pure — the file, the moment, and what the pool
  * knows — so a host can ask what its own file means without running anything.
  *
- * The file is the host's, not the repository's: it lives beside Pi's settings
- * and credentials, in the agent's directory, and `--pool` names another one.
+ * The file is the host's, not the repository's: it lives in the host's own
+ * directory, and `--pool` names another one.
  */
 
 import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 
-import type { AgentSession, ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { parse as parseYaml } from "yaml";
 
 /**
- * The level a model thinks at — the SDK's own levels.
+ * The level a model thinks at.
  *
- * The list is the SDK's, taken from its own type: the runner does not invent
- * levels the SDK would refuse.
+ * The list is the pool's own: the levels the file may name are named here,
+ * and a level that is not one of them is refused when the file is read. The
+ * engine has no thinking level to set — see the ADR on the pool on the
+ * Mastra engine — so the level is the host's policy and the runner reports
+ * it.
  */
-export type EffortLevel = Parameters<AgentSession["setThinkingLevel"]>[0];
+export type EffortLevel =
+  | "off"
+  | "minimal"
+  | "low"
+  | "medium"
+  | "high"
+  | "xhigh"
+  | "max";
 
 /** The levels a file may name. */
 const EFFORT_LEVELS = [
@@ -44,8 +53,8 @@ export interface PoolModel {
   /**
    * The level the model thinks at.
    *
-   * Absent when the file does not say: the model runs at the level the SDK
-   * gives it, and the SDK knows what its own models can do.
+   * Absent when the file does not say: the model runs at the level the engine
+   * gives it, and the engine knows what its own models can do.
    */
   readonly effort?: EffortLevel;
   /**
@@ -79,8 +88,19 @@ export const DEFAULT_CHECK_EVERY_MS = 300_000;
 /** The name of the pool file in the agent's directory. */
 export const POOL_FILE = "models.yaml";
 
-/** The SDK's own model — the thing `setModel` takes. */
-export type PooledModel = NonNullable<ReturnType<ModelRuntime["getModel"]>>;
+/**
+ * What the runner knows about the models it may use.
+ *
+ * The pool does not know what an engine carries: it asks. The engine's own
+ * object over the seam answers — the catalogue of the models the runner
+ * carries, and whether the host has a credential for the provider.
+ */
+export interface ModelCatalogue {
+  /** Whether the runner carries the model the reference names. */
+  readonly carries: (reference: string) => boolean;
+  /** Whether the provider of the reference has a credential. */
+  readonly hasCredential: (reference: string) => boolean;
+}
 
 /** No model in the pool can be used. */
 export class NoModelAvailable extends Error {
@@ -237,7 +257,7 @@ function parseModel(entry: unknown, index: number, source: string): PoolModel {
 /**
  * The level one model thinks at.
  *
- * A level the SDK does not know is refused when the file is read: a mistyped
+ * A level the runner does not know is refused when the file is read: a mistyped
  * `effort: hign` that is ignored is a model that thinks at the wrong level,
  * and nothing would say so.
  */
@@ -391,9 +411,9 @@ export function isPeak(model: PoolModel, now: Date): boolean {
 /**
  * The words a provider uses when a model's limit is gone.
  *
- * The SDK resolves a turn whose model call failed, so the failure arrives as
- * the assistant message's error — and the error is the only place the limit is
- * named. A model that is out of its limit says so in one of these ways.
+ * The engine resolves a turn whose model call failed, so the failure arrives
+ * as the assistant message's error — and the error is the only place the limit
+ * is named. A model that is out of its limit says so in one of these ways.
  *
  * The words of a lost credential are here too: a provider that no longer takes
  * the key cannot answer either, and the model is as good as gone.
@@ -522,14 +542,12 @@ export function describePool(pool: Pool, choice: PoolChoice = {}): readonly stri
  * uses it when it starts a session. Two copies of a rule drift apart.
  */
 export function knownModel(
-  runtime: ModelRuntime,
+  catalogue: ModelCatalogue,
   reference: string,
   label = "the pool's model",
 ): boolean {
-  const { provider, id } = splitReference(reference, label);
-  return (
-    runtime.getModel(provider, id) !== undefined && runtime.hasConfiguredAuth(provider)
-  );
+  splitReference(reference, label);
+  return catalogue.carries(reference) && catalogue.hasCredential(reference);
 }
 
 /** A mapping, and not something else. */

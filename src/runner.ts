@@ -38,6 +38,7 @@ import { GateFailed, runGates } from "./gates.js";
 import {
   UNTRUSTED_INPUT_RULE,
   UNTRUSTED_INPUT_SECTION,
+  VERDICT_TOOL_NAME,
   addUsage,
   briefFence,
   createVerdictTool,
@@ -276,7 +277,7 @@ export interface WorktreeOptions {
  */
 export async function prepareWorktree(
   options: WorktreeOptions,
-): Promise<{ readonly path: string; readonly branch: string }> {
+): Promise<{ readonly path: string; readonly branch: string; readonly setupPath?: string }> {
   const branch = workBranch(options.issueNumber);
   const run = options.run ?? runCommand;
 
@@ -312,12 +313,24 @@ export async function prepareWorktree(
     baseSha: options.baseSha,
   });
 
-  const reason = await prepareWorktreeSetup(run, options.worktreePath);
-  if (reason !== null) {
-    throw new Error(reason);
+  const setup = await prepareWorktreeSetup(run, options.worktreePath);
+  if (setup.reason !== null) {
+    throw new Error(setup.reason);
   }
 
-  return { path: options.worktreePath, branch };
+  return {
+    path: options.worktreePath,
+    branch,
+    ...(setup.path === undefined ? {} : { setupPath: setup.path }),
+  };
+}
+
+/** What the repository's own setup script said when it ran in a worktree. */
+export interface WorktreeSetup {
+  /** The reason it could not run, or null when it did. */
+  readonly reason: string | null;
+  /** The PATH it asks the runner to run the gates with. */
+  readonly path: string | undefined;
 }
 
 /**
@@ -330,17 +343,48 @@ export async function prepareWorktree(
 export async function prepareWorktreeSetup(
   run: CommandRunner,
   worktreePath: string,
-): Promise<string | null> {
+): Promise<WorktreeSetup> {
   try {
-    await run({
+    const output = await run({
       command: "bash",
       args: [SETUP_SCRIPT],
       cwd: worktreePath,
     });
-    return null;
+    return { reason: null, path: setupPath(output) };
   } catch (failure) {
-    return errorMessage(failure);
+    return { reason: errorMessage(failure), path: undefined };
   }
+}
+
+/**
+ * The PATH the repository's own setup script asks its caller to use.
+ *
+ * The script says it in its own words — `export PATH="…:$PATH"` — because the
+ * tools of a checkout live in a venv of that checkout's own: the gate CLI is
+ * an editable install of that tree, so a shared venv makes every worktree
+ * judge somebody else's checkout. A gate that cannot find the tools never
+ * got to answer, and the runner is the one that has to hand them over.
+ *
+ * The script says that only when it makes the venv. A venv that is already
+ * there is named and nothing more — and the gates would then run with the
+ * PATH of the host, where the gate CLI of that checkout is not on it.
+ */
+export function setupPath(output: string): string | undefined {
+  const match = /export PATH="([^"]+)"/.exec(output);
+  if (match?.[1] !== undefined) {
+    const printed = match[1];
+    const suffix = ":$PATH";
+    if (printed.endsWith(suffix)) {
+      const directory = printed.slice(0, -suffix.length);
+      return `${directory}:${process.env["PATH"] ?? ""}`;
+    }
+    return printed;
+  }
+  const venv = /Python venv\s+->\s+(\S+)/.exec(output);
+  if (venv?.[1] === undefined) {
+    return undefined;
+  }
+  return `${venv[1]}/bin:${process.env["PATH"] ?? ""}`;
 }
 
 /** Alias kept for callers that name the preparation by its effect. */
@@ -761,6 +805,9 @@ export async function reviewPullRequest(options: {
       [UNTRUSTED_INPUT_SECTION]: UNTRUSTED_INPUT_RULE,
     },
     tools: [createVerdictTool(holder)],
+    // The review ends on the verdict tool. A reviewer that keeps reading is
+    // told, between its steps, that the turn ends there.
+    finalTool: VERDICT_TOOL_NAME,
     onUsage: (reported) => {
       usage = addUsage(usage, reported);
     },
@@ -785,9 +832,18 @@ export async function reviewPullRequest(options: {
   try {
     result = await runPromptArray({
       session,
-      prompts: [prompt],
-      // The review is one state: the verdict, in one turn.
-      states: [{ name: "review", phase: "Review" }],
+      prompts: [prompt, VERDICT_REMINDER],
+      // The review is two states: the review itself, and the verdict it ends
+      // on. The second one is the answer to a reviewer that answered without
+      // a verdict — the same second chance a gate's refusal gets.
+      states: [
+        { name: "review", phase: "Review" },
+        { name: "verdict", phase: "Review" },
+      ],
+      // The second turn is a second chance, not an extra turn: it runs only
+      // when the reviewer stated no verdict. A review that reached its verdict
+      // ends there — the turn it would have taken is not spent.
+      skip: (state) => state.name === "verdict" && holder.value !== undefined,
       deadlineMs: options.deadlineMs,
       ...(options.stopped === undefined ? {} : { stopped: options.stopped }),
       ...(options.schedule === undefined ? {} : { schedule: options.schedule }),
@@ -820,10 +876,10 @@ export async function reviewPullRequest(options: {
     // The same cut the work session reports; a review that did not finish is
     // not a review that stated no verdict.
     //
-    // The cut is the engine's own abort error, not a plain failure: the
-    // engine treats an unknown failure as recoverable and carries on to the
-    // next state, and a review that was cut off would then be reviewed again
-    // — the same diff, a second verdict, for a review that never happened.
+    // The cut is the graph's own abort error, not a plain failure: an
+    // unknown failure is treated as recoverable and carries on to the next
+    // state, and a review that was cut off would then be reviewed again —
+    // the same diff, a second verdict, for a review that never happened.
     throw cutOffError(
       cutOffMessage({
         what: "the review's session",
@@ -872,7 +928,8 @@ export async function reviewPullRequest(options: {
   };
 }
 
-/** The prompt the reviewer is given. */
+/**
+ * The prompt the reviewer is given. */
 export const REVIEW_PROMPT = [
   "Review the pull request in this repository, as a reader who did not write it.",
   "",
@@ -886,6 +943,24 @@ export const REVIEW_PROMPT = [
   "only thing that leaves this session.",
   "",
   "Then end with the verdict tool. It is your last action.",
+].join("\n");
+
+/**
+ * The turn that follows a review that answered without a verdict.
+ *
+ * A reviewer that stops without calling the verdict tool has decided nothing,
+ * and a run that ends there has no review to show for the work it did. The
+ * second turn is the same second chance a gate's refusal gets: the reviewer
+ * is told what is missing and ends the review with it.
+ */
+export const VERDICT_REMINDER = [
+  "Your review did not end with a verdict.",
+  "",
+  "If the verdict tool has already been called in this session, the verdict is recorded: do not call it",
+  "again and do not change it — answer with the single word: done.",
+  "",
+  "If it has not, finish the review now — read what you have not read — and then call the verdict tool",
+  "with the verdict you reached. Say what you did not reach in the findings.",
 ].join("\n");
 
 /** Post the review comment. */
@@ -940,19 +1015,69 @@ export function fixPrompt(findings: readonly string[], issue?: IssueDetail): str
     "",
     "1. Address every finding. Where a finding is wrong, make the code say why it is wrong.",
     "",
-    "2. Run the repository's gates, in this order:",
-    "",
-    "   ```bash",
-    "   ./check.sh",
-    "   just tcheck-evals",
-    "   just docs-audit",
-    "   ```",
-    "",
-    "   A small change — a few lines in one module — needs `./check.sh` only.",
+    "2. Do not run the gates. The runner runs them when you stop, on the tree",
+    "   you leave, and its word is the one that counts.",
     "",
     "3. Do not commit or push. The runner commits and pushes so the push stays",
     "   under its control.",
   ].join("\n");
+}
+
+/**
+ * The prompt a gate's failure is fixed with.
+ *
+ * The gates are the **runner's**: the agent does not run them, so the failure
+ * comes back to it as what the runner saw. The agent's own turn is what fixes
+ * it, and the runner runs the gates again afterwards.
+ */
+export function gateFixPrompt(failure: GateFailed): string {
+  return [
+    "The repository's own gates refused this change. Fix what they reported.",
+    "",
+    `The gate \`${failure.gate}\` ${failure.reason === "missing" ? "could not run" : "failed"}.`,
+    "",
+    "## What it printed",
+    "",
+    "```",
+    tail(failure.output, GATE_FIX_OUTPUT_CHARS).text,
+    "```",
+    "",
+    "1. Fix what the gate reported. Do not run the gate yourself — the runner",
+    "   runs it again when you stop, and its word is the one that counts.",
+    "",
+    "2. Do not commit or push. The runner commits and pushes so the push stays",
+    "   under its control.",
+  ].join("\n");
+}
+
+/** How much of a gate's output the agent is shown. */
+export const GATE_FIX_OUTPUT_CHARS = 8000;
+
+/**
+ * Run one fix turn for a gate's failure.
+ *
+ * It is a **new session**: the fix's context is the gate's output and the
+ * code, not the work session's whole conversation.
+ */
+async function gateFixWorktree(options: {
+  readonly cwd: string;
+  readonly factory: SessionFactory;
+  readonly prompt: string;
+  readonly deadlineMs: number;
+  readonly stopped?: () => boolean;
+}): Promise<void> {
+  const session = await options.factory({
+    cwd: options.cwd,
+    systemPromptSections: { [UNTRUSTED_INPUT_SECTION]: UNTRUSTED_INPUT_RULE },
+  });
+  await runPromptArray({
+    session,
+    prompts: [options.prompt],
+    // The fix is one state: the gate's failure, answered in one turn.
+    states: [{ name: "gates", phase: "Gates" }],
+    deadlineMs: options.deadlineMs,
+    ...(options.stopped === undefined ? {} : { stopped: options.stopped }),
+  });
 }
 
 /**
@@ -1637,6 +1762,15 @@ export interface RunOptions {
   readonly verifyPushes?: boolean;
   /** Whether to look for related issues and work them in one batch. */
   readonly batchRelated?: boolean;
+  /**
+   * The gates to run, in the order they run.
+   *
+   * The contract's own list when it is not given: the gates are the
+   * repository's, and a run that was told otherwise runs what it was told.
+   */
+  readonly gates?: readonly string[];
+  /** How long one gate may take, in milliseconds. */
+  readonly gateTimeoutMs?: number;
   /** Told about every step, as it finishes. */
   readonly onStep?: (record: StepRecord) => void;
   /**
@@ -1735,10 +1869,10 @@ export type RunResult =
     });
 
 /**
- * Why an issue could not be worked, in the words the front doors say.
+ * Why an issue could not be worked, in the words the runner says.
  *
- * One mapping, so the CLI and the live door say the same thing about the
- * same derived state.
+ * One mapping, so the CLI and the run say the same thing about the same
+ * derived state.
  */
 export function unworkableReason(derivedState: DerivedState): string {
   switch (derivedState) {
@@ -1761,7 +1895,7 @@ export function unworkableReason(derivedState: DerivedState): string {
 }
 
 /**
- * Why an issue is waiting for its parent, in the words the front doors say.
+ * Why an issue is waiting for its parent, in the words the runner says.
  *
  * A dependency is the issue's own text — `**Depends on:** #N` — and it is
  * satisfied by the parent's work landing: its pull request is merged. A parent
@@ -1778,21 +1912,21 @@ export function blockedReason(
 
 
 /**
- * The sentence for an empty queue, in the words the front doors say.
+ * The sentence for an empty queue, in the words the runner says.
  */
 export function emptyQueueSentence(): string {
   return "the queue is empty — there was nothing to work";
 }
 
 /**
- * The sentence for a worked issue, in the words the front doors say.
+ * The sentence for a worked issue, in the words the runner says.
  */
 export function workedIssueSentence(result: RunResult): string {
   return `worked issue ${result.issue} — the record is at ${result.record}`;
 }
 
 /**
- * The sentence a front door says for a run result, where one exists.
+ * The sentence the runner says for a run result, where one exists.
  */
 export function runResultSentence(result: RunResult): string | null {
   if (result.outcome === "empty") return emptyQueueSentence();
@@ -1835,6 +1969,16 @@ export const SMALL_CHANGE_MAX_LINES = 60;
 
 /** How many times the review may fail and be fixed in one run. */
 export const MAX_FIX_ITERATIONS = 3;
+
+/**
+ * How many times a gate may refuse the change and be fixed in one run.
+ *
+ * The gates are the runner's, so a refusal is the runner's own verdict — and
+ * it goes back to the agent, which fixes what the gate reported. Two turns is
+ * enough for a gate that reports a finding and one that reports the finding
+ * again; a third costs the run a great deal for very little.
+ */
+export const GATE_FIX_ATTEMPTS = 2;
 
 /** How big a change is. */
 export interface ChangeSize {
@@ -1986,12 +2130,21 @@ async function gateTheTree(options: {
   readonly budgetMs: number;
   /** Where the gates' whole output goes while they run. */
   readonly outputFile?: string;
+  /** The gates to run, when the run was told which ones. */
+  readonly gates?: readonly string[];
+  /** How long one gate may take, in milliseconds. */
+  readonly gateTimeoutMs?: number;
+  /** The environment the gates run with, over the runner's own. */
+  readonly env?: Readonly<Record<string, string>>;
 }): Promise<string> {
   const outcome = await runGates({
     run: options.run,
     cwd: options.cwd,
     budgetMs: options.budgetMs,
     ...(options.outputFile === undefined ? {} : { outputFile: options.outputFile }),
+    ...(options.gates === undefined ? {} : { gates: options.gates }),
+    ...(options.gateTimeoutMs === undefined ? {} : { gateTimeoutMs: options.gateTimeoutMs }),
+    ...(options.env === undefined ? {} : { env: options.env }),
   }).then(
     (summary) => ({ summary, failure: undefined as unknown }),
     (error: unknown) => ({ summary: "", failure: error }),
@@ -2226,7 +2379,7 @@ async function chooseIssue(
     }
   | null
 > {
-  /** The failure of the selection, in the words the front doors show. */
+  /** The failure of the selection, in the words the runner shows. */
   const selectFailed = (failure: unknown): RunFailed => {
     const reason = failure instanceof Error ? failure.message : String(failure);
     return new RunFailed({
@@ -2410,9 +2563,9 @@ export async function checkoutPullRequestBranch(options: {
   await options.git(["worktree", "add", "--detach", options.worktreePath, sha], {
     cwd: options.checkout,
   });
-  const reason = await prepareWorktreeSetup(options.run, options.worktreePath);
-  if (reason !== null) {
-    throw new Error(reason);
+  const setup = await prepareWorktreeSetup(options.run, options.worktreePath);
+  if (setup.reason !== null) {
+    throw new Error(setup.reason);
   }
   return sha;
 }
@@ -2445,6 +2598,8 @@ async function runPlan(
     claimed: false,
     base: "",
     worktreePath: "",
+    /** The PATH the repository's own setup asked the gates to run with. */
+    setupPath: "",
     pullRequest: plan.pullRequest?.number ?? 0,
     reviewedSha: "",
     slug: null as string | null,
@@ -2473,7 +2628,7 @@ async function runPlan(
   // the gates and the review. Each keeps a share of it, and the share is
   // reserved: a session that may spend the whole budget must not leave the
   // gates nothing to run with.
-  const shares = budgetShares(options.deadlineMs);
+  const shares = budgetShares(options.deadlineMs, options.gates?.length ?? 0);
   const sessionBudgetMs = shares.sessionMs;
   const runStartedAt = Date.now();
   /**
@@ -2502,20 +2657,63 @@ async function runPlan(
    * review's fix left. Both sets come out of the one share, so a fix loop
    * that runs the suite on every iteration cannot spend the run's whole
    * budget on gates.
+   *
+   * A gate that refuses the change does not end the run at once: the refusal
+   * goes back to the agent as a turn, and the gates run again on what it
+   * fixed. The agent never runs the gates itself — the runner is the one
+   * that runs them, and the one whose word the push rests on.
    */
   const runTheGates = async (): Promise<string> => {
     const startedAt = Date.now();
     try {
-      return await gateTheTree({
-        git: options.git,
-        run: options.run,
-        cwd: state.worktreePath,
-        budgetMs: Math.max(0, shares.gatesMs - gatesSpentMs),
-        outputFile: gatesLog,
-      });
+      for (let attempt = 1; ; attempt++) {
+        try {
+          return await gateTheTree({
+            git: options.git,
+            run: options.run,
+            cwd: state.worktreePath,
+            budgetMs: Math.max(0, shares.gatesMs - gatesSpentMs),
+            outputFile: gatesLog,
+            ...(options.gates === undefined ? {} : { gates: options.gates }),
+            ...(options.gateTimeoutMs === undefined
+              ? {}
+              : { gateTimeoutMs: options.gateTimeoutMs }),
+            // The repository's own setup says where its tools are: the gates
+            // run with that PATH, so they find the gate CLI of that checkout.
+            ...(state.setupPath === "" ? {} : { env: { PATH: state.setupPath } }),
+          });
+        } catch (failure) {
+          if (!(failure instanceof GateFailed) || attempt > GATE_FIX_ATTEMPTS) {
+            throw failure;
+          }
+          await fixWhatTheGateRefused(failure);
+        }
+      }
     } finally {
       gatesSpentMs += Date.now() - startedAt;
     }
+  };
+
+  /**
+   * Give the agent a turn to fix what a gate refused.
+   *
+   * The turn is the agent's own session, and what it leaves is committed
+   * before the gates run again — a fix that is not committed is a fix the
+   * restore takes away.
+   */
+  const fixWhatTheGateRefused = async (failure: GateFailed): Promise<void> => {
+    const budget = Math.min(shares.sessionMs, remaining());
+    if (budget <= 0) {
+      throw failure;
+    }
+    await gateFixWorktree({
+      cwd: state.worktreePath,
+      factory: options.session,
+      prompt: gateFixPrompt(failure),
+      deadlineMs: budget,
+      ...(options.stopped === undefined ? {} : { stopped: options.stopped }),
+    });
+    await commitAll(options.git, state.worktreePath, "fix: the gates' findings");
   };
 
   const steps: Step[] = [];
@@ -2560,7 +2758,9 @@ async function runPlan(
           worktreePath: state.worktreePath,
           cwd: options.checkout,
           git: options.git,
+          run: options.run,
         });
+        state.setupPath = prepared.setupPath ?? "";
         return prepared.path;
       },
     });
@@ -2683,10 +2883,8 @@ async function runPlan(
           return "skipped — the issue was not worked";
         }
         // The repository's own gates, in the worktree, on the tree the agent
-        // left. The agent was told to run them too — it has to, to fix what
-        // they report — but the runner runs them because an agent that
-        // skipped them is not a gate, and a broken diff that reaches the
-        // review costs a whole review cycle.
+        // left. The agent never runs them: the runner is the one that runs
+        // them, and a refusal comes back to the agent as a turn of its own.
         //
         // A gate that does not pass ends the run here: the claim is released
         // and nothing is pushed.
@@ -2773,8 +2971,9 @@ async function runPlan(
         state.issue = detail;
         let exhausted = false;
 
-        // `gate` is the engine's retry-until-pass block: review, and when the
-        // verdict failed, fix what it found and review the fixed diff again.
+        // The review loop is the runner's own retry-until-pass block: review,
+        // and when the verdict failed, fix what it found and review the fixed
+        // diff again.
         //
         // The review keeps its own share of the budget: the gates have theirs,
         // and a review that is given what the gates left is a review that
@@ -2864,9 +3063,9 @@ async function runPlan(
             });
           },
         }).catch((error: unknown) => {
-          // A gate that refused the fix is under the workflow's error: the
-          // engine stops on it, and the failure itself is what the record
-          // and the exit code must name.
+          // A gate that refused the fix is under the graph's error: the graph
+          // stops on it, and the failure itself is what the record and the
+          // exit code must name.
           const cause = (error as { readonly details?: unknown }).details;
           throw cause instanceof Error ? cause : error;
         });

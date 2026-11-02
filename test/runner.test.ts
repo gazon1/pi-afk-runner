@@ -21,12 +21,11 @@ import {
   runPromptArray,
   splitIssue,
   startAgent,
-  usageFromMessage,
   type AgentSession,
   type SessionFactory,
 } from "../src/session.js";
+import { assistantTextLines } from "../src/journal.js";
 import {
-  assistantTextLines,
   DEFAULT_DEADLINE_MS,
   formatCost,
   formatDuration,
@@ -34,7 +33,7 @@ import {
   resolveRepo,
   runSummary,
 } from "../src/cli.js";
-import { budgetShares } from "../src/budget.js";
+import { budgetShares, defaultDeadlineMs } from "../src/budget.js";
 import { type StateName } from "../src/workflow.js";
 import { createLeftoverTool, LEFTOVER_TOOL_NAME, MAX_LEFTOVERS_PER_RUN } from "../src/leftovers.js";
 import { pullRequestArgs } from "../src/gh.js";
@@ -61,9 +60,8 @@ import {
 import { createFixtureRepository, gitOutput } from "./git-sandbox.js";
 import { chmod, cp, mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { createServer } from "node:http";
 import { execFile, spawn } from "node:child_process";
-import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -131,6 +129,9 @@ import {
   type Step,
 } from "../src/runner.js";
 import { GATE_OUTPUT_LIMIT_BYTES, GATE_TIMEOUT_MS } from "../src/gates.js";
+
+/** The gates a run is told to run, in these tests. */
+const GATES = ["./check.sh --fast", "just tcheck-evals", "just docs-audit"];
 import { HOLDER_COMMAND, takeLock, workLockName } from "../src/lock.js";
 import {
   EXIT_LOCKED,
@@ -142,17 +143,6 @@ import {
   type CliDependencies,
 } from "../src/cli.js";
 import { NoModelAvailable } from "../src/pool.js";
-import {
-  PINNED_PI_RANGE,
-  PiVersionMismatch,
-  assertPiVersion,
-  checkPiVersion,
-  comparePiVersions,
-  installedPiVersion,
-  parsePiVersion,
-  satisfiesRange,
-} from "../src/version.js";
-
 /**
  * The states for a run of `count` prompts.
  *
@@ -196,122 +186,6 @@ function testWorktree(issueNumber: number) {
 const GATE_VERDICT_LINE =
   /^\s*\**\s*verdict\s*\**\s*:\s*\**\s*(pass|fail)\s*\**\s*\.?\s*$/i;
 
-/**
- * The version gate is the one thing the extension must never get wrong in the wrong
- * direction: it has to let a supported Pi through and stop an unsupported one. Everything
- * here is about the boundary — the version that is exactly the lower bound, the one that is
- * exactly the upper bound, and the one just outside each.
- */
-describe("the pinned Pi version range", () => {
-  it("test_the_extension_refuses_to_run_outside_its_pi_version_range", async () => {
-    // The version this extension is written against passes.
-    const inside = checkPiVersion("1.4.0");
-    expect(inside.ok).toBe(true);
-    expect(inside.reason).toBeNull();
-
-    // Outside the range, in either direction, the check refuses.
-    const below = checkPiVersion("1.3.9");
-    expect(below.ok).toBe(false);
-    expect(below.reason).toContain("1.3.9");
-    expect(below.reason).toContain(PINNED_PI_RANGE);
-
-    const above = checkPiVersion("1.5.0");
-    expect(above.ok).toBe(false);
-    expect(above.reason).toContain("1.5.0");
-
-    // A far-away version is refused for the same reason, not by accident of parsing.
-    expect(checkPiVersion("0.9.1").ok).toBe(false);
-    expect(checkPiVersion("2.0.0").ok).toBe(false);
-
-    // And the refusal is a refusal, not a warning: the caller throws.
-    expect(() => assertPiVersion("1.5.0")).toThrow(PiVersionMismatch);
-    expect(() => assertPiVersion("1.4.0")).not.toThrow();
-
-    // The range the check actually uses is the pinned one.
-    expect(PINNED_PI_RANGE).toBe(">=1.4.0 <1.5.0");
-  });
-
-  it("accepts every version inside the range, including its bounds", () => {
-    for (const version of ["1.4.0", "1.4.1", "1.4.17", "1.4.99"]) {
-      expect(checkPiVersion(version).ok).toBe(true);
-    }
-  });
-
-  it("refuses a prerelease of the range's lower bound", () => {
-    // `1.4.0-rc.1` is older than `1.4.0`, so it is not inside `>=1.4.0`.
-    expect(checkPiVersion("1.4.0-rc.1").ok).toBe(false);
-    // And it is not inside the range either.
-    const version = parsePiVersion("1.4.0-rc.1");
-    expect(version).not.toBeNull();
-    expect(satisfiesRange(version!, PINNED_PI_RANGE)).toBe(false);
-  });
-
-  it("refuses a version it cannot parse, rather than passing it", () => {
-    for (const raw of ["", "1.4", "1.4.0.0", "not-a-version", "v1.4.0"]) {
-      expect(checkPiVersion(raw).ok).toBe(false);
-    }
-    expect(parsePiVersion("not-a-version")).toBeNull();
-    expect(parsePiVersion("v1.4.0")).toBeNull();
-  });
-
-  it("reads the version of the Pi it is running inside", () => {
-    const installed = installedPiVersion();
-    expect(installed).toMatch(/^\d+\.\d+\.\d+/);
-    // The SDK this extension is developed against is the one it is running inside.
-    expect(checkPiVersion(installed).ok).toBe(true);
-  });
-});
-
-describe("the version comparison", () => {
-  it("orders versions by major, then minor, then patch", () => {
-    const at = (raw: string) => parsePiVersion(raw)!;
-    expect(comparePiVersions(at("1.4.0"), at("1.5.0"))).toBeLessThan(0);
-    expect(comparePiVersions(at("1.5.0"), at("1.4.0"))).toBeGreaterThan(0);
-    expect(comparePiVersions(at("1.4.0"), at("1.4.0"))).toBe(0);
-    expect(comparePiVersions(at("2.0.0"), at("1.99.99"))).toBeGreaterThan(0);
-  });
-
-  it("orders a prerelease before its release", () => {
-    const at = (raw: string) => parsePiVersion(raw)!;
-    expect(comparePiVersions(at("1.4.0-rc.1"), at("1.4.0"))).toBeLessThan(0);
-    expect(comparePiVersions(at("1.4.0-rc.1"), at("1.4.0-rc.2"))).toBeLessThan(0);
-  });
-
-  it("ignores build metadata", () => {
-    const at = (raw: string) => parsePiVersion(raw)!;
-    expect(comparePiVersions(at("1.4.0+build.1"), at("1.4.0"))).toBe(0);
-    expect(checkPiVersion("1.4.0+build.1").ok).toBe(true);
-  });
-});
-
-describe("the range grammar", () => {
-  const at = (raw: string) => parsePiVersion(raw)!;
-
-  it("reads a conjunction of comparators", () => {
-    expect(satisfiesRange(at("1.4.0"), ">=1.4.0 <1.5.0")).toBe(true);
-    expect(satisfiesRange(at("1.4.9"), ">=1.4.0 <1.5.0")).toBe(true);
-    expect(satisfiesRange(at("1.5.0"), ">=1.4.0 <1.5.0")).toBe(false);
-    expect(satisfiesRange(at("1.3.9"), ">=1.4.0 <1.5.0")).toBe(false);
-  });
-
-  it("reads each comparator", () => {
-    expect(satisfiesRange(at("1.4.0"), ">=1.4.0")).toBe(true);
-    expect(satisfiesRange(at("1.3.9"), ">=1.4.0")).toBe(false);
-    expect(satisfiesRange(at("1.4.0"), ">1.4.0")).toBe(false);
-    expect(satisfiesRange(at("1.5.0"), "<=1.5.0")).toBe(true);
-    expect(satisfiesRange(at("1.5.1"), "<=1.5.0")).toBe(false);
-    expect(satisfiesRange(at("1.4.0"), "<1.5.0")).toBe(true);
-    expect(satisfiesRange(at("1.4.0"), "=1.4.0")).toBe(true);
-    expect(satisfiesRange(at("1.4.1"), "=1.4.0")).toBe(false);
-  });
-
-  it("satisfies nothing when the range itself cannot be read", () => {
-    expect(satisfiesRange(at("1.4.0"), "")).toBe(false);
-    expect(satisfiesRange(at("1.4.0"), "not-a-range")).toBe(false);
-    expect(satisfiesRange(at("1.4.0"), ">=1.4.0 <<broken")).toBe(false);
-  });
-});
-
 describe("the repository the run works", () => {
   it("comes from the checkout's origin when the command does not name one", async () => {
     const asked: string[][] = [];
@@ -344,14 +218,14 @@ describe("the repository the run works", () => {
   it("keeps --repo when the command names one, and refuses a nameless origin", async () => {
     const git = async (): Promise<string> => "";
     const named = await resolveRepo(
-      { repo: "owner/name", checkout: "/c", remote: "origin", baseBranch: "main", lockDirectory: "/l", worktreeRoot: "/w", agentDirectory: "/a", deadlineMs: 1, staleAfterMs: 1 },
+      { repo: "owner/name", checkout: "/c", remote: "origin", baseBranch: "main", lockDirectory: "/l", worktreeRoot: "/w", agentDirectory: "/agent", deadlineMs: 1, staleAfterMs: 1 },
       git,
     );
     expect(named.repo).toBe("owner/name");
 
     await expect(
       resolveRepo(
-        { checkout: "/c", remote: "origin", baseBranch: "main", lockDirectory: "/l", worktreeRoot: "/w", agentDirectory: "/a", deadlineMs: 1, staleAfterMs: 1 },
+        { checkout: "/c", remote: "origin", baseBranch: "main", lockDirectory: "/l", worktreeRoot: "/w", agentDirectory: "/agent", deadlineMs: 1, staleAfterMs: 1 },
         git,
       ),
     ).rejects.toThrow("does not name a repository");
@@ -1473,31 +1347,6 @@ describe("the agent's session", () => {
     expect(promptsDirectory()).toContain("prompts");
   });
 
-  it("reads the tokens and the cost off a message", () => {
-    // The provider's numbers ride on the assistant message that the session's
-    // events carry — the same `message_end` event the CLI already handles.
-    expect(
-      usageFromMessage({
-        role: "assistant",
-        usage: { totalTokens: 100, cost: { total: 0.1 } },
-      }),
-    ).toEqual({ totalTokens: 100, cost: 0.1 });
-    // A provider that says nothing about its tokens has nothing to report:
-    // a zero is a number, and a number a reader would trust.
-    expect(
-      usageFromMessage({
-        role: "assistant",
-        usage: { totalTokens: 0, cost: { total: 0 } },
-      }),
-    ).toBeUndefined();
-    expect(usageFromMessage({ role: "assistant" })).toBeUndefined();
-    expect(usageFromMessage(undefined)).toBeUndefined();
-    // And a cost is reported only when a provider reported one.
-    expect(
-      usageFromMessage({ role: "assistant", usage: { totalTokens: 10 } }),
-    ).toEqual({ totalTokens: 10 });
-  });
-
   it("adds two runs' usage", () => {
     // The work session's cost and the review's, added up.
     expect(addUsage({ totalTokens: 100, cost: 0.5 }, { totalTokens: 20, cost: 0.1 })).toEqual({
@@ -2060,6 +1909,121 @@ describe("the review", () => {
 
     // One comment, and no second one: a `fail` is not a retry.
     expect(calls.filter((call) => call.startsWith("gh pr comment"))).toHaveLength(1);
+  });
+
+  it("test_a_review_that_stated_no_verdict_gets_a_second_turn", async () => {
+    // A reviewer that stops in the middle of the review — it says what it is
+    // about to do and ends its turn there — has decided nothing. The run gives
+    // it one more turn, in the same session, and the verdict that comes out of
+    // it is the review.
+    const turns: string[] = [];
+    const factory = async (options: {
+      cwd: string;
+      systemPromptSections: Record<string, string>;
+      tools?: readonly unknown[];
+    }): Promise<AgentSession> => ({
+      async prompt(text: string) {
+        turns.push(text);
+        // The first turn ends without the verdict tool.
+        if (turns.length === 1) {
+          return;
+        }
+        const tool = options.tools?.[0] as {
+          execute: (id: string, params: unknown) => Promise<unknown>;
+        };
+        await tool.execute("call-1", { verdict: "pass", findings: ["nothing blocking"] });
+      },
+      async abort() {},
+      dispose() {},
+    });
+
+    const outcome = await reviewPullRequest({
+      repo: "gazon1/sing",
+      pullRequest: 1040,
+      cwd: "/tmp/does-not-matter",
+      factory: factory as never,
+      gh: async () => "",
+      run: async () => "",
+      git: stubGit(),
+      deadlineMs: 60_000,
+    });
+
+    // Two turns: the review, and the turn that gave it a verdict.
+    expect(turns).toHaveLength(2);
+    expect(turns[1]).toContain("did not end with a verdict");
+
+    // And the review ends with the verdict, not with a failure.
+    expect(outcome.verdict).toBe("pass");
+    expect(outcome.comment).toContain("**Verdict:** pass");
+  });
+
+  it("test_a_review_that_reached_its_verdict_does_not_take_the_second_turn", async () => {
+    // The second turn is a second chance, not an extra turn: a review that
+    // stated its verdict ends there, and the turn is not spent.
+    let turns = 0;
+    const factory = async (options: {
+      cwd: string;
+      systemPromptSections: Record<string, string>;
+      tools?: readonly unknown[];
+    }): Promise<AgentSession> => ({
+      async prompt() {
+        turns += 1;
+        const tool = options.tools?.[0] as {
+          execute: (id: string, params: unknown) => Promise<unknown>;
+        };
+        await tool.execute("call-1", { verdict: "pass", findings: [] });
+      },
+      async abort() {},
+      dispose() {},
+    });
+
+    const outcome = await reviewPullRequest({
+      repo: "gazon1/sing",
+      pullRequest: 1040,
+      cwd: "/tmp/does-not-matter",
+      factory: factory as never,
+      gh: async () => "",
+      run: async () => "",
+      git: stubGit(),
+      deadlineMs: 60_000,
+    });
+
+    expect(turns).toBe(1);
+    expect(outcome.verdict).toBe("pass");
+  });
+
+  it("test_the_review_names_the_tool_its_turn_ends_on", async () => {
+    // The review ends on the verdict tool, and the session has to know which
+    // one that is: a reviewer that keeps reading is told, between its steps,
+    // that the turn ends there.
+    let named: string | undefined;
+    const factory = async (options: {
+      tools?: readonly unknown[];
+      finalTool?: string;
+    }): Promise<AgentSession> => ({
+      async prompt() {
+        named = options.finalTool;
+        const tool = options.tools?.[0] as {
+          execute: (id: string, params: unknown) => Promise<unknown>;
+        };
+        await tool.execute("call-1", { verdict: "pass", findings: [] });
+      },
+      async abort() {},
+      dispose() {},
+    });
+
+    await reviewPullRequest({
+      repo: "gazon1/sing",
+      pullRequest: 1040,
+      cwd: "/tmp/does-not-matter",
+      factory: factory as never,
+      gh: async () => "",
+      run: async () => "",
+      git: stubGit(),
+      deadlineMs: 60_000,
+    });
+
+    expect(named).toBe("agent_review_verdict");
   });
 
   it("test_the_review_puts_the_worktree_back_to_the_tree_it_judged", async () => {
@@ -3014,36 +2978,6 @@ describe("the CLI's run", () => {
     });
   }
 
-  /**
-   * A provider that rates every model out.
-   *
-   * It answers every request with the 429 a provider sends when a model's limit
-   * is gone — the words the pool listens for.
-   */
-  async function rateLimitedProvider(): Promise<{
-    readonly url: string;
-    readonly close: () => Promise<void>;
-  }> {
-    const server = createServer((_request, response) => {
-      response.writeHead(429, { "content-type": "application/json" });
-      response.end(JSON.stringify({ error: { message: "429 rate limit reached" } }));
-    });
-    await new Promise<void>((resolve) => {
-      server.listen(0, "127.0.0.1", resolve);
-    });
-    const address = server.address();
-    const port = typeof address === "object" && address !== null ? address.port : 0;
-    return {
-      url: `http://127.0.0.1:${port}/v1`,
-      close: async () => {
-        server.closeAllConnections();
-        await new Promise<void>((resolve) => {
-          server.close(() => resolve());
-        });
-      },
-    };
-  }
-
   /** The run options a composition test needs. */
   function runOptions(
     fixture: Awaited<ReturnType<typeof createFixtureRepository>>,
@@ -3183,13 +3117,13 @@ describe("the CLI's run", () => {
         return JSON.stringify({ verdict: "ci.yml  run 1  success" });
       };
 
-      await runOnce({ ...runOptions(fixture, gh), run });
+      await runOnce({ ...runOptions(fixture, gh), run, gates: GATES });
 
       // They ran in the worktree — where the repository runs them — and not in
       // the runner's own checkout.
       const worktree = issueWorktreePath(join(fixture.root, "worktrees"), 42);
       expect(gates).toEqual([
-        `bash ./check.sh in ${worktree}`,
+        `bash ./check.sh --fast in ${worktree}`,
         `just tcheck-evals in ${worktree}`,
         `just docs-audit in ${worktree}`,
       ]);
@@ -3200,6 +3134,159 @@ describe("the CLI's run", () => {
         expect(budget).toBeGreaterThan(0);
         expect(budget).toBeLessThanOrEqual(GATE_TIMEOUT_MS);
       }
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("test_the_gates_run_with_the_path_the_repositories_own_setup_named", async () => {
+    // The gate CLI is an editable install of that checkout's own venv: the
+    // setup script says where it is, and the gates run with that PATH — a
+    // gate that cannot find its tools never got to answer.
+    const fixture = await createFixtureRepository({
+      files: {
+        "scripts/setup-worktree.sh":
+          '#!/usr/bin/env bash\nset -euo pipefail\necho \'ready: export PATH="/the/venv/bin:$PATH"\'\n',
+      },
+    });
+    try {
+      const { gh } = stubGh([{ number: 42, title: "an issue" }]);
+      const paths: (string | undefined)[] = [];
+      const run: CommandRunner = async (spec) => {
+        // The setup script says where the tools are; the gates read it.
+        if (spec.command === "bash" && spec.args[0] === "scripts/setup-worktree.sh") {
+          return 'ready: export PATH="/the/venv/bin:$PATH"';
+        }
+        if (isGate(spec)) {
+          paths.push(spec.env?.["PATH"]);
+        }
+        return JSON.stringify({ verdict: "ci.yml  run 1  success" });
+      };
+
+      await runOnce({ ...runOptions(fixture, gh), run, gates: GATES });
+
+      expect(paths.length).toBeGreaterThan(0);
+      for (const path of paths) {
+        expect(path).toContain("/the/venv/bin");
+      }
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("test_the_gates_run_with_the_path_of_a_venv_that_was_already_there", async () => {
+    // The setup script says where the venv is and says nothing about PATH when
+    // it did not make it. The gates still need that venv: the gate CLI lives
+    // there, and without it the gate reports a missing tool instead of a
+    // verdict.
+    const fixture = await createFixtureRepository({
+      files: {
+        "scripts/setup-worktree.sh":
+          "#!/usr/bin/env bash\nset -euo pipefail\necho 'Python venv  -> /the/venv (already there)'\n",
+      },
+    });
+    try {
+      const { gh } = stubGh([{ number: 42, title: "an issue" }]);
+      const paths: (string | undefined)[] = [];
+      const run: CommandRunner = async (spec) => {
+        if (spec.command === "bash" && spec.args[0] === "scripts/setup-worktree.sh") {
+          return "Python venv  -> /the/venv (already there)";
+        }
+        if (isGate(spec)) {
+          paths.push(spec.env?.["PATH"]);
+        }
+        return JSON.stringify({ verdict: "ci.yml  run 1  success" });
+      };
+
+      await runOnce({ ...runOptions(fixture, gh), run, gates: GATES });
+
+      expect(paths.length).toBeGreaterThan(0);
+      for (const path of paths) {
+        expect(path).toContain("/the/venv/bin");
+      }
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("test_a_gate_that_refuses_the_change_goes_back_to_the_agent_and_the_gates_run_again", async () => {
+    // The gates are the runner's: the agent does not run them. A gate that
+    // refuses the change therefore goes back to the agent as a turn, with the
+    // gate's own output, and the gates run again on what it fixed.
+    const fixture = await fixtureWithSetupScript();
+    try {
+      const { gh } = stubGh([{ number: 42, title: "an issue" }]);
+      const gateRuns: string[] = [];
+      const prompts: string[] = [];
+      const run: CommandRunner = async (spec) => {
+        if (isGate(spec)) {
+          gateRuns.push(`${spec.command} ${spec.args.join(" ")}`);
+          // The first gate refuses the change; the second one passes.
+          if (gateRuns.length === 1) {
+            throw new CommandFailed(1, spec.command, [...spec.args], "the gate says no", "");
+          }
+        }
+        return JSON.stringify({ verdict: "ci.yml  run 1  success" });
+      };
+
+      let sessions = 0;
+      const result = await runOnce({
+        ...runOptions(fixture, gh),
+        run,
+        gates: GATES,
+        session: async ({ cwd, tools }) => {
+          sessions += 1;
+          if (isReviewer(tools)) {
+            return {
+              async prompt() {
+                const tool = tools?.[0] as unknown as {
+                  execute: (id: string, params: unknown) => Promise<unknown>;
+                };
+                await tool.execute("call-1", { verdict: "pass", findings: [] });
+              },
+              async abort() {},
+              dispose() {},
+            };
+          }
+          const first = sessions === 1;
+          return {
+            async prompt(text: string) {
+              prompts.push(text);
+              if (first) {
+                await writeFile(join(cwd, "work.txt"), "the work\n", "utf8");
+                return;
+              }
+              // The gate's fix turn: it answers what the gate reported.
+              await writeFile(join(cwd, "gate-fix.txt"), "the fix\n", "utf8");
+            },
+            async abort() {},
+            dispose() {},
+          };
+        },
+      });
+
+      expect(result.outcome).toBe("completed");
+      // The gate ran twice: once refused the change, once judged the fix.
+      expect(gateRuns.length).toBeGreaterThanOrEqual(2);
+      // And the agent was given the gate's own words to fix.
+      const fix = prompts.find((text) => text.includes("gates refused this change"));
+      expect(fix).toContain("the gate says no");
+      expect(fix).toContain("Do not run the gate yourself");
+      // What the fix turn left is in the pushed branch.
+      const pushed = (
+        await gitOutput(["ls-remote", fixture.remote, workBranch(42)], {
+          cwd: fixture.repo,
+          env: fixture.env,
+        })
+      ).trim();
+      const sha = pushed.split(/\s+/)[0] ?? "";
+      const files = (
+        await gitOutput(["ls-tree", "-r", "--name-only", sha], {
+          cwd: fixture.repo,
+          env: fixture.env,
+        })
+      ).split("\n");
+      expect(files).toContain("gate-fix.txt");
     } finally {
       await fixture.dispose();
     }
@@ -3225,6 +3312,7 @@ describe("the CLI's run", () => {
       const failure = await runOnce({
         ...runOptions(fixture, gh),
         run,
+        gates: GATES,
         session: async ({ cwd, tools }) => {
           if (isReviewer(tools)) {
             return {
@@ -3327,7 +3415,7 @@ describe("the CLI's run", () => {
         return JSON.stringify({ verdict: "ci.yml  run 1  success" });
       };
 
-      const failure = await runOnce({ ...runOptions(fixture, gh), run }).then(
+      const failure = await runOnce({ ...runOptions(fixture, gh), run, gates: GATES }).then(
         () => null,
         (error: unknown) => error,
       );
@@ -3380,7 +3468,7 @@ describe("the CLI's run", () => {
         return JSON.stringify({ verdict: "ci.yml  run 1  success" });
       };
 
-      const failure = await runOnce({ ...runOptions(fixture, gh), run }).then(
+      const failure = await runOnce({ ...runOptions(fixture, gh), run, gates: GATES }).then(
         () => null,
         (error: unknown) => error,
       );
@@ -3428,7 +3516,7 @@ describe("the CLI's run", () => {
         return JSON.stringify({ verdict: "ci.yml  run 1  success" });
       };
 
-      const failure = await runOnce({ ...runOptions(fixture, gh), run }).then(
+      const failure = await runOnce({ ...runOptions(fixture, gh), run, gates: GATES }).then(
         () => null,
         (error: unknown) => error,
       );
@@ -3466,6 +3554,7 @@ describe("the CLI's run", () => {
       const failure = await runOnce({
         ...runOptions(fixture, gh),
         run,
+        gates: GATES,
         session: async ({ cwd, tools }) => {
           if (isReviewer(tools)) {
             reviews += 1;
@@ -3559,7 +3648,7 @@ describe("the CLI's run", () => {
           return JSON.stringify({ verdict: "ci.yml  run 1  success" });
         };
 
-        const failure = await runOnce({ ...runOptions(fixture, gh), run }).then(
+        const failure = await runOnce({ ...runOptions(fixture, gh), run, gates: GATES }).then(
           () => null,
           (error: unknown) => error,
         );
@@ -3594,7 +3683,7 @@ describe("the CLI's run", () => {
         return JSON.stringify({ verdict: "ci.yml  run 1  success" });
       };
 
-      await runOnce({ ...runOptions(fixture, gh), run });
+      await runOnce({ ...runOptions(fixture, gh), run, gates: GATES });
 
       const pushed = (
         await gitOutput(["ls-remote", fixture.remote, workBranch(42)], {
@@ -3639,6 +3728,7 @@ describe("the CLI's run", () => {
       const failure = await runOnce({
         ...runOptions(fixture, gh),
         run,
+        gates: GATES,
         session: async ({ cwd, tools }) => {
           if (isReviewer(tools)) {
             // The reviewer finds something, so the fix runs.
@@ -4137,26 +4227,32 @@ describe("the CLI's run", () => {
   });
 
   it("test_the_gates_keep_their_own_share_of_the_runs_budget", () => {
-    // The gates keep what the merge door gives the same gate — an hour each,
-    // because the gate has the same work to do there — and the session and
-    // the review keep what is left. The shares are reserved: a session that
-    // spends its whole budget must not leave the gates nothing to run with.
+    // A run that runs no gate reserves no gate budget: the gates' share is
+    // nothing, and the session and the review keep the rest. A run that is
+    // told to run three gates reserves an hour each — what the merge door
+    // gives the same gate, because the gate has the same work to do there.
     const shares = budgetShares(DEFAULT_DEADLINE_MS);
-    expect(shares.gatesMs).toBe(3 * GATE_TIMEOUT_MS);
+    expect(shares.gatesMs).toBe(0);
     // The session's share is the two hours the target's work costs: it
-    // implements, it runs the gates, and on a screen change it runs the
-    // desktop suite, which is a quarter of an hour on its own.
+    // implements, and on a screen change it runs the desktop suite, which is
+    // a quarter of an hour on its own.
     expect(shares.sessionMs).toBe(2 * 60 * 60 * 1000);
     expect(shares.reviewMs).toBeGreaterThan(0);
     expect(shares.sessionMs + shares.gatesMs + shares.reviewMs).toBe(DEFAULT_DEADLINE_MS);
 
+    // A run told to run gates reserves their share, and the ceiling follows
+    // the gates it runs.
+    const gated = budgetShares(defaultDeadlineMs(3), 3);
+    expect(gated.gatesMs).toBe(3 * GATE_TIMEOUT_MS);
+    expect(gated.sessionMs).toBe(2 * 60 * 60 * 1000);
+
     // A smaller ceiling is a smaller run all the way through, and not a run
     // whose gates are the part that starves.
-    const small = budgetShares(DEFAULT_DEADLINE_MS / 10);
+    const small = budgetShares(defaultDeadlineMs(3) / 10, 3);
     expect(small.gatesMs).toBe(Math.floor((3 * GATE_TIMEOUT_MS) / 10));
     expect(small.gatesMs).toBeGreaterThan(0);
     expect(small.sessionMs + small.gatesMs + small.reviewMs).toBeLessThanOrEqual(
-      DEFAULT_DEADLINE_MS / 10,
+      defaultDeadlineMs(3) / 10,
     );
   });
 
@@ -4596,132 +4692,6 @@ describe("the CLI's run", () => {
     }
   }, 60_000);
 
-  it("test_a_sweep_with_no_model_stops_instead_of_failing_every_issue", async () => {
-    // Every model in the pool is at its peak tariff, has run out of its limit,
-    // or cannot be reached. The sweep stops there: the next issue would fail
-    // the same way, and a sweep that fails every issue in the queue is not a
-    // sweep.
-    const fixture = await fixtureWithSetupScript();
-    const lockDirectory = join(fixture.root, "afk-runner");
-    try {
-      const { gh, calls } = stubGh([
-        { number: 42, title: "the first" },
-        { number: 43, title: "the second" },
-      ]);
-
-      const code = await main(
-        [
-          "--repo",
-          "gazon1/sing",
-          "--checkout",
-          fixture.repo,
-          "--worktree-root",
-          join(fixture.root, "worktrees"),
-          "--lock-dir",
-          lockDirectory,
-          "--all",
-        ],
-        {
-          gh,
-          session: async () => {
-            throw new NoModelAvailable("no model in the pool can be used");
-          },
-          run: async () => JSON.stringify({ verdict: "ci.yml  run 1  success" }),
-        },
-      );
-
-      // The code says that no model was available.
-      expect(code).toBe(EXIT_NO_MODEL);
-      // And only the first issue was claimed: the sweep stopped at it.
-      const claims = calls.filter((call) => call.includes("--add-label agent-in-progress"));
-      expect(claims).toHaveLength(1);
-    } finally {
-      await fixture.dispose();
-    }
-  }, 60_000);
-
-  it("test_a_pool_whose_every_model_is_rated_out_stops_the_sweep", async () => {
-    // A real pool over a real provider: the provider rates every model out, so
-    // the pool moves from one model to the next and then runs out of models
-    // itself. The sweep stops there, and the record says what the pool did.
-    const fixture = await fixtureWithSetupScript();
-    const lockDirectory = join(fixture.root, "afk-runner");
-    const agentDirectory = join(fixture.root, "agent");
-    const provider = await rateLimitedProvider();
-    try {
-      const { gh, calls } = stubGh([
-        { number: 42, title: "the first" },
-        { number: 43, title: "the second" },
-      ]);
-      await mkdir(agentDirectory, { recursive: true });
-      await writeFile(
-        join(agentDirectory, "models.json"),
-        JSON.stringify({
-          providers: {
-            fake: {
-              api: "openai-completions",
-              baseUrl: provider.url,
-              apiKey: "test",
-              models: [{ id: "beam" }, { id: "spare" }],
-            },
-          },
-        }),
-        "utf8",
-      );
-      await writeFile(
-        join(agentDirectory, "models.yaml"),
-        "models:\n  - model: fake/beam\n    priority: 100\n  - model: fake/spare\n    priority: 50\n",
-        "utf8",
-      );
-      // The agent's own retry would wait out the rate limit; the pool is what
-      // moves between the models here.
-      await writeFile(
-        join(agentDirectory, "settings.json"),
-        JSON.stringify({ retry: { enabled: false } }),
-        "utf8",
-      );
-
-      const code = await main(
-        [
-          "--repo",
-          "gazon1/sing",
-          "--checkout",
-          fixture.repo,
-          "--worktree-root",
-          join(fixture.root, "worktrees"),
-          "--lock-dir",
-          lockDirectory,
-          "--agent-dir",
-          agentDirectory,
-          "--all",
-        ],
-        {
-          gh,
-          run: async () => JSON.stringify({ verdict: "ci.yml  run 1  success" }),
-        },
-      );
-
-      // The code says that no model was available.
-      expect(code).toBe(EXIT_NO_MODEL);
-      // And only the first issue was claimed: the sweep stopped at it.
-      const claims = calls.filter((call) => call.includes("--add-label agent-in-progress"));
-      expect(claims).toHaveLength(1);
-
-      // The record says what the pool did: the model it ran on, and the model
-      // it moved to when the first one ran out.
-      const directory = join(fixture.repo, "build", "diagnostics", "issue-42");
-      const records = (await readdir(directory)).filter((name) => name.endsWith(".md"));
-      expect(records).toHaveLength(1);
-      const record = await readFile(join(directory, records[0] as string), "utf8");
-      expect(record).toContain("## The model pool");
-      expect(record).toContain("the model is now fake/beam");
-      expect(record).toContain("fake/beam has run out of its limit");
-    } finally {
-      await provider.close();
-      await fixture.dispose();
-    }
-  }, 120_000);
-
   it("test_an_interrupted_run_releases_its_claim", async () => {
     const fixture = await fixtureWithSetupScript();
     const lockDirectory = join(fixture.root, "afk-runner");
@@ -4865,6 +4835,10 @@ describe("the CLI's run", () => {
           lockDirectory,
           "--issue",
           "42",
+          // A run that nobody told to gate runs no gate: the gate is named
+          // here, and then the run stops at it.
+          "--gate",
+          "./check.sh",
         ],
         {
           gh,
@@ -4984,6 +4958,100 @@ describe("the CLI's run", () => {
       // And the lock was given back, though the sweep failed.
       const lock = await takeLock(lockDirectory);
       await lock.release();
+    } finally {
+      await fixture.dispose();
+    }
+  }, 60_000);
+
+  it("test_a_sweep_with_no_model_stops_instead_of_failing_every_issue", async () => {
+    // Every model in the pool is at its peak tariff, has run out of its limit,
+    // or cannot be reached. The sweep stops there: the next issue would fail
+    // the same way, and a sweep that fails every issue in the queue is not a
+    // sweep.
+    const fixture = await fixtureWithSetupScript();
+    const lockDirectory = join(fixture.root, "afk-runner");
+    try {
+      const { gh, calls } = stubGh([
+        { number: 42, title: "the first" },
+        { number: 43, title: "the second" },
+      ]);
+
+      const code = await main(
+        [
+          "--repo",
+          "gazon1/sing",
+          "--checkout",
+          fixture.repo,
+          "--worktree-root",
+          join(fixture.root, "worktrees"),
+          "--lock-dir",
+          lockDirectory,
+          "--all",
+        ],
+        {
+          gh,
+          session: async () => {
+            throw new NoModelAvailable("no model in the pool can be used");
+          },
+          run: async () => JSON.stringify({ verdict: "ci.yml  run 1  success" }),
+        },
+      );
+
+      // The code says that no model was available.
+      expect(code).toBe(EXIT_NO_MODEL);
+      // And only the first issue was claimed: the sweep stopped at it.
+      const claims = calls.filter((call) => call.includes("--add-label agent-in-progress"));
+      expect(claims).toHaveLength(1);
+    } finally {
+      await fixture.dispose();
+    }
+  }, 60_000);
+
+  it("test_the_pool_names_the_model_the_session_runs_on", async () => {
+    // The pool file is the host's own: the models the run may use, and the one
+    // it starts on is the pool's best.
+    const fixture = await fixtureWithSetupScript();
+    const lockDirectory = join(fixture.root, "afk-runner");
+    const agentDirectory = join(fixture.root, "agent");
+    try {
+      const { gh } = stubGh([{ number: 42, title: "the first" }]);
+      await mkdir(agentDirectory, { recursive: true });
+      await writeFile(
+        join(agentDirectory, "models.yaml"),
+        "models:\n  - model: minimax/MiniMax-M2.5\n    priority: 50\n  - model: minimax/MiniMax-M3\n    priority: 100\n",
+        "utf8",
+      );
+      const work = workingSession();
+      const models: (string | undefined)[] = [];
+
+      const code = await main(
+        [
+          "--repo",
+          "gazon1/sing",
+          "--checkout",
+          fixture.repo,
+          "--worktree-root",
+          join(fixture.root, "worktrees"),
+          "--lock-dir",
+          lockDirectory,
+          "--agent-dir",
+          agentDirectory,
+          "--issue",
+          "42",
+        ],
+        {
+          gh,
+          session: async (options) => {
+            models.push(options.model);
+            return await work(options);
+          },
+          run: async () => JSON.stringify({ verdict: "ci.yml  run 1  success" }),
+        },
+      );
+
+      expect(code).toBe(0);
+      // The session starts on the pool's best model.
+      expect(models[0]).toBe("minimax/MiniMax-M3");
     } finally {
       await fixture.dispose();
     }
@@ -6359,22 +6427,24 @@ describe("the leftovers a run files", () => {
     expect(last).toContain("improvement and refactoring");
     expect(last).toContain("## Agent Brief");
     expect(last).toContain(LEFTOVER_TOOL_NAME);
-    // The cheap ones are fixed in the run, and the gates run again.
-    expect(last).toContain("gates again");
+    // The cheap ones are fixed in the run, and the run does not build either.
+    expect(flatten(last)).toContain("Do not build and do not run the checks");
     // And the bound is in the prompt, not only in the tool.
     expect(last).toContain("three");
   });
 
-  it("test_the_prompt_says_that_the_runner_runs_the_gates_too", async () => {
-    // The prompt and the runner must not disagree. The runner runs the whole
-    // list before it pushes, whatever the size of the change; the
-    // small-change rule is the repository's pre-push hook's, and the prompt
-    // says so where the agent reads it.
+  it("test_the_prompt_says_that_the_agent_does_not_build", async () => {
+    // The prompt and the guard must not disagree. This run does not compile
+    // and does not gate the tree, and the agent is told so where it reads it:
+    // a build in the middle of a run costs minutes and says nothing the code
+    // does not.
     const prompts = await readPrompts();
     const implement = prompts[3] ?? "";
+    const verify = prompts[4] ?? "";
 
-    expect(implement).toContain("The runner runs the whole list again");
-    expect(implement).toContain("`./check.sh` only");
+    for (const turn of [implement, verify]) {
+      expect(flatten(turn)).toContain("Do not build, do not compile, do not run the checks");
+    }
   });
 
   it("test_the_verify_prompt_says_the_work_is_the_tree_s", async () => {
@@ -6386,7 +6456,9 @@ describe("the leftovers a run files", () => {
 
     expect(verify).toContain("The work is the tree's");
     expect(verify).toContain("not part of what the next run continues");
-    expect(verify).toContain("stashed tree");
+    // And what was not checked is said: a change that was not compiled is
+    // said so, not hidden.
+    expect(verify).toContain("what you did not check");
   });
 
   it("test_the_implement_prompt_says_the_work_is_the_tree_s", async () => {

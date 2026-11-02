@@ -1,6 +1,7 @@
 ---
 title: A worktree the door puts back is prepared
-status: accepted
+status: superseded
+superseded-by: 2026-11-05-the-runner-is-a-command-and-not-a-pi-extension
 date: 2026-11-02
 authors: Command Code
 deciders: Singularity Developer

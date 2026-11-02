@@ -40,7 +40,7 @@ For anything wider than one file or one subsystem, work in a dedicated worktree
 ### The gate — run all of it, in this order
 
 ```bash
-./check.sh            # jvmTest → desktopApp:test → assembleDebug → detekt (enforcing)
+./check.sh --fast      # the fast lane: the checks this change can break
 just tcheck-evals     # agent workflow evals
 just docs-audit       # frontmatter + doc sizes + dead refs + DIGEST
 ```
@@ -48,6 +48,13 @@ just docs-audit       # frontmatter + doc sizes + dead refs + DIGEST
 All three must be green. `just docs-audit` is the one most often skipped and the one that
 catches the errors that actually reach a reviewer: a dead file reference, an ADR whose
 frontmatter drifted, a skill that outgrew its size budget.
+
+`./check.sh --fast` is the **fast lane**: it compiles the app, runs the test classes this
+change can break, lints the files it touched, and runs the tree-level static gates. It
+skips the slow half — the whole JVM suite, the architecture gates, the ADR and desktop
+suites, the module-wide detekt sweep and the gate-machinery steps — because the full loop
+costs about fifteen minutes and most of it is spent on things this change did not touch.
+CI runs the full loop, and `./check.sh` without `--fast` is it: run that before merging.
 
 ### PR body
 
@@ -64,7 +71,7 @@ from the diff (a refactor that touches X for consistency, a generated file, a
 deliberately deferred item).
 
 ## Verification
-- [ ] ./check.sh
+- [ ] ./check.sh --fast
 - [ ] just tcheck-evals
 - [ ] just docs-audit
 - [ ] manual/UI verification where the change is visual

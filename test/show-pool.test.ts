@@ -46,17 +46,8 @@ async function agentDirectory(): Promise<string> {
   return agent;
 }
 
-/** The models the host's own catalogue holds. */
-const CATALOGUE = JSON.stringify({
-  providers: {
-    fake: {
-      api: "openai-completions",
-      baseUrl: "http://127.0.0.1:1",
-      apiKey: "test",
-      models: [{ id: "beam" }],
-    },
-  },
-});
+/** A model the runner carries, and the host has a key for. */
+const MODEL = "minimax/MiniMax-M2.7";
 
 describe("the question the pool file is asked", () => {
   const recorders: Recorder[] = [];
@@ -83,15 +74,39 @@ describe("the question the pool file is asked", () => {
 
   it("says_what_the_file_means", async () => {
     const agent = await agentDirectory();
-    await writeFile(join(agent, "models.yaml"), "models:\n  - model: fake/beam\n    priority: 100\n", "utf8");
-    await writeFile(join(agent, "models.json"), CATALOGUE, "utf8");
+    await writeFile(
+      join(agent, "models.yaml"),
+      `models:\n  - model: ${MODEL}\n    priority: 100\n`,
+      "utf8",
+    );
     const out = capture("stdout");
     recorders.push(out);
     try {
       const code = await main(["--show-pool", "--agent-dir", agent]);
 
       expect(code).toBe(EXIT_OK);
-      expect(out.lines.join("")).toContain("fake/beam — priority 100 — it would be used");
+      expect(out.lines.join("")).toContain(`${MODEL} — priority 100 — it would be used`);
+    } finally {
+      await rm(join(agent, ".."), { recursive: true, force: true });
+    }
+  });
+
+  it("says_why_a_model_the_runner_does_not_carry_is_not_used", async () => {
+    const agent = await agentDirectory();
+    // A model the runner carries no gateway for cannot be used, and the host
+    // has to see that: a file that names it and says nothing is a secret.
+    await writeFile(
+      join(agent, "models.yaml"),
+      "models:\n  - model: fake/beam\n    priority: 100\n",
+      "utf8",
+    );
+    const out = capture("stdout");
+    recorders.push(out);
+    try {
+      const code = await main(["--show-pool", "--agent-dir", agent]);
+
+      expect(code).toBe(EXIT_OK);
+      expect(out.lines.join("")).toContain("fake/beam — priority 100 — it cannot be reached");
     } finally {
       await rm(join(agent, ".."), { recursive: true, force: true });
     }

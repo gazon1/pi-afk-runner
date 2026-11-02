@@ -2,7 +2,7 @@
 #
 # Copy this file to the agent's directory as `models.yaml`, or point the runner
 # at it with `--pool <path>`. The file is the host's policy, not the
-# repository's: it lives beside Pi's settings and credentials.
+# repository's: it lives in the host's own directory.
 #
 # Every key is checked. A key the runner does not know is an error, not
 # something it ignores — a mistyped `priority` would silently change which
@@ -18,24 +18,25 @@ models:
   # the same priority are settled by the order of this file.
   #
   # `effort` is the level the model thinks at: `off`, `minimal`, `low`,
-  # `medium`, `high`, `xhigh` or `max`. A model without it runs at the level
-  # the SDK gives it, and a level the model does not have becomes the nearest
-  # one it has.
-  - model: anthropic/claude-sonnet-4-5
+  # `medium`, `high`, `xhigh` or `max`. A level the runner does not know is
+  # refused when the file is read. The engine has no thinking level to set, so
+  # the level is the host's policy: the runner says what the file means, and
+  # `--show-pool` says it to the host.
+  - model: minimax/MiniMax-M3
     priority: 100
     effort: high
 
   # A model that is only reachable through the host's own proxy — the one the
   # environment names. A host that has no proxy cannot use it, and the runner
   # moves on to the next one.
-  - model: openai/gpt-5
+  - model: minimax/MiniMax-M2.7
     priority: 90
     proxy: true
 
   # A model with a proxy of its own. The runner routes that model's requests
   # through it and leaves the rest of the run direct. Only `http://` and
   # `https://` are spoken.
-  - model: openai/gpt-5-mini
+  - model: minimax/MiniMax-M2.5
     priority: 80
     proxy: http://127.0.0.1:3128
 
@@ -47,7 +48,7 @@ models:
   # A model inside its peak hours is not used at all: the pool moves to the
   # next one. When every model is inside its peak hours, the run stops with
   # the code `3` and the work stays in the queue.
-  - model: deepseek/deepseek-chat
+  - model: minimax/MiniMax-M2.1
     priority: 50
     timezone: UTC
     peak:
@@ -55,4 +56,4 @@ models:
 
   # A model without a priority is still a model: it is used when nothing
   # better can be.
-  - model: some-provider/some-model
+  - model: minimax/MiniMax-M2

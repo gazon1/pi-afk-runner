@@ -1,6 +1,7 @@
 ---
 title: Only a gone session is swallowed
-status: accepted
+status: superseded
+superseded-by: 2026-11-05-the-runner-is-a-command-and-not-a-pi-extension
 date: 2026-11-01
 authors: MiniMax Code
 deciders: Singularity Developer

@@ -23,7 +23,6 @@
  * arrived is an issue the runner refuses to work.
  */
 
-import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
 import {
@@ -33,6 +32,7 @@ import {
   readOpenIssues,
   type GhRunner,
 } from "./gh.js";
+import { defineTool, type AnyToolSpec } from "./tools.js";
 
 /**
  * How many leftovers one run may file.
@@ -97,7 +97,7 @@ export function createLeftoverTool(options: {
   readonly gh: GhRunner;
   /** How many leftovers this run may file. */
   readonly limit?: number;
-}): ToolDefinition {
+}): AnyToolSpec {
   const limit = options.limit ?? MAX_LEFTOVERS_PER_RUN;
   // How many this run has filed. The titles are not kept: an issue this run
   // filed is open, and the read below finds it — one answer to "is this

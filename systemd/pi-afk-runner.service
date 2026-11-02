@@ -5,8 +5,12 @@
 # runner's own repository, and the worktrees live outside both — a worktree
 # inside the repository it is a worktree of is a repository inside itself.
 #
-# The runner needs a `gh` token in its environment, and a `PI_AGENT_DIR` that
-# holds Pi's settings and its credentials.
+# The runner needs a `gh` token in its environment, and a `MINIMAX_API_KEY` for
+# the model gateway to resolve a model with. The key is read from the
+# environment file below: `MINIMAX_API_KEY=...`, one line, no `export`.
+#
+# The file is missing → the unit does not start. A runner with no key is a
+# runner that cannot resolve a model.
 
 [Unit]
 Description=AFK runner: drain the ready-for-agent queue and open reviewed pull requests
@@ -16,6 +20,8 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 WorkingDirectory=%h/work/singularity
+# The model gateway's key. The file holds one `NAME=value` per line, mode 600.
+EnvironmentFile=%h/.config/afk-runner/env
 # A run is capped at the runner's own budget: the three shares added up, five
 # and a half hours. The claim a killed sweep left behind is taken over after
 # eight hours — longer than any live run, so a run that is still going keeps

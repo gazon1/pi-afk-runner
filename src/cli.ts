@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * The unattended front door.
+ * The unattended runner.
  *
  * One invocation: take the lock, work one issue — or, with `--all`, every
  * eligible issue one after another — write the record, give the lock back.
@@ -13,7 +13,6 @@
  * |---|---|
  * | 0 | the run finished, or the queue was empty |
  * | 10..80 | the step the run stopped at — see `STEP_EXIT_CODES` |
- * | 3 | no model could be used |
  * | 75 | another runner holds the lock |
  * | 76 | the lock could not be taken |
  * | 2 | the command line was wrong |
@@ -24,27 +23,17 @@
  */
 
 import { homedir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { dirname, join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
-import {
-  DefaultResourceLoader,
-  ModelRuntime,
-  createAgentSession,
-} from "@earendil-works/pi-coding-agent";
-import chalk from "chalk";
+import { defineCommand, parseArgs as parseCittyArgs, renderUsage, type ArgsDef } from "citty";
+import { EnvHttpProxyAgent, fetch as undiciFetch, setGlobalDispatcher } from "undici";
 
-import { DEFAULT_DEADLINE_MS } from "./budget.js";
+import { DEFAULT_DEADLINE_MS, defaultDeadlineMs } from "./budget.js";
+import { readGateSettings, resolveGateSettings, type GateSettings } from "./gates.js";
 import { readClaimed, readQueue, runGh, type GhRunner } from "./gh.js";
-import { guardExtensionPath, installGuardPolicy } from "./guard.js";
 import { runCommand, runGit, type CommandRunner, type GitRunner } from "./git.js";
 import { LockHeld, LockUnusable, lockNameFor, takeLock, workLockName } from "./lock.js";
-import {
-  mergeReviewedPullRequests,
-  type MergeOptions,
-  type MergeResult,
-} from "./merge.js";
-import { PoolSession } from "./pool-session.js";
 import {
   NoModelAvailable,
   describePool,
@@ -53,11 +42,16 @@ import {
   pickPoolModel,
   poolFile,
   readPool,
-  splitReference,
   type Pool,
   type PoolState,
 } from "./pool.js";
-import { proxyFromEnvironment, useProxy } from "./proxy.js";
+import { PoolSession, type PoolHost } from "./pool-session.js";
+import { proxyFromEnvironment } from "./proxy.js";
+import {
+  mergeReviewedPullRequests,
+  type MergeOptions,
+  type MergeResult,
+} from "./merge.js";
 import {
   RunFailed,
   emptyQueueSentence,
@@ -67,11 +61,10 @@ import {
 } from "./runner.js";
 import {
   addUsage,
-  skillsDirectory,
-  usageFromMessage,
   type AgentSession,
   type RunUsage,
   type SessionFactory,
+  type TurnMessage,
 } from "./session.js";
 
 /** The run finished, or the queue was empty. */
@@ -150,10 +143,10 @@ export interface CliOptions {
   readonly lockDirectory: string;
   /** Where the worktrees are created. */
   readonly worktreeRoot: string;
-  /** Pi's agent directory — its settings, its extensions, its credentials. */
-  readonly agentDirectory: string;
   /** The model the agent runs on — `provider/id`. */
   readonly model?: string;
+  /** Where the host's own files live — the pool file is looked for there. */
+  readonly agentDirectory: string;
   /** The model pool — the file the models and their conditions are read from. */
   readonly pool?: string;
   /** Whether to print what the pool file means now, and run nothing. */
@@ -162,37 +155,37 @@ export interface CliOptions {
   readonly verifyPushes?: boolean;
   /** Whether to look for related issues and work them in one batch. */
   readonly batchRelated?: boolean;
-  /** The wall-clock ceiling on one turn of the agent. */
-  readonly deadlineMs: number;
+  /**
+   * The wall-clock ceiling on one turn of the agent.
+   *
+   * Absent when the command did not name one: the ceiling then follows the
+   * gates the run runs, and a run with fewer gates does not carry the budget
+   * of a run with more.
+   */
+  readonly deadlineMs?: number;
   /** How long a claim may sit before another run may take it over. */
-  readonly staleAfterMs: number;
+  readonly staleAfterMs?: number;
+  /**
+   * The gates to run, when the command names them.
+   *
+   * The command's list replaces the repository's own, and a run that names
+   * neither runs no gate at all: a run started by hand says what it runs.
+   */
+  readonly gates?: readonly string[];
+  /** How long one gate may take, in milliseconds. */
+  readonly gateTimeoutMs?: number;
 }
 
-/** The usage the command prints when it is asked or when it is wrong. */
-export const USAGE = [
-  "pi-afk-runner — work one issue from the queue and open a reviewed pull request",
-  "",
-  "  pi-afk-runner [options]",
-  "",
-  "  --repo <owner/name>    the repository the issue lives in (default: the checkout's origin)",
-  "  --issue <number>        the issue to work (default: the queue's first eligible one)",
-  "  --all                   work every eligible issue, one after another",
-  "  --merge                 land the reviewed, green pull requests the runner opened",
-  "  --checkout <path>       the checkout the worktree is made from (default: the cwd)",
-  "  --remote <name>         the remote the base comes from (default: origin)",
-  "  --base <branch>         the branch the base is read from (default: main)",
-  "  --lock-dir <path>       where the lock lives (default: <checkout>/build/afk-runner)",
-  "  --worktree-root <path>  where the worktrees are created (default: <checkout>/../afk-worktrees)",
-  "  --agent-dir <path>      Pi's agent directory (default: ~/.pi/agent)",
-  "  --model <provider/id>   the model the agent runs on (default: the pool's best model)",
-  "  --pool <path>           the model pool file (default: <agent-dir>/models.yaml)",
-  "  --show-pool             print what the pool file means now, and run nothing",
-  "  --no-verify             skip the target repository's pre-push hook when pushing",
-  "  --batch-related         look for related ready-for-agent issues and work them in one batch",
-  `  --deadline-ms <n>       the ceiling on the run (default: ${DEFAULT_DEADLINE_MS})`,
-  "  --stale-after-ms <n>    how long a claim may sit (default: 604800000 — a week)",
-  "  --help                  this text",
-].join("\n");
+/**
+ * Where the host's own files live.
+ *
+ * The pool file is the host's, and it lives in the host's own directory —
+ * beside the settings and the credentials it belongs to. `--agent-dir` names
+ * another one, and `--pool` names the file itself.
+ */
+export function defaultAgentDirectory(): string {
+  return join(homedir(), ".pi", "agent");
+}
 
 /** The message of a failure, whatever it was thrown as. */
 export function errorMessage(failure: unknown): string {
@@ -200,83 +193,104 @@ export function errorMessage(failure: unknown): string {
 }
 
 /**
- * Read the command line.
+ * The options the command reads, as citty reads them.
+ *
+ * One list: the command line, the usage and the runner's own options are the
+ * same list, and a flag that is written down twice is a flag whose two copies
+ * drift.
+ */
+export const ARGS = {
+  repo: { type: "string", description: "the repository the issue lives in (default: the checkout's origin)" },
+  issue: { type: "string", description: "the issue to work (default: the queue's first eligible one)" },
+  all: { type: "boolean", description: "work every eligible issue, one after another" },
+  merge: { type: "boolean", description: "land the reviewed, green pull requests the runner opened" },
+  checkout: { type: "string", description: "the checkout the worktree is made from (default: the cwd)" },
+  remote: { type: "string", description: "the remote the base comes from (default: origin)" },
+  base: { type: "string", description: "the branch the base is read from (default: main)" },
+  "lock-dir": { type: "string", description: "where the lock lives (default: <checkout>/build/afk-runner)" },
+  "worktree-root": { type: "string", description: "where the worktrees are created (default: <checkout>/../afk-worktrees)" },
+  model: { type: "string", description: "the model the agent runs on (default: the pool's best model)" },
+  "agent-dir": { type: "string", description: "the host's own directory (default: ~/.pi/agent)" },
+  pool: { type: "string", description: "the model pool file (default: <agent-dir>/models.yaml)" },
+  "show-pool": { type: "boolean", description: "print what the pool file means now, and run nothing" },
+  "no-verify": { type: "boolean", description: "skip the target repository's pre-push hook when pushing" },
+  "batch-related": { type: "boolean", description: "look for related ready-for-agent issues and work them in one batch" },
+  gate: { type: "string", description: "the gates to run, separated by commas — they replace the repository's own list" },
+  "gate-timeout-ms": { type: "string", description: "how long one gate may take (default: 3600000)" },
+  "deadline-ms": { type: "string", description: "the ceiling on the run (default: the three shares, added up)" },
+  "stale-after-ms": { type: "string", description: "how long a claim may sit (default: 604800000 — a week)" },
+} as const satisfies ArgsDef;
+
+/**
+ * The command, as citty holds it.
+ *
+ * The command has no `run`: the run belongs to {@link main}, which owns the
+ * exit code — a scheduler reads a number, and a number a library invents is a
+ * number nobody agreed on.
+ */
+export const command = defineCommand({
+  meta: {
+    name: "pi-afk-runner",
+    description: "work one issue from the queue and open a reviewed pull request",
+  },
+  args: ARGS,
+});
+
+/** The usage the command prints when it is asked or when it is wrong. */
+export async function usage(): Promise<string> {
+  return renderUsage(command);
+}
+
+/**
+ * The options the command reads.
  *
  * The options are read the way a scheduler sets them: long names, one value
  * each. There is no short form and no bundling, because a systemd unit is
  * read by a person at three in the morning.
  */
 export function parseArgs(argv: readonly string[]): CliOptions {
-  const values = new Map<string, string>();
-  let repo: string | undefined;
-
-  for (let index = 0; index < argv.length; index += 1) {
-    const argument = argv[index] ?? "";
-    if (!argument.startsWith("--")) {
-      throw new Error(`unexpected argument: ${argument}`);
-    }
-    const name = argument.slice(2);
-    if (name === "help") {
-      throw new Error("help");
-    }
-    if (
-      name === "no-verify" ||
-      name === "all" ||
-      name === "merge" ||
-      name === "batch-related" ||
-      name === "show-pool"
-    ) {
-      // A flag, not an option with a value.
-      values.set(name, "true");
-      continue;
-    }
-    const value = argv[index + 1];
-    if (value === undefined || value.startsWith("--")) {
-      throw new Error(`the option --${name} needs a value`);
-    }
-    values.set(name, value);
-    index += 1;
+  if (argv.includes("--help")) {
+    throw new Error("help");
   }
+  rejectUnknownOptions(argv);
+  rejectRepeatedGate(argv);
+  const parsed = parseCittyArgs([...argv], ARGS) as Record<string, unknown>;
 
-  repo = values.get("repo");
+  const repo = text(parsed["repo"]);
   if (repo !== undefined && !repo.includes("/")) {
     throw new Error("--repo must name a repository, as owner/name");
   }
 
-  const issue = values.get("issue");
-  const all = values.has("all");
-  const merge = values.has("merge");
+  const issueText = text(parsed["issue"]);
+  const issue = issueText === undefined ? undefined : positiveNumber(issueText, "--issue");
+  const all = parsed["all"] === true;
+  const merge = parsed["merge"] === true;
   if (all && issue !== undefined) {
     throw new Error("--all works every issue, so it cannot be combined with --issue");
   }
   if (merge && (all || issue !== undefined)) {
     throw new Error("--merge is its own mode; it cannot be combined with --all or --issue");
   }
-  const checkout = resolve(values.get("checkout") ?? process.cwd());
-  const remote = values.get("remote") ?? "origin";
-  const baseBranch = values.get("base") ?? "main";
-  const lockDirectory =
-    values.get("lock-dir") ?? join(checkout, "build", "afk-runner");
+  const checkout = resolve(text(parsed["checkout"]) ?? process.cwd());
+  const remote = text(parsed["remote"]) ?? "origin";
+  const baseBranch = text(parsed["base"]) ?? "main";
+  const lockDirectory = text(parsed["lock-dir"]) ?? join(checkout, "build", "afk-runner");
   const worktreeRoot =
-    values.get("worktree-root") ?? join(dirname(checkout), "afk-worktrees");
-  // The same precedence Pi itself uses for its agent directory, so that the
-  // directory this runner names is the one the session and the guard read.
-  const agentDirectory =
-    values.get("agent-dir") ??
-    process.env.PI_CODING_AGENT_DIR ??
-    process.env.PI_AGENT_DIR ??
-    join(homedir(), ".pi", "agent");
-  const model = values.get("model");
-  const pool = values.get("pool");
-  const showPool = values.has("show-pool");
-  const noVerify = values.has("no-verify");
-  const batchRelated = values.has("batch-related");
-  const deadlineMs = number(values.get("deadline-ms"), DEFAULT_DEADLINE_MS, "--deadline-ms");
-  const staleAfterMs = number(values.get("stale-after-ms"), DEFAULT_STALE_AFTER_MS, "--stale-after-ms");
+    text(parsed["worktree-root"]) ?? join(dirname(checkout), "afk-worktrees");
+  const model = text(parsed["model"]);
+  const agentDirectory = text(parsed["agent-dir"]) ?? defaultAgentDirectory();
+  const pool = text(parsed["pool"]);
+  const showPool = parsed["show-pool"] === true;
+  const noVerify = parsed["no-verify"] === true;
+  const batchRelated = parsed["batch-related"] === true;
+  const deadlineMs = number(text(parsed["deadline-ms"]), undefined, "--deadline-ms");
+  const staleAfterMs = number(text(parsed["stale-after-ms"]), undefined, "--stale-after-ms");
+  const gates = list(parsed["gate"], "--gate");
+  const gateTimeoutMs = number(text(parsed["gate-timeout-ms"]), undefined, "--gate-timeout-ms");
 
   return {
     ...(repo === undefined ? {} : { repo }),
-    ...(issue === undefined ? {} : { issue: positiveNumber(issue, "--issue") }),
+    ...(issue === undefined ? {} : { issue }),
     ...(all ? { all: true } : {}),
     ...(merge ? { merge: true } : {}),
     checkout,
@@ -284,15 +298,73 @@ export function parseArgs(argv: readonly string[]): CliOptions {
     baseBranch,
     lockDirectory,
     worktreeRoot,
-    agentDirectory,
     ...(model === undefined ? {} : { model }),
+    agentDirectory,
     ...(pool === undefined ? {} : { pool }),
     ...(showPool ? { showPool: true } : {}),
     ...(noVerify ? { verifyPushes: false } : {}),
     ...(batchRelated ? { batchRelated: true } : {}),
-    deadlineMs,
-    staleAfterMs,
+    ...(deadlineMs === undefined ? {} : { deadlineMs }),
+    ...(staleAfterMs === undefined ? {} : { staleAfterMs }),
+    ...(gates === undefined ? {} : { gates }),
+    ...(gateTimeoutMs === undefined ? {} : { gateTimeoutMs }),
   };
+}
+
+/**
+ * Say that an option is not one the command has.
+ *
+ * citty keeps the options it does not know, and a runner that read them would
+ * ignore a flag the operator believed in — a misspelled `--gate` would run the
+ * default gates and say nothing.
+ */
+function rejectUnknownOptions(argv: readonly string[]): void {
+  for (const argument of argv) {
+    if (!argument.startsWith("--")) {
+      continue;
+    }
+    const name = (argument.slice(2).split("=")[0] ?? "").trim();
+    if (name !== "" && !(name in ARGS)) {
+      throw new Error(`unknown option --${name}`);
+    }
+  }
+}
+
+/**
+ * Say that the gates were named more than once.
+ *
+ * citty keeps the **last** of a repeated flag, so a second `--gate` would
+ * quietly drop the first one and the run would judge the tree by half the
+ * list the operator asked for. The list is one flag: `--gate "a, b"`.
+ */
+function rejectRepeatedGate(argv: readonly string[]): void {
+  const named = argv.filter((argument) => argument === "--gate" || argument.startsWith("--gate="));
+  if (named.length > 1) {
+    throw new Error("the gates are named in one --gate, separated by commas");
+  }
+}
+
+/** An option's value, as text — or nothing when it was not given. */
+function text(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+/** A list of commands, as one comma-separated value. */
+function list(value: unknown, name: string): string[] | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== "string") {
+    throw new Error(`${name} must be a list of commands`);
+  }
+  const commands = value
+    .split(",")
+    .map((command) => command.trim())
+    .filter((command) => command !== "");
+  if (commands.length === 0) {
+    throw new Error(`${name} must name at least one command`);
+  }
+  return commands;
 }
 
 /**
@@ -345,7 +417,11 @@ function positiveNumber(raw: string, name: string): number {
 }
 
 /** Read a number, or say that the number is not one. */
-function number(raw: string | undefined, fallback: number, name: string): number {
+function number(
+  raw: string | undefined,
+  fallback: number | undefined,
+  name: string,
+): number | undefined {
   if (raw === undefined) {
     return fallback;
   }
@@ -357,325 +433,33 @@ function number(raw: string | undefined, fallback: number, name: string): number
 }
 
 /**
- * The lines an assistant text block contributes to the run stream.
+ * Route the session's HTTP through the proxy, when there is one.
  *
- * A text block can hold several lines — the final summary usually does — and
- * every one of them is tagged, so no line of the stream reads as runner
- * output. A blank line carries nothing and is dropped.
+ * The SDK installs its own dispatcher, and that one does not read the
+ * environment: a provider that is only reachable through a proxy — which is
+ * the usual case for a self-hosted or regional API — is simply unreachable,
+ * and the request dies at the SDK's timeout with nothing in the log to say
+ * why. So the runner installs a dispatcher that reads `HTTPS_PROXY` and
+ * friends, and the fetch that goes with it.
+ *
+ * Nothing happens when no proxy is configured: a host that reaches its
+ * provider directly keeps the SDK's own dispatcher.
  */
-export function assistantTextLines(text: string): string[] {
-  const lines: string[] = [];
-  for (const line of text.split("\n")) {
-    if (line.trim() !== "") {
-      lines.push(`· ${line}`);
-    }
-  }
-  return lines;
-}
-
-/**
- * The loader the session's resources come from.
- *
- * It is the SDK's own loader, with three things said: the guard's extension is
- * installed into the session, the runner's own skills are in its skill paths,
- * and this package's own extension is dropped from the set the loader
- * discovered.
- */
-export function createResourceLoader(options: {
-  readonly cwd: string;
-  readonly agentDirectory: string;
-  readonly systemPromptSections: Record<string, string>;
-  /** Told what the agent is doing, as it does it. */
-  readonly onEvent?: (line: string) => void;
-  /**
-   * Told what a turn cost, when the provider reported it.
-   *
-   * The message the `message_end` event carries is the one that holds the
-   * numbers, and the loader is the one that sees the event.
-   */
-  readonly onUsage?: (usage: RunUsage) => void;
-}): DefaultResourceLoader {
-  return new DefaultResourceLoader({
-    cwd: options.cwd,
-    agentDir: options.agentDirectory,
-    additionalExtensionPaths: [guardExtensionPath()],
-    // The runner's own skills, and nothing else: the target repository's
-    // skills and the host user's come from the loader's own discovery. The
-    // host's are not the runner's to depend on — a run has to be the same on
-    // every host — so a skill the runner depends on is a skill the runner
-    // carries.
-    additionalSkillPaths: [skillsDirectory()],
-    extensionsOverride: (loaded) => ({
-      ...loaded,
-      extensions: loaded.extensions.filter((extension) => !isOwnExtension(extension.path)),
-    }),
-    extensionFactories: [
-      {
-        name: "afk-runner-guardrail",
-        factory: (pi) => {
-          pi.on("before_agent_start", (event) => {
-            for (const [name, text] of Object.entries(options.systemPromptSections)) {
-              event.systemPromptOptions.sections[name] = text;
-            }
-          });
-          pi.on("tool_call", (event) => {
-            options.onEvent?.(chalk.dim(`  → ${describeToolCall(event)}`));
-          });
-          pi.on("message_end", (event: any) => {
-            const message = event?.message;
-            if (!message || message.role !== "assistant") {
-              return;
-            }
-            // What the turn cost, when the provider said what it cost. The
-            // message this event carries is the one that holds the numbers.
-            const usage = usageFromMessage(message);
-            if (usage !== undefined) {
-              options.onUsage?.(usage);
-            }
-            const content = Array.isArray(message.content)
-              ? message.content
-              : [];
-            for (const block of content) {
-              if (!block || typeof block !== "object") {
-                continue;
-              }
-              if (block.type === "thought" || block.type === "thinking") {
-                const thinking =
-                  typeof (block as any).thinking === "string"
-                    ? (block as any).thinking
-                    : typeof (block as any).text === "string"
-                      ? (block as any).text
-                      : "";
-                if (thinking === "") {
-                  continue;
-                }
-                const lines = thinking.split("\n");
-                const shown = lines.slice(0, 3);
-                for (const line of shown) {
-                  // A blank line carries nothing: the marker on it would be a
-                  // line of its own, and it would read as the agent's line.
-                  if (line.trim() === "") {
-                    continue;
-                  }
-                  // The marker is what says "the agent, not the runner": the
-                  // journal is not a TTY, so the dim is the same text as a
-                  // status line and the shape is all that is left.
-                  options.onEvent?.(chalk.dim(`· ${line}`));
-                }
-                if (lines.length > 3) {
-                  options.onEvent?.(chalk.dim(`… (+${lines.length - 3} lines)`));
-                }
-                continue;
-              }
-              if (block.type === "text") {
-                const text =
-                  typeof (block as any).text === "string"
-                    ? (block as any).text
-                    : "";
-                for (const line of assistantTextLines(text)) {
-                  options.onEvent?.(line);
-                }
-                continue;
-              }
-            }
-          });
-        },
-      },
-    ],
-  });
-}
-
-/**
- * The session the agent works in.
- *
- * Pi's own session, with two things added: the runner's guardrail reaches the
- * model through the system prompt, and a model is **chosen**. A session with
- * no model answers to nobody — the SDK's own initial resolution falls back to
- * "unknown" when the host has no default model saved — so the runner names
- * one, and says so when it cannot find any.
- *
- * The extension is installed **into the session**, not into the host's Pi — a
- * session the runner creates must not be steered by the extension that also
- * creates sessions. That is what `extensionsOverride` enforces: discovery stays
- * on, because the host's model providers are extensions and a session that
- * discovered nothing would have no model to run on, and **this** extension is
- * dropped by path before the session's runner is built.
- */
-export function piSessionFactory(options: {
-  readonly agentDirectory: string;
-  /** The model — `provider/id`. It wins over the pool. */
-  readonly model?: string;
-  /** The model to run on when there is no pool — the host's own. */
-  readonly fallbackModel?: string;
-  /** The pool the model is picked from, and moved around in. */
-  readonly pool?: Pool | null;
-  /** What the pool remembers for the whole run. */
-  readonly state?: PoolState;
-  /** Told what the agent is doing, as it does it. */
-  readonly onEvent?: (line: string) => void;
-  /** Told what the pool did — the model it moved to, and why. */
-  readonly onPoolEvent?: (line: string) => void;
-}): SessionFactory {
-  return async ({ cwd, systemPromptSections, tools, onUsage }) => {
-    // The host's own proxy first; the pool's own proxy replaces it per model.
-    const proxyConfigured = useProxy(undefined);
-    const state = options.state ?? newPoolState();
-    await installGuardPolicy({ cwd });
-    const loader = createResourceLoader({
-      cwd,
-      agentDirectory: options.agentDirectory,
-      systemPromptSections,
-      ...(options.onEvent === undefined ? {} : { onEvent: options.onEvent }),
-      ...(onUsage === undefined ? {} : { onUsage }),
-    });
-    await loader.reload();
-
-    const created = await createAgentSession({
-      cwd,
-      // The same directory the loader was given: the flag means "this agent
-      // directory", not "the extensions of this one and the credentials of another".
-      agentDir: options.agentDirectory,
-      resourceLoader: loader,
-      ...(tools === undefined ? {} : { customTools: [...tools] }),
-    });
-
-    // `session_start` is the host's event, and this session has no host: the SDK
-    // builds the extension runner and binds the tool-call gate, but never emits it.
-    // The guard loads its policy there, so without this line it has none — and a
-    // call with no rule is an ask, which in a session with no dialog is a deny.
-    // Measured: every tool call blocked before this line, only the denied paths after.
-    await created.session.bindExtensions({});
-
-    const chosen = chooseModel(created.session.modelRuntime, {
-      ...(options.model === undefined ? {} : { model: options.model }),
-      ...(options.fallbackModel === undefined
-        ? {}
-        : { fallbackModel: options.fallbackModel }),
-      ...(options.pool === undefined ? {} : { pool: options.pool }),
-      exhausted: state.exhausted,
-      proxyConfigured,
-    });
-    if (chosen === undefined) {
-      throw new Error(
-        "no model to run on: name one with --model <provider/id>, or give the " +
-          "host a provider whose credential is configured",
-      );
-    }
-    await created.session.setModel(chosen.model);
-    if (!chosen.pooled) {
-      return created.session;
-    }
-    // The pool moves the session between its models: a limit that runs out, a
-    // peak hour that comes, a model that becomes available.
-    return new PoolSession({
-      host: created.session,
-      runtime: created.session.modelRuntime,
-      pool: options.pool as Pool,
-      state,
-      reference: chosen.reference,
-      proxyConfigured,
-      ...(options.onPoolEvent === undefined ? {} : { onEvent: options.onPoolEvent }),
-    });
-  };
-}
-
-/**
- * The model the session runs on.
- *
- * The named one when the command names it — a named model is a decision, and
- * the pool does not overrule a decision. Otherwise the pool's best model: the
- * one with the biggest priority that is not at its peak tariff, has not run out
- * of its limit, is reachable, and needs no proxy this host has not got.
- */
-function chooseModel(
-  runtime: ModelRuntime,
-  options: {
-    readonly model?: string;
-    readonly fallbackModel?: string;
-    readonly pool?: Pool | null;
-    /** The models whose limit is gone — for the whole run. */
-    readonly exhausted?: ReadonlySet<string>;
-    readonly proxyConfigured: boolean;
-  },
-):
-  | {
-      readonly model: NonNullable<ReturnType<ModelRuntime["getModel"]>>;
-      readonly reference: string;
-      /** Whether the pool owns the session and may move it. */
-      readonly pooled: boolean;
-    }
-  | undefined {
-  if (options.model !== undefined) {
-    const model = pickModel(runtime, options.model);
-    return model === undefined
-      ? undefined
-      : { model, reference: options.model, pooled: false };
-  }
-  const pool = options.pool ?? null;
-  if (pool !== null && pool.models.length > 0) {
-    const chosen = pickPoolModel(pool, {
-      ...(options.exhausted === undefined ? {} : { exhausted: options.exhausted }),
-      proxyConfigured: options.proxyConfigured,
-      now: new Date(),
-      usable: (model) => knownModel(runtime, model.reference),
-    });
-    if (chosen === undefined) {
-      throw new NoModelAvailable(
-        "no model in the pool can be used: every model is at its peak tariff, " +
-          "has run out of its limit, or cannot be reached",
-      );
-    }
-    const { provider, id } = splitReference(chosen.reference, "the pool's model");
-    const model = runtime.getModel(provider, id);
-    if (model === undefined) {
-      throw new NoModelAvailable(`the provider ${provider} has no model ${id}`);
-    }
-    return { model, reference: chosen.reference, pooled: true };
-  }
-  const model = pickModel(runtime, options.fallbackModel);
-  return model === undefined
-    ? undefined
-    : { model, reference: options.fallbackModel ?? "", pooled: false };
-}
-
-/** The name of the directory this package is installed in, whatever the install. */
-const OWN_PACKAGE = basename(dirname(dirname(fileURLToPath(import.meta.url))));
-
-/**
- * Whether a discovered extension is this package's own.
- *
- * It is decided by the **package**, not by the file: a host can have two copies
- * of this package installed (a project install and a global one), and the copy
- * the host activated is not necessarily the copy a work session discovers. A path
- * comparison would let the other copy in — and that copy's hooks would fire in
- * the session this package created.
- *
- * A synthetic path is not a package at all. It is the loader's name for an
- * extension that has no file — `<inline:...>` for the factory this package
- * registers, `builtin:...` for the SDK's own. `resolve()` turns one into a
- * path under the working directory, and the package name is then read off the
- * working directory's **parent**: on a CI runner the checkout sits at
- * `<repo>/<repo>`, so the parent is named after the package and the runner's own
- * inline factory was mistaken for a second copy of itself — and dropped, taking
- * the tool-call log with it.
- */
-export function isOwnExtension(path: string): boolean {
-  // A synthetic path names no file: `builtin:` for the SDK's own, `<...>` for
-  // the factory this package registers. The SDK's own rule, kept in step with
-  // it — the SDK does not export `isSyntheticPath`.
-  if (path.startsWith("builtin:") || path.startsWith("<")) {
+export function useProxyFromEnvironment(env: NodeJS.ProcessEnv = process.env): boolean {
+  const proxy = env.HTTPS_PROXY ?? env.https_proxy ?? env.HTTP_PROXY ?? env.http_proxy;
+  if (proxy === undefined || proxy === "") {
     return false;
   }
-  // `<package>/dist/extension.js` from an install, `<package>/src/extension.ts` from source.
-  return basename(dirname(dirname(resolve(path)))) === OWN_PACKAGE;
+  setGlobalDispatcher(new EnvHttpProxyAgent());
+  globalThis.fetch = undiciFetch as typeof globalThis.fetch;
+  return true;
 }
 
 /**
- * The run both front doors give the runner.
+ * The run the command gives the runner.
  *
  * Everything here comes from the command line or from the injected dependencies;
- * the doors differ only in how they report a run — a scheduler reads stdout, a
- * human reads the footer — so those callbacks are added by each door. One map,
+ * the callbacks — how a run reports itself — are added by the caller. One map,
  * because two maps of thirteen fields drift the first time a flag is added.
  */
 export function runOptionsFrom(
@@ -694,8 +478,10 @@ export function runOptionsFrom(
     gh: dependencies.gh ?? runGh,
     run: dependencies.run ?? runCommand,
     session,
-    deadlineMs: options.deadlineMs,
-    staleAfterMs: options.staleAfterMs,
+    deadlineMs: options.deadlineMs ?? DEFAULT_DEADLINE_MS,
+    staleAfterMs: options.staleAfterMs ?? DEFAULT_STALE_AFTER_MS,
+    ...(options.gates === undefined ? {} : { gates: options.gates }),
+    ...(options.gateTimeoutMs === undefined ? {} : { gateTimeoutMs: options.gateTimeoutMs }),
     ...(options.verifyPushes === undefined ? {} : { verifyPushes: options.verifyPushes }),
     ...(options.batchRelated === undefined ? {} : { batchRelated: options.batchRelated }),
     // A named issue took its lock before the run read anything. A run that lets
@@ -707,58 +493,6 @@ export function runOptionsFrom(
   };
 }
 
-/** One line about a tool call: the tool, and the command when there is one. */
-export function describeToolCall(event: { toolName: string; input?: unknown }): string {
-  const input = event.input;
-  const command =
-    typeof input === "object" &&
-    input !== null &&
-    "command" in input &&
-    typeof (input as { command: unknown }).command === "string"
-      ? (input as { command: string }).command
-      : undefined;
-  if (command === undefined) {
-    return event.toolName;
-  }
-  const first = command.split("\n")[0] ?? "";
-  return `${event.toolName}: ${first.length > 120 ? `${first.slice(0, 120)}…` : first}`;
-}
-
-/**
- * The model the session runs on.
- *
- * The named one when the command names it; otherwise the first model of the
- * first provider whose credential is configured. "First" is the provider's own
- * order — the order its catalogue lists its models in — and not a ranking:
- * choosing a model well is the host's judgement, not the runner's.
- */
-export function pickModel(
-  runtime: ModelRuntime,
-  reference: string | undefined,
-): ReturnType<ModelRuntime["getModel"]> {
-  if (reference !== undefined) {
-    // The provider and the model are separated by the **first** slash: a model
-    // id may itself contain one — `commandcode/reflection/beam:free` is a
-    // provider called `commandcode` and a model called `reflection/beam:free`.
-    const { provider, id } = splitReference(reference, "--model");
-    const model = runtime.getModel(provider, id);
-    if (model === undefined) {
-      throw new Error(`the provider ${provider} has no model ${id}`);
-    }
-    return model;
-  }
-  for (const provider of runtime.getRegisteredProviderIds()) {
-    if (!runtime.hasConfiguredAuth(provider)) {
-      continue;
-    }
-    const models = runtime.getModels(provider);
-    if (models.length > 0) {
-      return models[0];
-    }
-  }
-  return undefined;
-}
-
 /** What the command runs against — the parts a test replaces. */
 export interface CliDependencies {
   readonly git?: GitRunner;
@@ -766,6 +500,48 @@ export interface CliDependencies {
   readonly run?: CommandRunner;
   readonly session?: SessionFactory;
   readonly lock?: (directory: string, name: string) => Promise<Awaited<ReturnType<typeof takeLock>>>;
+}
+
+/**
+ * The model the session runs on.
+ *
+ * The named one when the command names it — a named model is a decision, and
+ * the pool does not overrule a decision. Otherwise the pool's best model: the
+ * one with the biggest priority that is not at its peak tariff, has not run
+ * out of its limit, is reachable, and needs no proxy this host has not got.
+ *
+ * Nothing at all when neither named nor pooled: the engine's own model, the
+ * one the runner carries.
+ */
+async function chooseModel(options: {
+  readonly model?: string;
+  readonly pool: Pool | null;
+  /** The models whose limit is gone — for the whole run. */
+  readonly state: PoolState;
+  readonly proxyConfigured: boolean;
+}): Promise<{ readonly reference: string; readonly pooled: boolean } | undefined> {
+  if (options.model !== undefined) {
+    return { reference: options.model, pooled: false };
+  }
+  const pool = options.pool;
+  if (pool === null || pool.models.length === 0) {
+    return undefined;
+  }
+  const { mastraCatalogue } = await import("./mastra/model.js");
+  const catalogue = mastraCatalogue();
+  const chosen = pickPoolModel(pool, {
+    exhausted: options.state.exhausted,
+    proxyConfigured: options.proxyConfigured,
+    now: new Date(),
+    usable: (model) => knownModel(catalogue, model.reference),
+  });
+  if (chosen === undefined) {
+    throw new NoModelAvailable(
+      "no model in the pool can be used: every model is at its peak tariff, " +
+        "has run out of its limit, or cannot be reached",
+    );
+  }
+  return { reference: chosen.reference, pooled: true };
 }
 
 /**
@@ -782,15 +558,10 @@ export async function showPool(options: CliOptions): Promise<number> {
     process.stdout.write(`there is no pool file at ${path}\n`);
     return EXIT_OK;
   }
-  // The catalogue and the credentials are the host's own: the pool says which
-  // models it wants, and only they say which of them can be reached.
-  const runtime = await ModelRuntime.create({
-    authPath: join(options.agentDirectory, "auth.json"),
-    modelsPath: join(options.agentDirectory, "models.json"),
-  });
+  const { mastraCatalogue } = await import("./mastra/model.js");
   const lines = describePool(pool, {
     proxyConfigured: proxyFromEnvironment() !== undefined,
-    usable: (model) => knownModel(runtime, model.reference),
+    usable: (model) => knownModel(mastraCatalogue(), model.reference),
   });
   process.stdout.write(`${lines.join("\n")}\n`);
   return EXIT_OK;
@@ -800,11 +571,7 @@ export async function showPool(options: CliOptions): Promise<number> {
  * The question the command line asks, when it asks one.
  *
  * `--show-pool` is a question about the pool file: it says what the file
- * means now and runs nothing. The flag is read here and nowhere else — the
- * options say the question was asked, and the answer comes from the file.
- *
- * A command line that cannot be read is not a question: the run says how it
- * is wrong.
+ * means now and runs nothing. The flag is read here and nowhere else.
  */
 export function askedQuestion(argv: readonly string[]): CliOptions | null {
   let options: CliOptions;
@@ -826,13 +593,7 @@ export async function prepareRun(
   argv: readonly string[],
   dependencies: CliDependencies = {},
 ): Promise<
-  | {
-      readonly ok: true;
-      readonly options: CliOptions & { readonly repo: string };
-      readonly lock: Awaited<ReturnType<typeof takeLock>>;
-      /** The model pool, when the host has one. */
-      readonly pool: Pool | null;
-    }
+  | { readonly ok: true; readonly options: ResolvedOptions; readonly lock: Awaited<ReturnType<typeof takeLock>> }
   | { readonly ok: false; readonly failure: unknown }
 > {
   let options: CliOptions;
@@ -849,24 +610,59 @@ export async function prepareRun(
     return { ok: false, failure };
   }
 
-  // The pool is read before the lock: a pool file that cannot be read is a
-  // mistake in the command, and a mistake that holds the lock keeps the next
-  // runner out while it is found.
+  // The gates a run runs: the command's or the repository's own file. A run
+  // that is told neither runs no gate, and the ceiling follows them.
+  let settings: GateSettings;
+  try {
+    settings = resolveGateSettings({
+      cli: {
+        ...(resolved.gates === undefined ? {} : { gates: resolved.gates }),
+        ...(resolved.gateTimeoutMs === undefined
+          ? {}
+          : { gateTimeoutMs: resolved.gateTimeoutMs }),
+      },
+      repo: await readGateSettings(resolved.checkout),
+    });
+  } catch (failure) {
+    return { ok: false, failure };
+  }
+  // The pool file is read before the lock is taken: a file that is there but
+  // cannot be read is a mistake in the command, and a mistake that holds the
+  // lock keeps the next runner out while it is found.
   let pool: Pool | null;
   try {
     pool = await readPool(resolved.pool ?? poolFile(resolved.agentDirectory));
   } catch (failure) {
     return { ok: false, failure };
   }
+  const withSettings: ResolvedOptions = {
+    ...resolved,
+    modelPool: pool,
+    gates: settings.gates,
+    gateTimeoutMs: settings.gateTimeoutMs,
+    deadlineMs: resolved.deadlineMs ?? defaultDeadlineMs(settings.gates.length),
+    staleAfterMs: resolved.staleAfterMs ?? DEFAULT_STALE_AFTER_MS,
+  };
 
   const take = dependencies.lock ?? takeLock;
   try {
-    const lock = await take(resolved.lockDirectory, lockNameFor(resolved));
-    return { ok: true, options: resolved, lock, pool };
+    const lock = await take(withSettings.lockDirectory, lockNameFor(withSettings));
+    return { ok: true, options: withSettings, lock };
   } catch (failure) {
     return { ok: false, failure };
   }
 }
+
+/** The options of a run that is ready to start. */
+export type ResolvedOptions = CliOptions & {
+  readonly repo: string;
+  /** The pool the models are picked from — null when there is no pool file. */
+  readonly modelPool: Pool | null;
+  readonly gates: readonly string[];
+  readonly gateTimeoutMs: number;
+  readonly deadlineMs: number;
+  readonly staleAfterMs: number;
+};
 
 /**
  * A duration, as a reader reads it.
@@ -1008,14 +804,15 @@ export async function main(
   argv: readonly string[],
   dependencies: CliDependencies = {},
 ): Promise<number> {
-  // The question about the pool file is asked before the run is prepared: it
-  // prints and stops, and it takes no lock — a lock nobody gives back keeps
-  // the next runner out.
+  // A question is not a run: `--show-pool` says what the pool file means and
+  // takes no lock.
   const question = askedQuestion(argv);
   if (question !== null) {
     try {
       return await showPool(question);
     } catch (failure) {
+      // A pool file the runner cannot read is a mistake in the file, and the
+      // question says so instead of throwing at the caller.
       process.stderr.write(`${errorMessage(failure)}\n`);
       return EXIT_USAGE;
     }
@@ -1025,10 +822,9 @@ export async function main(
     const failure = prepared.failure;
     const message = errorMessage(failure);
     if (message === "help") {
-      process.stdout.write(`${USAGE}\n`);
+      process.stdout.write(`${await usage()}\n`);
       return EXIT_OK;
     }
-    // parseArgs errors are usage errors
     if (failure instanceof LockHeld) {
       process.stderr.write(`${failure.message}\n`);
       return EXIT_LOCKED;
@@ -1037,20 +833,9 @@ export async function main(
       process.stderr.write(`${failure.message}\n`);
       return EXIT_NO_LOCK;
     }
-    // distinguish: if from parseArgs, message+usage; else just message
-    // We can't easily know; check if message matches? Keep simple: usage-style for parse errors.
-    // Heuristic: LockHeld/Unusable handled; resolve errors print message only.
-    // For parse errors, print usage. Detect by trying parseArgs again.
-    let isUsage = false;
-    try { parseArgs(argv); } catch { isUsage = true; }
-    if (isUsage) {
-      process.stderr.write(`${message}\n\n${USAGE}\n`);
-      return EXIT_USAGE;
-    }
-    process.stderr.write(`${message}\n`);
-    // Could be resolveRepo failure -> usage per original
-    // Original treated resolveRepo as EXIT_USAGE. Keep:
-    // But we already returned? Need mark. We'll handle below by checking if resolved? 
+    // Everything else is the command line that was wrong: the options, the
+    // repository, or the settings file the repository carries.
+    process.stderr.write(`${message}\n\n${await usage()}\n`);
     return EXIT_USAGE;
   }
   const resolved = prepared.options;
@@ -1072,31 +857,81 @@ export async function main(
   process.on("SIGINT", interrupt);
   process.on("SIGTERM", interrupt);
 
-  // What the pool remembers for the whole run: a model whose limit is gone is
-  // gone for every issue of the sweep, not only for the session that found it.
-  const state = newPoolState();
-  // What the pool did, for the record of the run: the model it moved to, and
-  // why it moved.
+  const say = (line: string): void => {
+    process.stdout.write(`${line}\n`);
+  };
+
+  // The provider is reached through the proxy when there is one — the SDK's own
+  // dispatcher does not read the environment.
+  useProxyFromEnvironment();
+
+  // The engine is Mastra, and its module is loaded only when a session is
+  // asked for, so a run that never starts one does not pay for it.
+  let mastra: SessionFactory | undefined;
+  const engine: SessionFactory = async (options) => {
+    if (mastra === undefined) {
+      const { mastraSessionFactory } = await import("./mastra/session.js");
+      mastra = mastraSessionFactory({
+        ...(resolved.model === undefined ? {} : { model: resolved.model }),
+        onEvent: say,
+      });
+    }
+    return mastra(options);
+  };
+  const injected = dependencies.session !== undefined;
+  const base: SessionFactory = dependencies.session ?? engine;
+
+  // The pool is the host's own file: the models the run may use and the
+  // conditions they are used under. The models whose limit is gone are
+  // remembered for the whole run, and what the pool did is said in the record.
+  const pool = resolved.modelPool;
+  const poolState: PoolState = newPoolState();
   const poolEvents: string[] = [];
-  const base =
-    dependencies.session ??
-    piSessionFactory({
-      agentDirectory: resolved.agentDirectory,
+  const proxyConfigured = proxyFromEnvironment() !== undefined;
+
+  const session: SessionFactory = async (options) => {
+    const chosen = await chooseModel({
       ...(resolved.model === undefined ? {} : { model: resolved.model }),
-      pool: prepared.pool,
-      state,
-      onEvent: (line) => {
-        process.stdout.write(`${line}\n`);
+      pool,
+      state: poolState,
+      proxyConfigured,
+    });
+    const created = await base({
+      ...options,
+      ...(chosen === undefined ? {} : { model: chosen.reference }),
+    });
+    active = created;
+    if (chosen === undefined || !chosen.pooled || injected) {
+      return created;
+    }
+    const move = created.setModel;
+    if (move === undefined) {
+      throw new Error(
+        "the session cannot be moved onto another model — the model pool needs it",
+      );
+    }
+    const host: PoolHost = {
+      prompt: (text) => created.prompt(text),
+      abort: () => created.abort(),
+      dispose: () => created.dispose(),
+      get messages(): readonly TurnMessage[] | undefined {
+        return created.messages;
       },
-      onPoolEvent: (line) => {
+      setModel: (reference) => move(reference),
+    };
+    const { mastraCatalogue } = await import("./mastra/model.js");
+    return new PoolSession({
+      host,
+      catalogue: mastraCatalogue(),
+      pool: pool as Pool,
+      state: poolState,
+      reference: chosen.reference,
+      proxyConfigured,
+      onEvent: (line) => {
         poolEvents.push(line);
-        process.stdout.write(`${line}\n`);
+        say(line);
       },
     });
-  const session: SessionFactory = async (options) => {
-    const created = await base(options);
-    active = created;
-    return created;
   };
 
   const run: RunOptions = {
@@ -1121,8 +956,8 @@ export async function main(
         gh: dependencies.gh ?? runGh,
         run: dependencies.run ?? runCommand,
         session,
-        deadlineMs: resolved.deadlineMs,
         poolEvents,
+        deadlineMs: resolved.deadlineMs,
         ...(resolved.verifyPushes === undefined
           ? {}
           : { verifyPushes: resolved.verifyPushes }),
@@ -1273,7 +1108,8 @@ async function work(
       return { code: EXIT_NO_LOCK };
     }
     // No model is not a step that failed: it is a reason there was no step to
-    // run, and the code says so.
+    // run, and the code says so. The failure is wrapped in the run's own
+    // error, so the cause is looked for.
     const noModel = causeOf(failure, (error) => error instanceof NoModelAvailable);
     if (noModel !== null) {
       process.stderr.write(`${noModel.message}\n`);
@@ -1289,15 +1125,12 @@ async function work(
 }
 
 /**
- * The failure behind a failure, when it is the one being looked for.
+ * The failure in the chain of causes that is the kind asked for, or null.
  *
- * A failure is wrapped as it travels: the session's error becomes the step's,
- * and the step's becomes the run's. The reason is at the bottom of that chain.
+ * The run wraps what a step failed on, so the reason a run gave up is often
+ * one layer down: "no model was available" is the cause of a failed session.
  */
-function causeOf(
-  failure: unknown,
-  wanted: (error: Error) => boolean,
-): Error | null {
+function causeOf(failure: unknown, wanted: (error: Error) => boolean): Error | null {
   let current: unknown = failure;
   for (let depth = 0; depth < 10; depth += 1) {
     if (!(current instanceof Error)) {

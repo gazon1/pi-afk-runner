@@ -1,6 +1,7 @@
 ---
 title: The work session is the runner's, minus the runner
-status: accepted
+status: superseded
+superseded-by: 2026-11-05-the-run-runs-on-mastra
 date: 2026-10-30
 authors: Command Code
 deciders: Singularity Developer
