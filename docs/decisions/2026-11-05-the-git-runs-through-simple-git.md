@@ -62,7 +62,7 @@ key the git still sees.
 then waits for it to stop. A child that ignores the request would keep the call — and the run
 waiting on it — open for as long as it likes. The run stops waiting whether the child does or not:
 the call is raced against a hard stop, the way `runGhWithTimeout` races the same way for the same
-reason. The grace is the git's own — `GIT_KILL_GRACE_MS` — the way `runGhWithTimeout` keeps one of its own.
+reason. The rule and the grace are in one place — `src/bound.ts` — and both calls go through it.
 
 **The gates keep their own spawn.** `runCommand` does not run git — it runs the repository's
 gates, with their own timeout, their own tail of the output and their own killing of the
@@ -125,5 +125,6 @@ it. The git path keeps it the same way.
 - `src/merge.ts` — the conflicted merge, read through the exit code.
 - `test/git.test.ts` — the exit code of a git that refused, the bound of a git that hangs, the
   payload a git that reads it gets, and the environment the child git sees.
+- `docs/decisions/2026-11-05-the-bound-is-one-rule.md` — the bound, as one rule for every child.
 - `docs/decisions/2026-11-05-the-command-line-is-parsed-by-citty.md` — the other dependency
   that took over a part of the runner's own code.

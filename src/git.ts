@@ -32,6 +32,8 @@ import { rm } from "node:fs/promises";
 import { resolve, join } from "node:path";
 import { simpleGit } from "simple-git";
 
+import { KILL_GRACE_MS, withHardStop } from "./bound.js";
+
 /** Who the claim is attributed to. Part of the tag object's identity. */
 export const CLAIM_TAGGER = {
   name: "afk-runner",
@@ -260,16 +262,6 @@ export function gitFailure(
 }
 
 /**
- * The grace a killed `git` gets before the run stops waiting for it.
- *
- * The child is asked to stop at the bound, and a child that obeys is gone
- * within a moment. A child that ignores the request would keep the call open
- * for as long as it likes — and a call that never settles is the wedge the
- * bound exists to prevent.
- */
-export const GIT_KILL_GRACE_MS = 5_000;
-
-/**
  * Runs the real `git`, with the bound every command gets.
  *
  * The bound is ours as well as the child's: simple-git asks the child to stop
@@ -281,7 +273,7 @@ export async function runGitWithTimeout(
   args: readonly string[],
   options: { readonly cwd: string; readonly input?: string },
   timeoutMs: number,
-  killGraceMs: number = GIT_KILL_GRACE_MS,
+  killGraceMs: number = KILL_GRACE_MS,
 ): Promise<string> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -289,7 +281,6 @@ export async function runGitWithTimeout(
   // is given into one of its own, and what the caller catches has to be the
   // error this file wrote.
   let failure: Error | undefined;
-  let hardStop: NodeJS.Timeout | undefined;
   try {
     const git = simpleGit({
       baseDir: options.cwd,
@@ -315,14 +306,13 @@ export async function runGitWithTimeout(
         return raised;
       },
     });
-    const stop = new Promise<never>((_resolve, reject) => {
-      hardStop = setTimeout(
-        () => reject(new CommandTimedOut(timeoutMs, "git", args, "", "")),
-        timeoutMs + killGraceMs,
-      );
-      hardStop.unref();
+    return await withHardStop(git.raw([...args]), {
+      timeoutMs,
+      killGraceMs,
+      // The git was asked to stop and did not: the run stops waiting, and the
+      // output of a git that never answered is empty.
+      timeoutError: () => new CommandTimedOut(timeoutMs, "git", args, "", ""),
     });
-    return await Promise.race([git.raw([...args]), stop]);
   } catch (thrown) {
     if (failure !== undefined) {
       throw failure;
@@ -330,9 +320,6 @@ export async function runGitWithTimeout(
     throw thrown;
   } finally {
     clearTimeout(timer);
-    if (hardStop !== undefined) {
-      clearTimeout(hardStop);
-    }
   }
 }
 

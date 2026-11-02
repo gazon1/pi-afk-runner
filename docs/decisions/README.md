@@ -15,6 +15,7 @@ for the rule that the copies follow.
 
 | Decision | What it settles |
 |---|---|
+| `2026-11-05-the-bound-is-one-rule.md` | the bound is one rule: one grace, one hard stop, and the run stops waiting for a child that ignores the request to stop — `gh` and `git` alike |
 | `2026-11-05-the-git-runs-through-simple-git.md` | the git runs through simple-git: the seam stays a function, the errors stay the runner's, the child git sees the whole environment, and the bound is the runner's as well as the child's |
 | `2026-11-05-the-sweep-works-several-issues-at-once.md` | the sweep works several issues at once: `--all --workers N`, the workers inside one sweep rather than several runners, the line that names its issue, and the git commands that are serialized |
 | `2026-11-05-the-pool-asks-the-engine-what-it-carries.md` | the pool on the Mastra engine: the catalogue it asks, the session that can be moved, and the level the file names — **supersedes** `2026-11-02-the-model-pool-is-a-file-the-host-owns.md` and `2026-11-02-the-file-names-the-effort-of-each-model.md`: the pool asks the engine what it carries, and the level is reported rather than applied |
