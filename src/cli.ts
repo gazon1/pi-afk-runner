@@ -775,8 +775,7 @@ export interface CliDependencies {
  * cannot see what its own file says cannot change it. Nothing is run and no
  * lock is taken.
  */
-export async function showPool(argv: readonly string[]): Promise<number> {
-  const options = parseArgs(argv);
+export async function showPool(options: CliOptions): Promise<number> {
   const path = options.pool ?? poolFile(options.agentDirectory);
   const pool = await readPool(path);
   if (pool === null) {
@@ -795,6 +794,26 @@ export async function showPool(argv: readonly string[]): Promise<number> {
   });
   process.stdout.write(`${lines.join("\n")}\n`);
   return EXIT_OK;
+}
+
+/**
+ * The question the command line asks, when it asks one.
+ *
+ * `--show-pool` is a question about the pool file: it says what the file
+ * means now and runs nothing. The flag is read here and nowhere else — the
+ * options say the question was asked, and the answer comes from the file.
+ *
+ * A command line that cannot be read is not a question: the run says how it
+ * is wrong.
+ */
+export function askedQuestion(argv: readonly string[]): CliOptions | null {
+  let options: CliOptions;
+  try {
+    options = parseArgs(argv);
+  } catch {
+    return null;
+  }
+  return options.showPool === true ? options : null;
 }
 
 /**
@@ -989,11 +1008,13 @@ export async function main(
   argv: readonly string[],
   dependencies: CliDependencies = {},
 ): Promise<number> {
-  // `--show-pool` is a question about the file, not a run: it prints and stops,
-  // and it takes no lock — a lock nobody gives back keeps the next runner out.
-  if (argv.includes("--show-pool")) {
+  // The question about the pool file is asked before the run is prepared: it
+  // prints and stops, and it takes no lock — a lock nobody gives back keeps
+  // the next runner out.
+  const question = askedQuestion(argv);
+  if (question !== null) {
     try {
-      return await showPool(argv);
+      return await showPool(question);
     } catch (failure) {
       process.stderr.write(`${errorMessage(failure)}\n`);
       return EXIT_USAGE;
