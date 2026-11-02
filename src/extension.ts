@@ -37,18 +37,15 @@ import {
 import {
   describeToolCall,
   errorMessage,
-  parseArgs,
   piSessionFactory,
-  resolveRepo,
+  prepareRun,
   runOptionsFrom,
-  type CliOptions,
 } from "./cli.js";
 import { existsSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { issueWorktreePath, runCommand, runGit, workBranch, type CommandRunner } from "./git.js";
 import { RUN_STATUS_ENTRY, statusFromEntries, statusLine, type RunStatus } from "./live.js";
-import { lockNameFor, takeLock } from "./lock.js";
 import {
   RunFailed,
   SETUP_SCRIPT,
@@ -401,36 +398,26 @@ export function liveFrontDoor(
       return;
     }
 
-    let options: CliOptions & { readonly repo: string };
-    try {
-      // The repository is the checkout's `origin` unless the command names one.
-      options = await resolveRepo(
-        parseArgs(args.trim().split(/\s+/).filter((token) => token !== "")),
-      );
-    } catch (failure) {
-      talk(ctx, `afk-runner: ${errorMessage(failure)}`, "error");
+    const argv = args.trim().split(/\s+/).filter((token) => token !== "");
+    const prepared = await prepareRun(argv);
+    if (!prepared.ok) {
+      talk(ctx, `afk-runner: ${errorMessage(prepared.failure)}`, "error");
       return;
     }
+    let options = prepared.options;
     if (options.all === true) {
+      await prepared.lock.release();
       talk(ctx, "afk-runner: --all is the CLI's sweep; this command works one issue", "warning");
       return;
     }
     if (options.merge === true) {
+      await prepared.lock.release();
       talk(ctx, "afk-runner: --merge is the CLI's mode; this command works one issue", "warning");
       return;
     }
+    const lock = prepared.lock;
     // The model is the one this session runs on unless the command names one.
     const model = options.model ?? hostModel(ctx.model) ?? undefined;
-
-    let lock: Awaited<ReturnType<typeof takeLock>>;
-    try {
-      lock = await takeLock(options.lockDirectory, lockNameFor(options));
-    } catch (failure) {
-      // A held lock and an unusable one both mean "not this runner, not now", and
-      // both already say which.
-      talk(ctx, `afk-runner: ${errorMessage(failure)}`, "error");
-      return;
-    }
 
     const run: LiveRun = {
       status: null,
