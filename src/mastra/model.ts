@@ -8,8 +8,12 @@
 
 import type { GatewayLanguageModel } from "@mastra/core/llm";
 
+import type { ModelCatalogue } from "../pool.js";
+
 import {
+  MINIMAX_API_KEY,
   MINIMAX_DEFAULT_MODEL,
+  MINIMAX_MODELS,
   MINIMAX_PROVIDER,
   MiniMaxGateway,
 } from "./gateways/minimax.js";
@@ -38,4 +42,38 @@ export async function resolveMastraModel(reference: string): Promise<GatewayLang
   const gateway = new MiniMaxGateway();
   const apiKey = await gateway.getApiKey(modelId);
   return await gateway.resolveLanguageModel({ modelId, providerId: provider, apiKey });
+}
+
+/**
+ * The models the runner carries, as the pool's catalogue says them.
+ *
+ * The catalogue is the engine's own: the pool asks what the runner carries,
+ * and the runner's answer is the gateway's list. The pool does not know what
+ * an engine carries — it asks.
+ */
+export function mastraCatalogue(): ModelCatalogue {
+  return {
+    carries: (reference: string): boolean => {
+      const separator = reference.indexOf("/");
+      if (separator <= 0 || separator === reference.length - 1) {
+        return false;
+      }
+      const provider = reference.slice(0, separator);
+      const id = reference.slice(separator + 1);
+      return provider === MINIMAX_PROVIDER && MINIMAX_MODELS.includes(id);
+    },
+    hasCredential: (reference: string): boolean => {
+      const separator = reference.indexOf("/");
+      if (separator <= 0 || separator === reference.length - 1) {
+        return false;
+      }
+      return reference.slice(0, separator) === MINIMAX_PROVIDER;
+    },
+  };
+}
+
+/** Whether the host has the credential the provider needs. */
+export function hasMastraKey(): boolean {
+  const key = process.env[MINIMAX_API_KEY];
+  return key !== undefined && key !== "";
 }

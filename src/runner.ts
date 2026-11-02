@@ -1441,6 +1441,8 @@ function renderRecord(options: {
   readonly heading?: string;
   /** What the number names — `issue` by default, `pull request` for a merge. */
   readonly subject?: string;
+  /** What the model pool did during the run. */
+  readonly pool?: readonly string[];
 }): string {
   const lines = [
     options.heading ?? `# Run issue-${options.issue}`,
@@ -1474,6 +1476,13 @@ function renderRecord(options: {
     }
   }
   lines.push("");
+  if (options.pool !== undefined && options.pool.length > 0) {
+    lines.push("## The model pool", "");
+    for (const line of options.pool) {
+      lines.push(`- ${line}`);
+    }
+    lines.push("");
+  }
   return lines.join("\n");
 }
 
@@ -1493,6 +1502,8 @@ export async function writeRunRecord(options: {
   readonly directory?: string;
   readonly heading?: string;
   readonly subject?: string;
+  /** What the model pool did during the run. */
+  readonly pool?: readonly string[];
 }): Promise<string> {
   const directory = options.directory ?? recordDirectory(options.root, options.issue);
   await mkdir(directory, { recursive: true });
@@ -1506,6 +1517,7 @@ export async function writeRunRecord(options: {
       steps: options.steps,
       ...(options.heading === undefined ? {} : { heading: options.heading }),
       ...(options.subject === undefined ? {} : { subject: options.subject }),
+      ...(options.pool === undefined ? {} : { pool: options.pool }),
     }),
     "utf8",
   );
@@ -1567,6 +1579,8 @@ export async function runSteps(options: {
   readonly directory?: string;
   readonly heading?: string;
   readonly subject?: string;
+  /** What the model pool did during the run. */
+  readonly pool?: readonly string[];
   /** What a failure releases: the claim, the worktree, the ref. */
   readonly release?: () => Promise<string | void>;
   /** Told about every step, as it finishes. */
@@ -1657,6 +1671,7 @@ export async function runSteps(options: {
       ...(options.directory === undefined ? {} : { directory: options.directory }),
       ...(options.heading === undefined ? {} : { heading: options.heading }),
       ...(options.subject === undefined ? {} : { subject: options.subject }),
+      ...(options.pool === undefined ? {} : { pool: options.pool }),
     });
   } catch (recordError) {
     if (failure === null) {
@@ -1758,6 +1773,14 @@ export interface RunOptions {
   readonly gateTimeoutMs?: number;
   /** Told about every step, as it finishes. */
   readonly onStep?: (record: StepRecord) => void;
+  /**
+   * What the model pool did during the run.
+   *
+   * The model the session ran on, and every move the pool made. The record
+   * says it, because a run that failed on another model than it started on
+   * cannot be read from the steps alone.
+   */
+  readonly poolEvents?: readonly string[];
   /** Told about a step as it starts, so a watcher can name the stage it is watching. */
   readonly onStepStart?: (step: string) => void;
   /**
@@ -3160,6 +3183,7 @@ async function runPlan(
     runId,
     root: options.checkout,
     steps,
+    ...(options.poolEvents === undefined ? {} : { pool: options.poolEvents }),
     ...(options.onStep === undefined ? {} : { onStep: options.onStep }),
     ...(options.onStepStart === undefined ? {} : { onStepStart: options.onStepStart }),
     ...(options.stopped === undefined ? {} : { stopped: options.stopped }),

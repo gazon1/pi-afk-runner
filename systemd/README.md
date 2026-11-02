@@ -91,6 +91,7 @@ The unit's status is the exit code, and the code names the step:
 |---|---|
 | 0 | the run finished, or the queue was empty |
 | 1 | an issue could not be worked — claimed elsewhere, already reviewed, or already counted |
+| 3 | no model was available — the pool had nothing that could answer |
 | 10 | the selection failed |
 | 20 | the claim failed |
 | 30 | the worktree failed |
@@ -107,6 +108,10 @@ A `75` is not a failure: the timer fired while a run was still going, and the
 runner left the work to the run that is already doing it. A `76` **is** a
 failure: the lock directory could not be written, and a runner that cannot
 take the lock must never look like a runner that had nothing to do.
+
+A `3` says the model pool had nothing that could answer — every model was out
+of its limit, at its peak tariff, or unreachable. The sweep stops there rather
+than failing every issue in the queue.
 
 The unit runs with `--all`, so one status covers a whole sweep. The sweep reads
 the queue once and works it by number, so an issue that fails does not put

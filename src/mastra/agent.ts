@@ -42,6 +42,14 @@ export interface MastraAgentOptions {
   readonly tools: readonly AnyToolSpec[];
   /** The skill directories the agent carries. */
   readonly skills: readonly string[];
+  /**
+   * The memory the agent keeps.
+   *
+   * The memory is what carries a turn into the next one. It is the session's,
+   * not the agent's: a session that moves onto another model builds a new
+   * agent and keeps this one, so the conversation is not lost by the move.
+   */
+  readonly memory?: Memory;
 }
 
 /**
@@ -73,6 +81,6 @@ export function createMastraAgent(options: MastraAgentOptions): Agent {
     skills: [...options.skills],
     // The memory is what carries a turn into the next one: the work session is
     // one conversation, and each prompt sees what the prompts before it said.
-    memory: new Memory({ storage: new InMemoryStore() }),
+    memory: options.memory ?? new Memory({ storage: new InMemoryStore() }),
   });
 }

@@ -15,6 +15,7 @@ for the rule that the copies follow.
 
 | Decision | What it settles |
 |---|---|
+| `2026-11-05-the-pool-asks-the-engine-what-it-carries.md` | the pool on the Mastra engine: the catalogue it asks, the session that can be moved, and the level the file names — **supersedes** `2026-11-02-the-model-pool-is-a-file-the-host-owns.md` and `2026-11-02-the-file-names-the-effort-of-each-model.md`: the pool asks the engine what it carries, and the level is reported rather than applied |
 | `2026-11-05-the-engine-tells-the-model-when-a-turn-ends-on-a-tool.md` | the engine tells the model, between its steps, that the turn ends on a tool: the review's verdict is reached instead of being cut off by the step limit |
 | `2026-11-05-a-run-gates-nothing-and-builds-nothing.md` | a run gates nothing and builds nothing: the gates are off by default and the agent may not compile — **supersedes** `2026-11-05-the-workflow-runs-the-gates.md` |
 | `2026-11-05-a-review-that-stated-no-verdict-gets-a-second-turn.md` | a review that stated no verdict gets a second turn in the same session, the first verdict stands, and the second turn is skipped when the verdict is there |
@@ -26,6 +27,8 @@ for the rule that the copies follow.
 | `2026-11-02-the-reviewers-tree-is-put-back.md` | the review puts the worktree back to the tree it judged, so a leftover never rides along with the fix |
 | `2026-11-01-only-a-gone-session-is-swallowed.md` | which failures the front door swallows, and which ones it lets out — **superseded** by `2026-11-05-the-runner-is-a-command-and-not-a-pi-extension.md`: there is no front door to swallow anything |
 | `2026-11-04-the-record-quotes-the-tail-and-names-the-log.md` | what the record quotes of a gate's output, and where the whole of it is |
+| `2026-11-02-the-model-pool-is-a-file-the-host-owns.md` | the model pool: the file the host owns, the models in it, when the runner moves between them, and each model's own proxy — **superseded** by `2026-11-05-the-pool-asks-the-engine-what-it-carries.md`: the pool asks the engine's catalogue, not a runtime |
+| `2026-11-02-the-file-names-the-effort-of-each-model.md` | the level each model in the pool thinks at, and who says it — **superseded** by `2026-11-05-the-pool-asks-the-engine-what-it-carries.md`: the level is read and reported, not applied |
 | `2026-11-01-the-self-review-runs-the-gates-again.md` | the self-review runs the gates again, and the agent's work is pushed only when they are green — **superseded** by the runner running the gates itself |
 | `2026-10-30-the-host-lock-is-a-real-flock.md` | the host lock, and why the runner is a Linux tool |
 | `2026-11-01-the-lock-is-per-issue.md` | the lock's unit: one per issue, one for the sweep, one for merge |

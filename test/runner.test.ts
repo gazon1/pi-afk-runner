@@ -136,11 +136,13 @@ import { HOLDER_COMMAND, takeLock, workLockName } from "../src/lock.js";
 import {
   EXIT_LOCKED,
   EXIT_NO_LOCK,
+  EXIT_NO_MODEL,
   EXIT_USAGE,
   STEP_EXIT_CODES,
   main,
   type CliDependencies,
 } from "../src/cli.js";
+import { NoModelAvailable } from "../src/pool.js";
 /**
  * The states for a run of `count` prompts.
  *
@@ -193,7 +195,7 @@ describe("the repository the run works", () => {
     };
 
     const options = await resolveRepo(
-      { checkout: "/checkout", remote: "origin", baseBranch: "main", lockDirectory: "/lock", worktreeRoot: "/wt", deadlineMs: 1, staleAfterMs: 1 },
+      { checkout: "/checkout", remote: "origin", baseBranch: "main", lockDirectory: "/lock", worktreeRoot: "/wt", agentDirectory: "/agent", deadlineMs: 1, staleAfterMs: 1 },
       git,
     );
 
@@ -216,14 +218,14 @@ describe("the repository the run works", () => {
   it("keeps --repo when the command names one, and refuses a nameless origin", async () => {
     const git = async (): Promise<string> => "";
     const named = await resolveRepo(
-      { repo: "owner/name", checkout: "/c", remote: "origin", baseBranch: "main", lockDirectory: "/l", worktreeRoot: "/w", deadlineMs: 1, staleAfterMs: 1 },
+      { repo: "owner/name", checkout: "/c", remote: "origin", baseBranch: "main", lockDirectory: "/l", worktreeRoot: "/w", agentDirectory: "/agent", deadlineMs: 1, staleAfterMs: 1 },
       git,
     );
     expect(named.repo).toBe("owner/name");
 
     await expect(
       resolveRepo(
-        { checkout: "/c", remote: "origin", baseBranch: "main", lockDirectory: "/l", worktreeRoot: "/w", deadlineMs: 1, staleAfterMs: 1 },
+        { checkout: "/c", remote: "origin", baseBranch: "main", lockDirectory: "/l", worktreeRoot: "/w", agentDirectory: "/agent", deadlineMs: 1, staleAfterMs: 1 },
         git,
       ),
     ).rejects.toThrow("does not name a repository");
@@ -4956,6 +4958,100 @@ describe("the CLI's run", () => {
       // And the lock was given back, though the sweep failed.
       const lock = await takeLock(lockDirectory);
       await lock.release();
+    } finally {
+      await fixture.dispose();
+    }
+  }, 60_000);
+
+  it("test_a_sweep_with_no_model_stops_instead_of_failing_every_issue", async () => {
+    // Every model in the pool is at its peak tariff, has run out of its limit,
+    // or cannot be reached. The sweep stops there: the next issue would fail
+    // the same way, and a sweep that fails every issue in the queue is not a
+    // sweep.
+    const fixture = await fixtureWithSetupScript();
+    const lockDirectory = join(fixture.root, "afk-runner");
+    try {
+      const { gh, calls } = stubGh([
+        { number: 42, title: "the first" },
+        { number: 43, title: "the second" },
+      ]);
+
+      const code = await main(
+        [
+          "--repo",
+          "gazon1/sing",
+          "--checkout",
+          fixture.repo,
+          "--worktree-root",
+          join(fixture.root, "worktrees"),
+          "--lock-dir",
+          lockDirectory,
+          "--all",
+        ],
+        {
+          gh,
+          session: async () => {
+            throw new NoModelAvailable("no model in the pool can be used");
+          },
+          run: async () => JSON.stringify({ verdict: "ci.yml  run 1  success" }),
+        },
+      );
+
+      // The code says that no model was available.
+      expect(code).toBe(EXIT_NO_MODEL);
+      // And only the first issue was claimed: the sweep stopped at it.
+      const claims = calls.filter((call) => call.includes("--add-label agent-in-progress"));
+      expect(claims).toHaveLength(1);
+    } finally {
+      await fixture.dispose();
+    }
+  }, 60_000);
+
+  it("test_the_pool_names_the_model_the_session_runs_on", async () => {
+    // The pool file is the host's own: the models the run may use, and the one
+    // it starts on is the pool's best.
+    const fixture = await fixtureWithSetupScript();
+    const lockDirectory = join(fixture.root, "afk-runner");
+    const agentDirectory = join(fixture.root, "agent");
+    try {
+      const { gh } = stubGh([{ number: 42, title: "the first" }]);
+      await mkdir(agentDirectory, { recursive: true });
+      await writeFile(
+        join(agentDirectory, "models.yaml"),
+        "models:\n  - model: minimax/MiniMax-M2.5\n    priority: 50\n  - model: minimax/MiniMax-M3\n    priority: 100\n",
+        "utf8",
+      );
+      const work = workingSession();
+      const models: (string | undefined)[] = [];
+
+      const code = await main(
+        [
+          "--repo",
+          "gazon1/sing",
+          "--checkout",
+          fixture.repo,
+          "--worktree-root",
+          join(fixture.root, "worktrees"),
+          "--lock-dir",
+          lockDirectory,
+          "--agent-dir",
+          agentDirectory,
+          "--issue",
+          "42",
+        ],
+        {
+          gh,
+          session: async (options) => {
+            models.push(options.model);
+            return await work(options);
+          },
+          run: async () => JSON.stringify({ verdict: "ci.yml  run 1  success" }),
+        },
+      );
+
+      expect(code).toBe(0);
+      // The session starts on the pool's best model.
+      expect(models[0]).toBe("minimax/MiniMax-M3");
     } finally {
       await fixture.dispose();
     }

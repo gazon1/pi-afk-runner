@@ -353,7 +353,7 @@ export function addUsage(
 }
 
 /** The error a settled turn ended on, or null. */
-function turnFailure(message: TurnMessage | undefined): Error | null {
+export function turnFailure(message: TurnMessage | undefined): Error | null {
   if (message?.role !== "assistant" || message.stopReason !== "error") {
     return null;
   }
@@ -367,7 +367,7 @@ function turnFailure(message: TurnMessage | undefined): Error | null {
 }
 
 /** The last assistant message, which is the one the turn settled on. */
-function lastAssistant(
+export function lastAssistant(
   messages: readonly TurnMessage[] | undefined,
 ): TurnMessage | undefined {
   if (messages === undefined) {
@@ -391,12 +391,35 @@ export interface AgentSession {
   dispose(): void;
   /** The session's messages, when it keeps them. */
   readonly messages?: readonly TurnMessage[];
+  /**
+   * The model the session runs on — `provider/id`.
+   *
+   * The pool's session knows it, because the pool moves it between models; a
+   * session on a single model may leave it out.
+   */
+  readonly reference?: string | undefined;
+  /**
+   * Move the session onto another model — `provider/id`.
+   *
+   * The pool's session moves between the models of the pool: a model whose
+   * limit is gone is left for the next one, and the conversation the session
+   * has is kept. A session that cannot be moved leaves this out.
+   */
+  setModel?(reference: string): Promise<void>;
 }
 
 /** Creates a session bound to a directory. */
 export type SessionFactory = (options: {
   readonly cwd: string;
   readonly systemPromptSections: Record<string, string>;
+  /**
+   * The model this session runs on — `provider/id`.
+   *
+   * Absent when the run does not name one: the session then runs on the
+   * factory's own model. The pool names one per session, because the pool
+   * picks the model the session starts on.
+   */
+  readonly model?: string;
   /** The tools the session is given — the verdict tool, for a review. */
   readonly tools?: readonly ToolSpec[];
   /**

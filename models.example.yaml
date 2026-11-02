@@ -1,0 +1,59 @@
+# The model pool — an example.
+#
+# Copy this file to the agent's directory as `models.yaml`, or point the runner
+# at it with `--pool <path>`. The file is the host's policy, not the
+# repository's: it lives in the host's own directory.
+#
+# Every key is checked. A key the runner does not know is an error, not
+# something it ignores — a mistyped `priority` would silently change which
+# model is used.
+
+# How often the pool is looked at again, in milliseconds. Five minutes by
+# default. The runner moves **upwards** only: it does not leave a working
+# model for a worse one.
+checkEveryMs: 300000
+
+models:
+  # The bigger the priority, the more the model is preferred. Two models with
+  # the same priority are settled by the order of this file.
+  #
+  # `effort` is the level the model thinks at: `off`, `minimal`, `low`,
+  # `medium`, `high`, `xhigh` or `max`. A level the runner does not know is
+  # refused when the file is read. The engine has no thinking level to set, so
+  # the level is the host's policy: the runner says what the file means, and
+  # `--show-pool` says it to the host.
+  - model: minimax/MiniMax-M3
+    priority: 100
+    effort: high
+
+  # A model that is only reachable through the host's own proxy — the one the
+  # environment names. A host that has no proxy cannot use it, and the runner
+  # moves on to the next one.
+  - model: minimax/MiniMax-M2.7
+    priority: 90
+    proxy: true
+
+  # A model with a proxy of its own. The runner routes that model's requests
+  # through it and leaves the rest of the run direct. Only `http://` and
+  # `https://` are spoken.
+  - model: minimax/MiniMax-M2.5
+    priority: 80
+    proxy: http://127.0.0.1:3128
+
+  # A model at its peak tariff for some hours of the day. `peak` is a list of
+  # `HH:MM-HH:MM` windows; a window that crosses midnight is written as it is.
+  # `timezone` says where the hours are counted — the host's own time when it
+  # is absent. A zone that is not a zone is refused when the file is read.
+  #
+  # A model inside its peak hours is not used at all: the pool moves to the
+  # next one. When every model is inside its peak hours, the run stops with
+  # the code `3` and the work stays in the queue.
+  - model: minimax/MiniMax-M2.1
+    priority: 50
+    timezone: UTC
+    peak:
+      - "00:00-16:00"
+
+  # A model without a priority is still a model: it is used when nothing
+  # better can be.
+  - model: minimax/MiniMax-M2

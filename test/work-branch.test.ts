@@ -12,41 +12,14 @@
  * merge pipeline that no longer sees the branches it is meant to land.
  */
 import { existsSync } from "node:fs";
-import { readdir, readFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
 import { WORK_BRANCH_PATTERN, removeWorktree, workBranch, type GitRunner } from "../src/git.js";
 import { WORK_BRANCH_PATTERN as MERGE_WORK_BRANCH_PATTERN } from "../src/merge.js";
 import { createFixtureRepository, git as sandboxGit, gitOutput } from "./git-sandbox.js";
-
-/** Where the runner's source is. */
-const SOURCE = join(dirname(fileURLToPath(import.meta.url)), "..", "src");
-
-/**
- * The source without its comments.
- *
- * A comment may name the branch — that is what a comment is for — but a
- * comment cannot disagree with the code, so the spellings the tests below
- * look for are the ones in the code.
- */
-function withoutComments(source: string): string {
-  return source
-    .replace(/\/\*[\s\S]*?\*\//g, " ")
-    .replace(/(^|[^:])\/\/.*$/gm, "$1");
-}
-
-/** Every source file, and its code without the comments. */
-async function sourceFiles(): Promise<readonly { file: string; code: string }[]> {
-  const names = (await readdir(SOURCE)).filter((name) => name.endsWith(".ts")).sort();
-  const files: { file: string; code: string }[] = [];
-  for (const name of names) {
-    files.push({ file: name, code: withoutComments(await readFile(join(SOURCE, name), "utf8")) });
-  }
-  return files;
-}
+import { sourceFiles } from "./source.js";
 
 describe("the branch an issue's work lives on", () => {
   it("names the branch and recognises it from the one place", () => {

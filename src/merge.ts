@@ -159,6 +159,8 @@ export interface MergeOptions {
   readonly stopped?: () => boolean;
   readonly onStep?: (record: StepRecord) => void;
   readonly onStepStart?: (step: string) => void;
+  /** What the model pool did during the run — the record says it. */
+  readonly poolEvents?: readonly string[];
   /** The pull request under way, told before its first step. */
   readonly onSubject?: (subject: MergeSubject) => void;
   readonly now?: Date;
@@ -482,6 +484,7 @@ async function mergeOne(
       ),
       heading: `# Merge pull request ${candidate.number}`,
       subject: "pull request",
+      ...(options.poolEvents === undefined ? {} : { pool: options.poolEvents }),
       ...(options.onStep === undefined ? {} : { onStep: options.onStep }),
       ...(options.onStepStart === undefined ? {} : { onStepStart: options.onStepStart }),
       // The merge's steps ask the flag the work pipeline's ask: a stop that

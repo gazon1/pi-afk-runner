@@ -256,6 +256,33 @@ and the contract do not know what the engine is — the seam is the session.
 The engine's module is loaded only when a session is asked for, so a run that never starts one does
 not pay for it. Its memory lives in the process for now, so a run that restarts loses its context.
 
+### The model pool
+
+Which models a run may use is the **host's** business, not the repository's: the pool is a file —
+`models.yaml` in the agent's directory (`--agent-dir`), or the file `--pool` names. It says which
+model is preferred, when one of them is at its peak tariff, and which one needs a proxy:
+
+```yaml
+models:
+  - model: minimax/MiniMax-M3
+    priority: 100
+  - model: minimax/MiniMax-M2.7
+    priority: 50
+    peak:
+      - "00:00-16:00"
+    timezone: UTC
+```
+
+`--show-pool` says what the file means right now — which model would be used and why the others are
+not — and runs nothing. A run moves between the models when one of them runs out of its limit, and
+a model whose limit is gone stays out for the whole run. When no model can be used, the run stops
+with the code `3`: there was no step to run, and a sweep stops there instead of failing every issue
+in the queue.
+
+`--model` wins over the pool: a named model is a decision, and the pool does not overrule a
+decision. The file's `effort` is read and refused when it is not a level, and reported — the engine
+has no thinking level to set. `models.example.yaml` is a filled-in example.
+
 ### What a run leaves behind
 
 - a branch `agent/issue-<N>` and a pull request on it, carrying a review that opens with

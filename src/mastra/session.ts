@@ -11,6 +11,8 @@
  */
 
 import type { Agent } from "@mastra/core/agent";
+import { InMemoryStore } from "@mastra/core/storage";
+import { Memory } from "@mastra/memory";
 
 import type { AgentSession, RunUsage, SessionFactory, TurnMessage } from "../session.js";
 import type { ToolSpec } from "../tools.js";
@@ -86,7 +88,12 @@ export function mastraSessionFactory(options: {
   readonly onEvent?: (line: string) => void;
 }): SessionFactory {
   return async (sessionOptions): Promise<AgentSession> => {
-    const model = await resolveMastraModel(options.model ?? DEFAULT_MASTRA_MODEL);
+    // The session's own model is the pool's choice; the factory's is the
+    // command's `--model`, which wins over the pool — a named model is a
+    // decision, and the pool does not overrule a decision.
+    const model = await resolveMastraModel(
+      sessionOptions.model ?? options.model ?? DEFAULT_MASTRA_MODEL,
+    );
     return createMastraSession({ ...options, ...sessionOptions, model });
   };
 }
@@ -115,16 +122,27 @@ export async function createMastraSession(options: {
   readonly onUsage?: (usage: RunUsage) => void;
   /** Told what the agent is doing, as it does it. */
   readonly onEvent?: (line: string) => void;
+  /** The model the session runs on — `provider/id`, when the caller knows it. */
+  readonly reference?: string;
 }): Promise<AgentSession> {
   const { cwd, systemPromptSections, tools, onUsage, model } = options;
-  const agent = createMastraAgent({
-    cwd,
-    name: "afk-runner",
-    instructions: systemPrompt(systemPromptSections),
-    model,
-    tools: tools ?? [],
-    skills: await skillDirectories({ cwd }),
-  });
+  const skills = await skillDirectories({ cwd });
+  // The memory belongs to the session, not to the agent: a session that moves
+  // onto another model builds a new agent and keeps this one, so the
+  // conversation the session has is not lost by the move.
+  const memory = new Memory({ storage: new InMemoryStore() });
+  const build = (on: MastraModel): Agent =>
+    createMastraAgent({
+      cwd,
+      name: "afk-runner",
+      instructions: systemPrompt(systemPromptSections),
+      model: on,
+      tools: tools ?? [],
+      skills,
+      memory,
+    });
+  let agent = build(model);
+  let reference = options.reference;
 
   let messages: TurnMessage[] = [];
   let running: AbortController | null = null;
@@ -200,6 +218,20 @@ export async function createMastraSession(options: {
     },
     get messages(): readonly TurnMessage[] {
       return messages;
+    },
+    get reference(): string | undefined {
+      return reference;
+    },
+    /**
+     * Move the session onto another model.
+     *
+     * The pool moves the session when a model's limit is gone, and the
+     * conversation is kept: the new agent runs on the new model with the same
+     * memory, so the turn that failed is the turn the new model sees.
+     */
+    async setModel(next: string): Promise<void> {
+      agent = build(await resolveMastraModel(next));
+      reference = next;
     },
   };
 }

@@ -22,6 +22,7 @@
  * mode that lands the reviewed, green pull requests the work pipeline opened.
  */
 
+import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -33,6 +34,19 @@ import { readGateSettings, resolveGateSettings, type GateSettings } from "./gate
 import { readClaimed, readQueue, runGh, type GhRunner } from "./gh.js";
 import { runCommand, runGit, type CommandRunner, type GitRunner } from "./git.js";
 import { LockHeld, LockUnusable, lockNameFor, takeLock, workLockName } from "./lock.js";
+import {
+  NoModelAvailable,
+  describePool,
+  knownModel,
+  newPoolState,
+  pickPoolModel,
+  poolFile,
+  readPool,
+  type Pool,
+  type PoolState,
+} from "./pool.js";
+import { PoolSession, type PoolHost } from "./pool-session.js";
+import { proxyFromEnvironment } from "./proxy.js";
 import {
   mergeReviewedPullRequests,
   type MergeOptions,
@@ -50,6 +64,7 @@ import {
   type AgentSession,
   type RunUsage,
   type SessionFactory,
+  type TurnMessage,
 } from "./session.js";
 
 /** The run finished, or the queue was empty. */
@@ -57,6 +72,15 @@ export const EXIT_OK = 0;
 
 /** The command line was wrong. */
 export const EXIT_USAGE = 2;
+
+/**
+ * No model could be used.
+ *
+ * Every model in the pool is at its peak tariff, has run out of its limit, or
+ * cannot be reached. The run stops there — the work is left in the queue for
+ * the next run, and the sweep stops rather than failing every issue in it.
+ */
+export const EXIT_NO_MODEL = 3;
 
 /** Another runner holds the lock. */
 export const EXIT_LOCKED = 75;
@@ -121,6 +145,12 @@ export interface CliOptions {
   readonly worktreeRoot: string;
   /** The model the agent runs on — `provider/id`. */
   readonly model?: string;
+  /** Where the host's own files live — the pool file is looked for there. */
+  readonly agentDirectory: string;
+  /** The model pool — the file the models and their conditions are read from. */
+  readonly pool?: string;
+  /** Whether to print what the pool file means now, and run nothing. */
+  readonly showPool?: boolean;
   /** Whether the target repository's pre-push hook may gate the pushes. */
   readonly verifyPushes?: boolean;
   /** Whether to look for related issues and work them in one batch. */
@@ -146,6 +176,17 @@ export interface CliOptions {
   readonly gateTimeoutMs?: number;
 }
 
+/**
+ * Where the host's own files live.
+ *
+ * The pool file is the host's, and it lives in the host's own directory —
+ * beside the settings and the credentials it belongs to. `--agent-dir` names
+ * another one, and `--pool` names the file itself.
+ */
+export function defaultAgentDirectory(): string {
+  return join(homedir(), ".pi", "agent");
+}
+
 /** The message of a failure, whatever it was thrown as. */
 export function errorMessage(failure: unknown): string {
   return failure instanceof Error ? failure.message : String(failure);
@@ -168,7 +209,10 @@ export const ARGS = {
   base: { type: "string", description: "the branch the base is read from (default: main)" },
   "lock-dir": { type: "string", description: "where the lock lives (default: <checkout>/build/afk-runner)" },
   "worktree-root": { type: "string", description: "where the worktrees are created (default: <checkout>/../afk-worktrees)" },
-  model: { type: "string", description: "the model the agent runs on (default: the provider's first)" },
+  model: { type: "string", description: "the model the agent runs on (default: the pool's best model)" },
+  "agent-dir": { type: "string", description: "the host's own directory (default: ~/.pi/agent)" },
+  pool: { type: "string", description: "the model pool file (default: <agent-dir>/models.yaml)" },
+  "show-pool": { type: "boolean", description: "print what the pool file means now, and run nothing" },
   "no-verify": { type: "boolean", description: "skip the target repository's pre-push hook when pushing" },
   "batch-related": { type: "boolean", description: "look for related ready-for-agent issues and work them in one batch" },
   gate: { type: "string", description: "the gates to run, separated by commas — they replace the repository's own list" },
@@ -234,6 +278,9 @@ export function parseArgs(argv: readonly string[]): CliOptions {
   const worktreeRoot =
     text(parsed["worktree-root"]) ?? join(dirname(checkout), "afk-worktrees");
   const model = text(parsed["model"]);
+  const agentDirectory = text(parsed["agent-dir"]) ?? defaultAgentDirectory();
+  const pool = text(parsed["pool"]);
+  const showPool = parsed["show-pool"] === true;
   const noVerify = parsed["no-verify"] === true;
   const batchRelated = parsed["batch-related"] === true;
   const deadlineMs = number(text(parsed["deadline-ms"]), undefined, "--deadline-ms");
@@ -252,6 +299,9 @@ export function parseArgs(argv: readonly string[]): CliOptions {
     lockDirectory,
     worktreeRoot,
     ...(model === undefined ? {} : { model }),
+    agentDirectory,
+    ...(pool === undefined ? {} : { pool }),
+    ...(showPool ? { showPool: true } : {}),
     ...(noVerify ? { verifyPushes: false } : {}),
     ...(batchRelated ? { batchRelated: true } : {}),
     ...(deadlineMs === undefined ? {} : { deadlineMs }),
@@ -453,6 +503,87 @@ export interface CliDependencies {
 }
 
 /**
+ * The model the session runs on.
+ *
+ * The named one when the command names it — a named model is a decision, and
+ * the pool does not overrule a decision. Otherwise the pool's best model: the
+ * one with the biggest priority that is not at its peak tariff, has not run
+ * out of its limit, is reachable, and needs no proxy this host has not got.
+ *
+ * Nothing at all when neither named nor pooled: the engine's own model, the
+ * one the runner carries.
+ */
+async function chooseModel(options: {
+  readonly model?: string;
+  readonly pool: Pool | null;
+  /** The models whose limit is gone — for the whole run. */
+  readonly state: PoolState;
+  readonly proxyConfigured: boolean;
+}): Promise<{ readonly reference: string; readonly pooled: boolean } | undefined> {
+  if (options.model !== undefined) {
+    return { reference: options.model, pooled: false };
+  }
+  const pool = options.pool;
+  if (pool === null || pool.models.length === 0) {
+    return undefined;
+  }
+  const { mastraCatalogue } = await import("./mastra/model.js");
+  const catalogue = mastraCatalogue();
+  const chosen = pickPoolModel(pool, {
+    exhausted: options.state.exhausted,
+    proxyConfigured: options.proxyConfigured,
+    now: new Date(),
+    usable: (model) => knownModel(catalogue, model.reference),
+  });
+  if (chosen === undefined) {
+    throw new NoModelAvailable(
+      "no model in the pool can be used: every model is at its peak tariff, " +
+        "has run out of its limit, or cannot be reached",
+    );
+  }
+  return { reference: chosen.reference, pooled: true };
+}
+
+/**
+ * What the pool file means right now.
+ *
+ * A question, not a run: the file is the host's policy, and a host that
+ * cannot see what its own file says cannot change it. Nothing is run and no
+ * lock is taken.
+ */
+export async function showPool(options: CliOptions): Promise<number> {
+  const path = options.pool ?? poolFile(options.agentDirectory);
+  const pool = await readPool(path);
+  if (pool === null) {
+    process.stdout.write(`there is no pool file at ${path}\n`);
+    return EXIT_OK;
+  }
+  const { mastraCatalogue } = await import("./mastra/model.js");
+  const lines = describePool(pool, {
+    proxyConfigured: proxyFromEnvironment() !== undefined,
+    usable: (model) => knownModel(mastraCatalogue(), model.reference),
+  });
+  process.stdout.write(`${lines.join("\n")}\n`);
+  return EXIT_OK;
+}
+
+/**
+ * The question the command line asks, when it asks one.
+ *
+ * `--show-pool` is a question about the pool file: it says what the file
+ * means now and runs nothing. The flag is read here and nowhere else.
+ */
+export function askedQuestion(argv: readonly string[]): CliOptions | null {
+  let options: CliOptions;
+  try {
+    options = parseArgs(argv);
+  } catch {
+    return null;
+  }
+  return options.showPool === true ? options : null;
+}
+
+/**
  * Prepare one run: parse the command, resolve the repository, take the lock.
  *
  * The one place the three steps live. The CLI and the live door call it and
@@ -495,8 +626,18 @@ export async function prepareRun(
   } catch (failure) {
     return { ok: false, failure };
   }
+  // The pool file is read before the lock is taken: a file that is there but
+  // cannot be read is a mistake in the command, and a mistake that holds the
+  // lock keeps the next runner out while it is found.
+  let pool: Pool | null;
+  try {
+    pool = await readPool(resolved.pool ?? poolFile(resolved.agentDirectory));
+  } catch (failure) {
+    return { ok: false, failure };
+  }
   const withSettings: ResolvedOptions = {
     ...resolved,
+    modelPool: pool,
     gates: settings.gates,
     gateTimeoutMs: settings.gateTimeoutMs,
     deadlineMs: resolved.deadlineMs ?? defaultDeadlineMs(settings.gates.length),
@@ -515,6 +656,8 @@ export async function prepareRun(
 /** The options of a run that is ready to start. */
 export type ResolvedOptions = CliOptions & {
   readonly repo: string;
+  /** The pool the models are picked from — null when there is no pool file. */
+  readonly modelPool: Pool | null;
   readonly gates: readonly string[];
   readonly gateTimeoutMs: number;
   readonly deadlineMs: number;
@@ -661,6 +804,19 @@ export async function main(
   argv: readonly string[],
   dependencies: CliDependencies = {},
 ): Promise<number> {
+  // A question is not a run: `--show-pool` says what the pool file means and
+  // takes no lock.
+  const question = askedQuestion(argv);
+  if (question !== null) {
+    try {
+      return await showPool(question);
+    } catch (failure) {
+      // A pool file the runner cannot read is a mistake in the file, and the
+      // question says so instead of throwing at the caller.
+      process.stderr.write(`${errorMessage(failure)}\n`);
+      return EXIT_USAGE;
+    }
+  }
   const prepared = await prepareRun(argv, dependencies);
   if (!prepared.ok) {
     const failure = prepared.failure;
@@ -712,26 +868,75 @@ export async function main(
   // The engine is Mastra, and its module is loaded only when a session is
   // asked for, so a run that never starts one does not pay for it.
   let mastra: SessionFactory | undefined;
-  const base: SessionFactory =
-    dependencies.session ??
-    (async (options) => {
-      if (mastra === undefined) {
-        const { mastraSessionFactory } = await import("./mastra/session.js");
-        mastra = mastraSessionFactory({
-          ...(resolved.model === undefined ? {} : { model: resolved.model }),
-          onEvent: say,
-        });
-      }
-      return mastra(options);
-    });
+  const engine: SessionFactory = async (options) => {
+    if (mastra === undefined) {
+      const { mastraSessionFactory } = await import("./mastra/session.js");
+      mastra = mastraSessionFactory({
+        ...(resolved.model === undefined ? {} : { model: resolved.model }),
+        onEvent: say,
+      });
+    }
+    return mastra(options);
+  };
+  const injected = dependencies.session !== undefined;
+  const base: SessionFactory = dependencies.session ?? engine;
+
+  // The pool is the host's own file: the models the run may use and the
+  // conditions they are used under. The models whose limit is gone are
+  // remembered for the whole run, and what the pool did is said in the record.
+  const pool = resolved.modelPool;
+  const poolState: PoolState = newPoolState();
+  const poolEvents: string[] = [];
+  const proxyConfigured = proxyFromEnvironment() !== undefined;
+
   const session: SessionFactory = async (options) => {
-    const created = await base(options);
+    const chosen = await chooseModel({
+      ...(resolved.model === undefined ? {} : { model: resolved.model }),
+      pool,
+      state: poolState,
+      proxyConfigured,
+    });
+    const created = await base({
+      ...options,
+      ...(chosen === undefined ? {} : { model: chosen.reference }),
+    });
     active = created;
-    return created;
+    if (chosen === undefined || !chosen.pooled || injected) {
+      return created;
+    }
+    const move = created.setModel;
+    if (move === undefined) {
+      throw new Error(
+        "the session cannot be moved onto another model — the model pool needs it",
+      );
+    }
+    const host: PoolHost = {
+      prompt: (text) => created.prompt(text),
+      abort: () => created.abort(),
+      dispose: () => created.dispose(),
+      get messages(): readonly TurnMessage[] | undefined {
+        return created.messages;
+      },
+      setModel: (reference) => move(reference),
+    };
+    const { mastraCatalogue } = await import("./mastra/model.js");
+    return new PoolSession({
+      host,
+      catalogue: mastraCatalogue(),
+      pool: pool as Pool,
+      state: poolState,
+      reference: chosen.reference,
+      proxyConfigured,
+      onEvent: (line) => {
+        poolEvents.push(line);
+        say(line);
+      },
+    });
   };
 
   const run: RunOptions = {
     ...runOptionsFrom(resolved, session, dependencies),
+    poolEvents,
     onStep: (record) => {
       const detail = record.detail === "" ? "" : ` — ${record.detail}`;
       process.stdout.write(`[${record.step}] ${record.outcome}${detail}\n`);
@@ -751,6 +956,7 @@ export async function main(
         gh: dependencies.gh ?? runGh,
         run: dependencies.run ?? runCommand,
         session,
+        poolEvents,
         deadlineMs: resolved.deadlineMs,
         ...(resolved.verifyPushes === undefined
           ? {}
@@ -818,6 +1024,7 @@ async function sweep(runOptions: RunOptions, repo: string): Promise<number> {
 
   let firstFailure = 0;
   let stoppedEarly = false;
+  let noModel = false;
   const results: RunResult[] = [];
   for (const issueNumber of numbers) {
     // A human who stopped the run stopped the sweep, not one issue of it.
@@ -826,6 +1033,12 @@ async function sweep(runOptions: RunOptions, repo: string): Promise<number> {
       break;
     }
     const outcome = await work({ ...runOptions, issueNumber }, issueNumber);
+    if (outcome.code === EXIT_NO_MODEL) {
+      // No model is left: the next issue would fail the same way, and a sweep
+      // that fails every issue in the queue is not a sweep.
+      noModel = true;
+      break;
+    }
     if (outcome.result !== undefined) {
       // One line per issue: a sweep is a journal.
       results.push(outcome.result);
@@ -836,6 +1049,10 @@ async function sweep(runOptions: RunOptions, repo: string): Promise<number> {
     }
   }
   process.stdout.write(`${sweepTotal(results, numbers.length)}\n`);
+  if (noModel) {
+    process.stderr.write("the sweep stopped: no model was available\n");
+    return EXIT_NO_MODEL;
+  }
   // Issues were left in the queue, so this is not the success the zero would
   // claim; a stop that did not fail a step reports the code a cut session has.
   if (stoppedEarly && firstFailure === 0) {
@@ -890,6 +1107,14 @@ async function work(
       process.stderr.write(`${failure.message}\n`);
       return { code: EXIT_NO_LOCK };
     }
+    // No model is not a step that failed: it is a reason there was no step to
+    // run, and the code says so. The failure is wrapped in the run's own
+    // error, so the cause is looked for.
+    const noModel = causeOf(failure, (error) => error instanceof NoModelAvailable);
+    if (noModel !== null) {
+      process.stderr.write(`${noModel.message}\n`);
+      return { code: EXIT_NO_MODEL };
+    }
     if (failure instanceof RunFailed) {
       process.stderr.write(`${failure.message}\n`);
       return { code: STEP_EXIT_CODES[failure.step] ?? 1 };
@@ -897,6 +1122,26 @@ async function work(
     process.stderr.write(`${errorMessage(failure)}\n`);
     return { code: 1 };
   }
+}
+
+/**
+ * The failure in the chain of causes that is the kind asked for, or null.
+ *
+ * The run wraps what a step failed on, so the reason a run gave up is often
+ * one layer down: "no model was available" is the cause of a failed session.
+ */
+function causeOf(failure: unknown, wanted: (error: Error) => boolean): Error | null {
+  let current: unknown = failure;
+  for (let depth = 0; depth < 10; depth += 1) {
+    if (!(current instanceof Error)) {
+      return null;
+    }
+    if (wanted(current)) {
+      return current;
+    }
+    current = (current as { readonly cause?: unknown }).cause;
+  }
+  return null;
 }
 
 /**
