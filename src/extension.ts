@@ -472,6 +472,16 @@ export function liveFrontDoor(
           workSession = created;
         }
         session = created;
+        // The run disposes a session when its step ends; the door must stop
+        // naming it as a delivery target then, so a queued correction waits
+        // for the next session instead of being delivered into a disposed one.
+        const dispose = created.dispose.bind(created);
+        created.dispose = () => {
+          if (session === created) {
+            session = null;
+          }
+          dispose();
+        };
         follow(created, run.controller, (event) => {
           if (workSession !== null && created === workSession) {
             mirror(ctx, event);
