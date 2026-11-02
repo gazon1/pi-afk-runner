@@ -13,6 +13,7 @@
  * |---|---|
  * | 0 | the run finished, or the queue was empty |
  * | 10..80 | the step the run stopped at — see `STEP_EXIT_CODES` |
+ * | 3 | no model could be used |
  * | 75 | another runner holds the lock |
  * | 76 | the lock could not be taken |
  * | 2 | the command line was wrong |
@@ -28,11 +29,10 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   DefaultResourceLoader,
+  ModelRuntime,
   createAgentSession,
-  type ModelRuntime,
 } from "@earendil-works/pi-coding-agent";
 import chalk from "chalk";
-import { EnvHttpProxyAgent, fetch as undiciFetch, setGlobalDispatcher } from "undici";
 
 import { DEFAULT_DEADLINE_MS } from "./budget.js";
 import { readClaimed, readQueue, runGh, type GhRunner } from "./gh.js";
@@ -44,6 +44,20 @@ import {
   type MergeOptions,
   type MergeResult,
 } from "./merge.js";
+import { PoolSession } from "./pool-session.js";
+import {
+  NoModelAvailable,
+  describePool,
+  knownModel,
+  newPoolState,
+  pickPoolModel,
+  poolFile,
+  readPool,
+  splitReference,
+  type Pool,
+  type PoolState,
+} from "./pool.js";
+import { proxyFromEnvironment, useProxy } from "./proxy.js";
 import {
   RunFailed,
   emptyQueueSentence,
@@ -65,6 +79,15 @@ export const EXIT_OK = 0;
 
 /** The command line was wrong. */
 export const EXIT_USAGE = 2;
+
+/**
+ * No model could be used.
+ *
+ * Every model in the pool is at its peak tariff, has run out of its limit, or
+ * cannot be reached. The run stops there — the work is left in the queue for
+ * the next run, and the sweep stops rather than failing every issue in it.
+ */
+export const EXIT_NO_MODEL = 3;
 
 /** Another runner holds the lock. */
 export const EXIT_LOCKED = 75;
@@ -131,6 +154,10 @@ export interface CliOptions {
   readonly agentDirectory: string;
   /** The model the agent runs on — `provider/id`. */
   readonly model?: string;
+  /** The model pool — the file the models and their conditions are read from. */
+  readonly pool?: string;
+  /** Whether to print what the pool file means now, and run nothing. */
+  readonly showPool?: boolean;
   /** Whether the target repository's pre-push hook may gate the pushes. */
   readonly verifyPushes?: boolean;
   /** Whether to look for related issues and work them in one batch. */
@@ -157,7 +184,9 @@ export const USAGE = [
   "  --lock-dir <path>       where the lock lives (default: <checkout>/build/afk-runner)",
   "  --worktree-root <path>  where the worktrees are created (default: <checkout>/../afk-worktrees)",
   "  --agent-dir <path>      Pi's agent directory (default: ~/.pi/agent)",
-  "  --model <provider/id>   the model the agent runs on (default: the provider's first)",
+  "  --model <provider/id>   the model the agent runs on (default: the pool's best model)",
+  "  --pool <path>           the model pool file (default: <agent-dir>/models.yaml)",
+  "  --show-pool             print what the pool file means now, and run nothing",
   "  --no-verify             skip the target repository's pre-push hook when pushing",
   "  --batch-related         look for related ready-for-agent issues and work them in one batch",
   `  --deadline-ms <n>       the ceiling on the run (default: ${DEFAULT_DEADLINE_MS})`,
@@ -190,7 +219,13 @@ export function parseArgs(argv: readonly string[]): CliOptions {
     if (name === "help") {
       throw new Error("help");
     }
-    if (name === "no-verify" || name === "all" || name === "merge" || name === "batch-related") {
+    if (
+      name === "no-verify" ||
+      name === "all" ||
+      name === "merge" ||
+      name === "batch-related" ||
+      name === "show-pool"
+    ) {
       // A flag, not an option with a value.
       values.set(name, "true");
       continue;
@@ -232,6 +267,8 @@ export function parseArgs(argv: readonly string[]): CliOptions {
     process.env.PI_AGENT_DIR ??
     join(homedir(), ".pi", "agent");
   const model = values.get("model");
+  const pool = values.get("pool");
+  const showPool = values.has("show-pool");
   const noVerify = values.has("no-verify");
   const batchRelated = values.has("batch-related");
   const deadlineMs = number(values.get("deadline-ms"), DEFAULT_DEADLINE_MS, "--deadline-ms");
@@ -249,6 +286,8 @@ export function parseArgs(argv: readonly string[]): CliOptions {
     worktreeRoot,
     agentDirectory,
     ...(model === undefined ? {} : { model }),
+    ...(pool === undefined ? {} : { pool }),
+    ...(showPool ? { showPool: true } : {}),
     ...(noVerify ? { verifyPushes: false } : {}),
     ...(batchRelated ? { batchRelated: true } : {}),
     deadlineMs,
@@ -315,29 +354,6 @@ function number(raw: string | undefined, fallback: number, name: string): number
     throw new Error(`${name} must be a number of milliseconds`);
   }
   return parsed;
-}
-
-/**
- * Route the session's HTTP through the proxy, when there is one.
- *
- * The SDK installs its own dispatcher, and that one does not read the
- * environment: a provider that is only reachable through a proxy — which is
- * the usual case for a self-hosted or regional API — is simply unreachable,
- * and the request dies at the SDK's timeout with nothing in the log to say
- * why. So the runner installs a dispatcher that reads `HTTPS_PROXY` and
- * friends, and the fetch that goes with it.
- *
- * Nothing happens when no proxy is configured: a host that reaches its
- * provider directly keeps the SDK's own dispatcher.
- */
-export function useProxyFromEnvironment(env: NodeJS.ProcessEnv = process.env): boolean {
-  const proxy = env.HTTPS_PROXY ?? env.https_proxy ?? env.HTTP_PROXY ?? env.http_proxy;
-  if (proxy === undefined || proxy === "") {
-    return false;
-  }
-  setGlobalDispatcher(new EnvHttpProxyAgent());
-  globalThis.fetch = undiciFetch as typeof globalThis.fetch;
-  return true;
 }
 
 /**
@@ -487,13 +503,23 @@ export function createResourceLoader(options: {
  */
 export function piSessionFactory(options: {
   readonly agentDirectory: string;
-  /** The model — `provider/id`. The provider's first model when it is absent. */
+  /** The model — `provider/id`. It wins over the pool. */
   readonly model?: string;
+  /** The model to run on when there is no pool — the host's own. */
+  readonly fallbackModel?: string;
+  /** The pool the model is picked from, and moved around in. */
+  readonly pool?: Pool | null;
+  /** What the pool remembers for the whole run. */
+  readonly state?: PoolState;
   /** Told what the agent is doing, as it does it. */
   readonly onEvent?: (line: string) => void;
+  /** Told what the pool did — the model it moved to, and why. */
+  readonly onPoolEvent?: (line: string) => void;
 }): SessionFactory {
   return async ({ cwd, systemPromptSections, tools, onUsage }) => {
-    useProxyFromEnvironment();
+    // The host's own proxy first; the pool's own proxy replaces it per model.
+    const proxyConfigured = useProxy(undefined);
+    const state = options.state ?? newPoolState();
     await installGuardPolicy({ cwd });
     const loader = createResourceLoader({
       cwd,
@@ -520,16 +546,96 @@ export function piSessionFactory(options: {
     // Measured: every tool call blocked before this line, only the denied paths after.
     await created.session.bindExtensions({});
 
-    const model = pickModel(created.session.modelRuntime, options.model);
-    if (model === undefined) {
+    const chosen = chooseModel(created.session.modelRuntime, {
+      ...(options.model === undefined ? {} : { model: options.model }),
+      ...(options.fallbackModel === undefined
+        ? {}
+        : { fallbackModel: options.fallbackModel }),
+      ...(options.pool === undefined ? {} : { pool: options.pool }),
+      exhausted: state.exhausted,
+      proxyConfigured,
+    });
+    if (chosen === undefined) {
       throw new Error(
         "no model to run on: name one with --model <provider/id>, or give the " +
           "host a provider whose credential is configured",
       );
     }
-    await created.session.setModel(model);
-    return created.session;
+    await created.session.setModel(chosen.model);
+    if (!chosen.pooled) {
+      return created.session;
+    }
+    // The pool moves the session between its models: a limit that runs out, a
+    // peak hour that comes, a model that becomes available.
+    return new PoolSession({
+      host: created.session,
+      runtime: created.session.modelRuntime,
+      pool: options.pool as Pool,
+      state,
+      reference: chosen.reference,
+      proxyConfigured,
+      ...(options.onPoolEvent === undefined ? {} : { onEvent: options.onPoolEvent }),
+    });
   };
+}
+
+/**
+ * The model the session runs on.
+ *
+ * The named one when the command names it — a named model is a decision, and
+ * the pool does not overrule a decision. Otherwise the pool's best model: the
+ * one with the biggest priority that is not at its peak tariff, has not run out
+ * of its limit, is reachable, and needs no proxy this host has not got.
+ */
+function chooseModel(
+  runtime: ModelRuntime,
+  options: {
+    readonly model?: string;
+    readonly fallbackModel?: string;
+    readonly pool?: Pool | null;
+    /** The models whose limit is gone — for the whole run. */
+    readonly exhausted?: ReadonlySet<string>;
+    readonly proxyConfigured: boolean;
+  },
+):
+  | {
+      readonly model: NonNullable<ReturnType<ModelRuntime["getModel"]>>;
+      readonly reference: string;
+      /** Whether the pool owns the session and may move it. */
+      readonly pooled: boolean;
+    }
+  | undefined {
+  if (options.model !== undefined) {
+    const model = pickModel(runtime, options.model);
+    return model === undefined
+      ? undefined
+      : { model, reference: options.model, pooled: false };
+  }
+  const pool = options.pool ?? null;
+  if (pool !== null && pool.models.length > 0) {
+    const chosen = pickPoolModel(pool, {
+      ...(options.exhausted === undefined ? {} : { exhausted: options.exhausted }),
+      proxyConfigured: options.proxyConfigured,
+      now: new Date(),
+      usable: (model) => knownModel(runtime, model.reference),
+    });
+    if (chosen === undefined) {
+      throw new NoModelAvailable(
+        "no model in the pool can be used: every model is at its peak tariff, " +
+          "has run out of its limit, or cannot be reached",
+      );
+    }
+    const { provider, id } = splitReference(chosen.reference, "the pool's model");
+    const model = runtime.getModel(provider, id);
+    if (model === undefined) {
+      throw new NoModelAvailable(`the provider ${provider} has no model ${id}`);
+    }
+    return { model, reference: chosen.reference, pooled: true };
+  }
+  const model = pickModel(runtime, options.fallbackModel);
+  return model === undefined
+    ? undefined
+    : { model, reference: options.fallbackModel ?? "", pooled: false };
 }
 
 /** The name of the directory this package is installed in, whatever the install. */
@@ -634,12 +740,7 @@ export function pickModel(
     // The provider and the model are separated by the **first** slash: a model
     // id may itself contain one — `commandcode/reflection/beam:free` is a
     // provider called `commandcode` and a model called `reflection/beam:free`.
-    const separator = reference.indexOf("/");
-    if (separator <= 0 || separator === reference.length - 1) {
-      throw new Error(`--model must name a model, as provider/id — got ${reference}`);
-    }
-    const provider = reference.slice(0, separator);
-    const id = reference.slice(separator + 1);
+    const { provider, id } = splitReference(reference, "--model");
     const model = runtime.getModel(provider, id);
     if (model === undefined) {
       throw new Error(`the provider ${provider} has no model ${id}`);
@@ -668,6 +769,35 @@ export interface CliDependencies {
 }
 
 /**
+ * What the pool file means right now.
+ *
+ * A question, not a run: the file is the host's policy, and a host that
+ * cannot see what its own file says cannot change it. Nothing is run and no
+ * lock is taken.
+ */
+export async function showPool(argv: readonly string[]): Promise<number> {
+  const options = parseArgs(argv);
+  const path = options.pool ?? poolFile(options.agentDirectory);
+  const pool = await readPool(path);
+  if (pool === null) {
+    process.stdout.write(`there is no pool file at ${path}\n`);
+    return EXIT_OK;
+  }
+  // The catalogue and the credentials are the host's own: the pool says which
+  // models it wants, and only they say which of them can be reached.
+  const runtime = await ModelRuntime.create({
+    authPath: join(options.agentDirectory, "auth.json"),
+    modelsPath: join(options.agentDirectory, "models.json"),
+  });
+  const lines = describePool(pool, {
+    proxyConfigured: proxyFromEnvironment() !== undefined,
+    usable: (model) => knownModel(runtime, model.reference),
+  });
+  process.stdout.write(`${lines.join("\n")}\n`);
+  return EXIT_OK;
+}
+
+/**
  * Prepare one run: parse the command, resolve the repository, take the lock.
  *
  * The one place the three steps live. The CLI and the live door call it and
@@ -677,7 +807,13 @@ export async function prepareRun(
   argv: readonly string[],
   dependencies: CliDependencies = {},
 ): Promise<
-  | { readonly ok: true; readonly options: CliOptions & { readonly repo: string }; readonly lock: Awaited<ReturnType<typeof takeLock>> }
+  | {
+      readonly ok: true;
+      readonly options: CliOptions & { readonly repo: string };
+      readonly lock: Awaited<ReturnType<typeof takeLock>>;
+      /** The model pool, when the host has one. */
+      readonly pool: Pool | null;
+    }
   | { readonly ok: false; readonly failure: unknown }
 > {
   let options: CliOptions;
@@ -694,10 +830,20 @@ export async function prepareRun(
     return { ok: false, failure };
   }
 
+  // The pool is read before the lock: a pool file that cannot be read is a
+  // mistake in the command, and a mistake that holds the lock keeps the next
+  // runner out while it is found.
+  let pool: Pool | null;
+  try {
+    pool = await readPool(resolved.pool ?? poolFile(resolved.agentDirectory));
+  } catch (failure) {
+    return { ok: false, failure };
+  }
+
   const take = dependencies.lock ?? takeLock;
   try {
     const lock = await take(resolved.lockDirectory, lockNameFor(resolved));
-    return { ok: true, options: resolved, lock };
+    return { ok: true, options: resolved, lock, pool };
   } catch (failure) {
     return { ok: false, failure };
   }
@@ -843,6 +989,16 @@ export async function main(
   argv: readonly string[],
   dependencies: CliDependencies = {},
 ): Promise<number> {
+  // `--show-pool` is a question about the file, not a run: it prints and stops,
+  // and it takes no lock — a lock nobody gives back keeps the next runner out.
+  if (argv.includes("--show-pool")) {
+    try {
+      return await showPool(argv);
+    } catch (failure) {
+      process.stderr.write(`${errorMessage(failure)}\n`);
+      return EXIT_USAGE;
+    }
+  }
   const prepared = await prepareRun(argv, dependencies);
   if (!prepared.ok) {
     const failure = prepared.failure;
@@ -895,12 +1051,24 @@ export async function main(
   process.on("SIGINT", interrupt);
   process.on("SIGTERM", interrupt);
 
+  // What the pool remembers for the whole run: a model whose limit is gone is
+  // gone for every issue of the sweep, not only for the session that found it.
+  const state = newPoolState();
+  // What the pool did, for the record of the run: the model it moved to, and
+  // why it moved.
+  const poolEvents: string[] = [];
   const base =
     dependencies.session ??
     piSessionFactory({
       agentDirectory: resolved.agentDirectory,
       ...(resolved.model === undefined ? {} : { model: resolved.model }),
+      pool: prepared.pool,
+      state,
       onEvent: (line) => {
+        process.stdout.write(`${line}\n`);
+      },
+      onPoolEvent: (line) => {
+        poolEvents.push(line);
         process.stdout.write(`${line}\n`);
       },
     });
@@ -912,6 +1080,7 @@ export async function main(
 
   const run: RunOptions = {
     ...runOptionsFrom(resolved, session, dependencies),
+    poolEvents,
     onStep: (record) => {
       const detail = record.detail === "" ? "" : ` — ${record.detail}`;
       process.stdout.write(`[${record.step}] ${record.outcome}${detail}\n`);
@@ -932,6 +1101,7 @@ export async function main(
         run: dependencies.run ?? runCommand,
         session,
         deadlineMs: resolved.deadlineMs,
+        poolEvents,
         ...(resolved.verifyPushes === undefined
           ? {}
           : { verifyPushes: resolved.verifyPushes }),
@@ -998,6 +1168,7 @@ async function sweep(runOptions: RunOptions, repo: string): Promise<number> {
 
   let firstFailure = 0;
   let stoppedEarly = false;
+  let noModel = false;
   const results: RunResult[] = [];
   for (const issueNumber of numbers) {
     // A human who stopped the run stopped the sweep, not one issue of it.
@@ -1006,6 +1177,12 @@ async function sweep(runOptions: RunOptions, repo: string): Promise<number> {
       break;
     }
     const outcome = await work({ ...runOptions, issueNumber }, issueNumber);
+    if (outcome.code === EXIT_NO_MODEL) {
+      // No model is left: the next issue would fail the same way, and a sweep
+      // that fails every issue in the queue is not a sweep.
+      noModel = true;
+      break;
+    }
     if (outcome.result !== undefined) {
       // One line per issue: a sweep is a journal.
       results.push(outcome.result);
@@ -1016,6 +1193,10 @@ async function sweep(runOptions: RunOptions, repo: string): Promise<number> {
     }
   }
   process.stdout.write(`${sweepTotal(results, numbers.length)}\n`);
+  if (noModel) {
+    process.stderr.write("the sweep stopped: no model was available\n");
+    return EXIT_NO_MODEL;
+  }
   // Issues were left in the queue, so this is not the success the zero would
   // claim; a stop that did not fail a step reports the code a cut session has.
   if (stoppedEarly && firstFailure === 0) {
@@ -1070,6 +1251,13 @@ async function work(
       process.stderr.write(`${failure.message}\n`);
       return { code: EXIT_NO_LOCK };
     }
+    // No model is not a step that failed: it is a reason there was no step to
+    // run, and the code says so.
+    const noModel = causeOf(failure, (error) => error instanceof NoModelAvailable);
+    if (noModel !== null) {
+      process.stderr.write(`${noModel.message}\n`);
+      return { code: EXIT_NO_MODEL };
+    }
     if (failure instanceof RunFailed) {
       process.stderr.write(`${failure.message}\n`);
       return { code: STEP_EXIT_CODES[failure.step] ?? 1 };
@@ -1077,6 +1265,29 @@ async function work(
     process.stderr.write(`${errorMessage(failure)}\n`);
     return { code: 1 };
   }
+}
+
+/**
+ * The failure behind a failure, when it is the one being looked for.
+ *
+ * A failure is wrapped as it travels: the session's error becomes the step's,
+ * and the step's becomes the run's. The reason is at the bottom of that chain.
+ */
+function causeOf(
+  failure: unknown,
+  wanted: (error: Error) => boolean,
+): Error | null {
+  let current: unknown = failure;
+  for (let depth = 0; depth < 10; depth += 1) {
+    if (!(current instanceof Error)) {
+      return null;
+    }
+    if (wanted(current)) {
+      return current;
+    }
+    current = (current as { readonly cause?: unknown }).cause;
+  }
+  return null;
 }
 
 /**

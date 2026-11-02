@@ -61,8 +61,9 @@ import {
 import { createFixtureRepository, gitOutput } from "./git-sandbox.js";
 import { chmod, cp, mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
+import { createServer } from "node:http";
 import { execFile, spawn } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -134,11 +135,13 @@ import { HOLDER_COMMAND, takeLock, workLockName } from "../src/lock.js";
 import {
   EXIT_LOCKED,
   EXIT_NO_LOCK,
+  EXIT_NO_MODEL,
   EXIT_USAGE,
   STEP_EXIT_CODES,
   main,
   type CliDependencies,
 } from "../src/cli.js";
+import { NoModelAvailable } from "../src/pool.js";
 import {
   PINNED_PI_RANGE,
   PiVersionMismatch,
@@ -3011,6 +3014,36 @@ describe("the CLI's run", () => {
     });
   }
 
+  /**
+   * A provider that rates every model out.
+   *
+   * It answers every request with the 429 a provider sends when a model's limit
+   * is gone — the words the pool listens for.
+   */
+  async function rateLimitedProvider(): Promise<{
+    readonly url: string;
+    readonly close: () => Promise<void>;
+  }> {
+    const server = createServer((_request, response) => {
+      response.writeHead(429, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: { message: "429 rate limit reached" } }));
+    });
+    await new Promise<void>((resolve) => {
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    const address = server.address();
+    const port = typeof address === "object" && address !== null ? address.port : 0;
+    return {
+      url: `http://127.0.0.1:${port}/v1`,
+      close: async () => {
+        server.closeAllConnections();
+        await new Promise<void>((resolve) => {
+          server.close(() => resolve());
+        });
+      },
+    };
+  }
+
   /** The run options a composition test needs. */
   function runOptions(
     fixture: Awaited<ReturnType<typeof createFixtureRepository>>,
@@ -4562,6 +4595,132 @@ describe("the CLI's run", () => {
       await fixture.dispose();
     }
   }, 60_000);
+
+  it("test_a_sweep_with_no_model_stops_instead_of_failing_every_issue", async () => {
+    // Every model in the pool is at its peak tariff, has run out of its limit,
+    // or cannot be reached. The sweep stops there: the next issue would fail
+    // the same way, and a sweep that fails every issue in the queue is not a
+    // sweep.
+    const fixture = await fixtureWithSetupScript();
+    const lockDirectory = join(fixture.root, "afk-runner");
+    try {
+      const { gh, calls } = stubGh([
+        { number: 42, title: "the first" },
+        { number: 43, title: "the second" },
+      ]);
+
+      const code = await main(
+        [
+          "--repo",
+          "gazon1/sing",
+          "--checkout",
+          fixture.repo,
+          "--worktree-root",
+          join(fixture.root, "worktrees"),
+          "--lock-dir",
+          lockDirectory,
+          "--all",
+        ],
+        {
+          gh,
+          session: async () => {
+            throw new NoModelAvailable("no model in the pool can be used");
+          },
+          run: async () => JSON.stringify({ verdict: "ci.yml  run 1  success" }),
+        },
+      );
+
+      // The code says that no model was available.
+      expect(code).toBe(EXIT_NO_MODEL);
+      // And only the first issue was claimed: the sweep stopped at it.
+      const claims = calls.filter((call) => call.includes("--add-label agent-in-progress"));
+      expect(claims).toHaveLength(1);
+    } finally {
+      await fixture.dispose();
+    }
+  }, 60_000);
+
+  it("test_a_pool_whose_every_model_is_rated_out_stops_the_sweep", async () => {
+    // A real pool over a real provider: the provider rates every model out, so
+    // the pool moves from one model to the next and then runs out of models
+    // itself. The sweep stops there, and the record says what the pool did.
+    const fixture = await fixtureWithSetupScript();
+    const lockDirectory = join(fixture.root, "afk-runner");
+    const agentDirectory = join(fixture.root, "agent");
+    const provider = await rateLimitedProvider();
+    try {
+      const { gh, calls } = stubGh([
+        { number: 42, title: "the first" },
+        { number: 43, title: "the second" },
+      ]);
+      await mkdir(agentDirectory, { recursive: true });
+      await writeFile(
+        join(agentDirectory, "models.json"),
+        JSON.stringify({
+          providers: {
+            fake: {
+              api: "openai-completions",
+              baseUrl: provider.url,
+              apiKey: "test",
+              models: [{ id: "beam" }, { id: "spare" }],
+            },
+          },
+        }),
+        "utf8",
+      );
+      await writeFile(
+        join(agentDirectory, "models.yaml"),
+        "models:\n  - model: fake/beam\n    priority: 100\n  - model: fake/spare\n    priority: 50\n",
+        "utf8",
+      );
+      // The agent's own retry would wait out the rate limit; the pool is what
+      // moves between the models here.
+      await writeFile(
+        join(agentDirectory, "settings.json"),
+        JSON.stringify({ retry: { enabled: false } }),
+        "utf8",
+      );
+
+      const code = await main(
+        [
+          "--repo",
+          "gazon1/sing",
+          "--checkout",
+          fixture.repo,
+          "--worktree-root",
+          join(fixture.root, "worktrees"),
+          "--lock-dir",
+          lockDirectory,
+          "--agent-dir",
+          agentDirectory,
+          "--all",
+        ],
+        {
+          gh,
+          run: async () => JSON.stringify({ verdict: "ci.yml  run 1  success" }),
+        },
+      );
+
+      // The code says that no model was available.
+      expect(code).toBe(EXIT_NO_MODEL);
+      // And only the first issue was claimed: the sweep stopped at it.
+      const claims = calls.filter((call) => call.includes("--add-label agent-in-progress"));
+      expect(claims).toHaveLength(1);
+
+      // The record says what the pool did: the model it ran on, and the model
+      // it moved to when the first one ran out.
+      const directory = join(fixture.repo, "build", "diagnostics", "issue-42");
+      const records = (await readdir(directory)).filter((name) => name.endsWith(".md"));
+      expect(records).toHaveLength(1);
+      const record = await readFile(join(directory, records[0] as string), "utf8");
+      expect(record).toContain("## The model pool");
+      expect(record).toContain("the model is now fake/beam");
+      expect(record).toContain("fake/beam has run out of its limit");
+    } finally {
+      await provider.close();
+      await fixture.dispose();
+    }
+  }, 120_000);
 
   it("test_an_interrupted_run_releases_its_claim", async () => {
     const fixture = await fixtureWithSetupScript();

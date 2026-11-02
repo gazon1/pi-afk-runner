@@ -136,9 +136,64 @@ repository without them fails at the worktree step, and nothing after it runs:
 - an issue whose brief is a comment opening with `## Agent Brief`, or — when there is no such
   comment — the issue's body. An issue with neither is refused rather than worked.
 
-A model has to resolve, too: `--model <provider/id>` names one; without it the CLI uses the first
-model of the first provider with a credential, and the live chat uses the model of the session it
-was started in.
+A model has to resolve, too: `--model <provider/id>` names one; without it the runner uses the
+**model pool** — and the live chat uses the model of the session it was started in.
+
+### The model pool
+
+The models the runner may use, and when each of them may be used, are in one file:
+`<the agent's directory>/models.yaml`, or whatever `--pool <path>` names. The file is the host's
+policy and not the repository's, and it looks like this:
+
+```yaml
+# The bigger priority wins.
+checkEveryMs: 300000
+models:
+  - model: fake/beam
+    priority: 100
+  - model: fake/proxied
+    priority: 90
+    proxy: true
+  - model: fake/own-proxy
+    priority: 80
+    proxy: http://127.0.0.1:3128
+  - model: deepseek/deepseek-chat
+    priority: 50
+    timezone: UTC
+    peak:
+      - "00:00-16:00"   # the hours DeepSeek charges its double tariff
+```
+
+A fuller example is in [`models.example.yaml`](models.example.yaml).
+
+- `priority` — the bigger number is preferred; the order of the file settles a tie.
+- `peak` — the hours the model is at its peak tariff. A model in its peak hours is **not used**:
+  the pool moves to the next one. `timezone` says where those hours are counted — the host's own
+  when it is absent.
+- `proxy` — the proxy this model's requests go through. `true` is the **host's** own proxy — the one
+  the environment names — and a host that has none cannot use that model. A URL is a proxy of **that
+  model's own**: the runner routes that model's requests through it and the rest of the run goes
+  direct.
+- `checkEveryMs` — how often the pool is looked at again. Five minutes by default.
+
+`--show-pool` says what the file means **now**: every model, why it would be used, and why it would
+not. It is a question, not a run — nothing is worked and no lock is taken.
+
+The runner moves between the pool's models on its own:
+
+- a turn that failed because the model's **limit is gone** — or because the provider's credential is
+  gone — is taken again on the next model, and on the next one after that, until the pool is empty;
+- every `checkEveryMs` the models are looked at again, and a model that has become available — a
+  free one, say — is used instead of the one the session is on. The runner moves **upwards** only: it
+  does not leave a working model for a worse one. A model the provider no longer offers is not a
+  working one, and the runner does leave it;
+- the file itself is read again when the host has changed it, so a change of the pool takes effect
+  while the runner works;
+- a model that is at its peak tariff, out of its limit, out of reach, or in need of a proxy this
+  host has not got is not used at all.
+
+When no model in the pool can be used, the run stops with the code `3` and says so. The work stays
+in the queue, and `--all` stops the sweep there rather than failing every issue in it.
 
 ### The gates the runner runs
 
@@ -240,10 +295,10 @@ works every eligible issue in turn, each one to the end of its journey (claim, w
 scope, agent, gates, push, pull request, review, re-count) — and then stops.
 
 The **exit code says which step the run reached**, because a scheduler has nothing else to read:
-`0` is a finished run, `1` says an issue could not be worked, `10`..`80` are the steps, `75` says
-another runner holds the lock and `76` says the lock could not be taken. A run that stopped at the
-gates leaves `45`, so a red gate is not read as an issue that could not be worked. The unit and the
-codes are in [systemd/](systemd/README.md).
+`0` is a finished run, `1` says an issue could not be worked, `3` says no model was available, `10`..`80`
+are the steps, `75` says another runner holds the lock and `76` says the lock could not be taken. A run
+that stopped at the gates leaves `45`, so a red gate is not read as an issue that could not be worked.
+The unit and the codes are in [systemd/](systemd/README.md).
 
 A finished run ends with a **summary** — the facts a reader wants, one per line, because a journal
 reads lines and a table wraps:

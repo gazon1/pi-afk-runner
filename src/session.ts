@@ -397,7 +397,7 @@ export function addUsage(
 }
 
 /** The error a settled turn ended on, or null. */
-function turnFailure(message: TurnMessage | undefined): Error | null {
+export function turnFailure(message: TurnMessage | undefined): Error | null {
   if (message?.role !== "assistant" || message.stopReason !== "error") {
     return null;
   }
@@ -411,7 +411,7 @@ function turnFailure(message: TurnMessage | undefined): Error | null {
 }
 
 /** The last assistant message, which is the one the turn settled on. */
-function lastAssistant(
+export function lastAssistant(
   messages: readonly TurnMessage[] | undefined,
 ): TurnMessage | undefined {
   if (messages === undefined) {
@@ -435,6 +435,13 @@ export interface AgentSession {
   dispose(): void;
   /** The session's messages, when it keeps them. */
   readonly messages?: readonly TurnMessage[];
+  /**
+   * The model the session runs on — `provider/id`.
+   *
+   * The pool's session knows it, because the pool moves it between models; a
+   * session on a single model may leave it out.
+   */
+  readonly reference?: string;
 }
 
 /** Creates a session bound to a directory. */
