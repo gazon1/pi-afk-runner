@@ -38,12 +38,14 @@ import { GateFailed, runGates } from "./gates.js";
 import {
   UNTRUSTED_INPUT_RULE,
   UNTRUSTED_INPUT_SECTION,
+  addUsage,
   briefFence,
   createVerdictTool,
   cutOffMessage,
   runPromptArray,
   startAgent,
   type ReviewVerdict,
+  type RunUsage,
   type Scheduler,
   type SessionFactory,
 } from "./session.js";
@@ -604,6 +606,8 @@ export interface ReviewOutcome {
   readonly findings: readonly string[];
   /** The CI line, when the runner read one. */
   readonly ciVerdict: string | null;
+  /** The tokens and the cost of the review, when the provider reported them. */
+  readonly usage?: RunUsage;
 }
 
 /**
@@ -647,12 +651,18 @@ export async function reviewPullRequest(options: {
   readonly issue?: IssueDetail;
 }): Promise<ReviewOutcome> {
   const holder: { value?: ReviewVerdict } = {};
+  // What the review cost, when the provider said: the session's events carry
+  // the numbers, and the factory is the one that sees them.
+  let usage: RunUsage | undefined;
   const session = await options.factory({
     cwd: options.cwd,
     systemPromptSections: {
       [UNTRUSTED_INPUT_SECTION]: UNTRUSTED_INPUT_RULE,
     },
     tools: [createVerdictTool(holder)],
+    onUsage: (reported) => {
+      usage = addUsage(usage, reported);
+    },
   });
 
   const fence = options.issue === undefined ? "" : briefFence(options.issue);
@@ -731,6 +741,7 @@ export async function reviewPullRequest(options: {
     comment,
     findings: verdict.findings,
     ciVerdict: ciLine === null ? null : `${CI_BEFORE_RECOUNT}: ${ciLine}`,
+    ...(usage === undefined ? {} : { usage }),
   };
 }
 
@@ -1515,41 +1526,60 @@ export interface RunOptions {
   readonly runId?: string;
 }
 
+/**
+ * The facts a run carries, whatever it did.
+ *
+ * They are the same for every outcome: a run that worked an issue, a run that
+ * found nothing and a run that found the issue unworkable all say how long
+ * they took and what they cost.
+ */
+export interface RunResultFacts {
+  /** The issue the run worked, or null when it worked none. */
+  readonly issue: number | null;
+  readonly steps: readonly StepRecord[];
+  /** Where the record was written. */
+  readonly record: string;
+  /** The issue's title, when the run knows it. */
+  readonly title?: string;
+  /** The pull request the run opened, or found. */
+  readonly pullRequest?: number;
+  /**
+   * The verdict the review reached.
+   *
+   * Absent when there was no review — a run that was cut short before the
+   * reviewer answered has no verdict, and saying `pass` would be a lie.
+   */
+  readonly verdict?: "pass" | "fail";
+  /** How long the run took, in milliseconds. */
+  readonly durationMs?: number;
+  /** The tokens and the cost, when the provider reported them. */
+  readonly usage?: RunUsage;
+}
+
 /** What a run did. */
 export type RunResult =
-  | {
-      /** The issue the run worked, or null when it worked none. */
-      readonly issue: number | null;
+  | (RunResultFacts & {
       readonly outcome: "completed";
-      readonly steps: readonly StepRecord[];
-      /** Where the record was written. */
-      readonly record: string;
-    }
-  | {
+      /** Why the run ended the way it did, when it said. */
+      readonly reason?: string;
+    })
+  | (RunResultFacts & {
       readonly issue: null;
       readonly outcome: "empty";
-      readonly steps: readonly StepRecord[];
-      readonly record: string;
-    }
-  | {
-      readonly issue: number | null;
+    })
+  | (RunResultFacts & {
       readonly outcome: "unworkable";
-      readonly steps: readonly StepRecord[];
-      readonly record: string;
       /** Why the issue could not be worked. */
       readonly reason: string;
       /** The parent issues that are still open, when that is why the issue waits. */
       readonly blockedBy?: readonly number[];
-    }
-  | {
-      readonly issue: number | null;
+    })
+  | (RunResultFacts & {
       readonly outcome: "skipped" | "split";
-      readonly steps: readonly StepRecord[];
-      readonly record: string;
       /** Why the issue was skipped or split. */
       readonly reason?: string;
       readonly blockedBy?: readonly number[];
-    };
+    });
 
 /**
  * Why an issue could not be worked, in the words the front doors say.
@@ -2257,7 +2287,11 @@ async function runPlan(
     pullRequest: plan.pullRequest?.number ?? 0,
     reviewedSha: "",
     slug: null as string | null,
-    verdict: "pass" as "pass" | "fail",
+    // The verdict is null until a review states one: a run that never got one
+    // has no verdict, and the re-count falls back to the pass it always wrote.
+    verdict: null as "pass" | "fail" | null,
+    /** The tokens and the cost, when the provider reported them. */
+    usage: undefined as RunUsage | undefined,
     /** The issue, once the work session read it; a resume reads it itself. */
     issue: plan.issueDetail ?? (null as IssueDetail | null),
     /** What the work session decided to do with the issue. */
@@ -2387,6 +2421,9 @@ async function runPlan(
           .split("\n")
           .map((line) => line.trim())
           .filter((line) => line !== "");
+        // What the work cost, when the provider said what it cost: the
+        // session's events carry the numbers, and the factory reports them.
+        let usage: RunUsage | undefined;
         const result = await startAgent({
           factory: options.session,
           cwd: state.worktreePath,
@@ -2406,8 +2443,12 @@ async function runPlan(
           // to run with.
           deadlineMs: sessionBudgetMs,
           ...(options.stopped === undefined ? {} : { stopped: options.stopped }),
+          onUsage: (reported) => {
+            usage = addUsage(usage, reported);
+          },
         });
         const workElapsedMs = workSessionStartedAt === undefined ? 0 : Date.now() - workSessionStartedAt;
+        state.usage = addUsage(state.usage, usage);
         if (workElapsedMs >= sessionBudgetMs) {
           reviews = false;
         }
@@ -2599,6 +2640,8 @@ async function runPlan(
               issue: detail,
             });
             state.verdict = reviewed.verdict;
+            // And what the review cost, on top of the work's own.
+            state.usage = addUsage(state.usage, reviewed.usage);
             state.findings = reviewed.findings;
             state.reviewCount += 1;
             return reviewed.verdict;
@@ -2748,7 +2791,7 @@ async function runPlan(
         join(directory, `${state.slug}.md`),
         verdictFile({
           slug: state.slug,
-          verdict: state.verdict,
+          verdict: state.verdict ?? "pass",
           date: now.toISOString().slice(0, 10),
           pullRequest: state.pullRequest,
           reviewed: state.reviewedSha,
@@ -2855,6 +2898,11 @@ async function runPlan(
           : "completed",
     steps: runOutcome.steps,
     record: runOutcome.record,
+    title: issue.title,
+    ...(state.pullRequest === 0 ? {} : { pullRequest: state.pullRequest }),
+    ...(state.verdict === null ? {} : { verdict: state.verdict }),
+    durationMs: Date.now() - runStartedAt,
+    ...(state.usage === undefined ? {} : { usage: state.usage }),
     ...(state.reason === "" ? {} : { reason: state.reason }),
   };
 }
