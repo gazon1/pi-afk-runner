@@ -25,9 +25,11 @@
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
+import { defineCommand, parseArgs as parseCittyArgs, renderUsage, type ArgsDef } from "citty";
 import { EnvHttpProxyAgent, fetch as undiciFetch, setGlobalDispatcher } from "undici";
 
-import { DEFAULT_DEADLINE_MS } from "./budget.js";
+import { DEFAULT_DEADLINE_MS, defaultDeadlineMs } from "./budget.js";
+import { readGateSettings, resolveGateSettings, type GateSettings } from "./gates.js";
 import { readClaimed, readQueue, runGh, type GhRunner } from "./gh.js";
 import { runCommand, runGit, type CommandRunner, type GitRunner } from "./git.js";
 import { LockHeld, LockUnusable, lockNameFor, takeLock, workLockName } from "./lock.js";
@@ -123,34 +125,26 @@ export interface CliOptions {
   readonly verifyPushes?: boolean;
   /** Whether to look for related issues and work them in one batch. */
   readonly batchRelated?: boolean;
-  /** The wall-clock ceiling on one turn of the agent. */
-  readonly deadlineMs: number;
+  /**
+   * The wall-clock ceiling on one turn of the agent.
+   *
+   * Absent when the command did not name one: the ceiling then follows the
+   * gates the run runs, and a run with fewer gates does not carry the budget
+   * of a run with more.
+   */
+  readonly deadlineMs?: number;
   /** How long a claim may sit before another run may take it over. */
-  readonly staleAfterMs: number;
+  readonly staleAfterMs?: number;
+  /**
+   * The gates to run, when the command names them.
+   *
+   * The command's list replaces the repository's own, and a run that names
+   * neither runs no gate at all: a run started by hand says what it runs.
+   */
+  readonly gates?: readonly string[];
+  /** How long one gate may take, in milliseconds. */
+  readonly gateTimeoutMs?: number;
 }
-
-/** The usage the command prints when it is asked or when it is wrong. */
-export const USAGE = [
-  "pi-afk-runner — work one issue from the queue and open a reviewed pull request",
-  "",
-  "  pi-afk-runner [options]",
-  "",
-  "  --repo <owner/name>    the repository the issue lives in (default: the checkout's origin)",
-  "  --issue <number>        the issue to work (default: the queue's first eligible one)",
-  "  --all                   work every eligible issue, one after another",
-  "  --merge                 land the reviewed, green pull requests the runner opened",
-  "  --checkout <path>       the checkout the worktree is made from (default: the cwd)",
-  "  --remote <name>         the remote the base comes from (default: origin)",
-  "  --base <branch>         the branch the base is read from (default: main)",
-  "  --lock-dir <path>       where the lock lives (default: <checkout>/build/afk-runner)",
-  "  --worktree-root <path>  where the worktrees are created (default: <checkout>/../afk-worktrees)",
-  "  --model <provider/id>   the model the agent runs on (default: the provider's first)",
-  "  --no-verify             skip the target repository's pre-push hook when pushing",
-  "  --batch-related         look for related ready-for-agent issues and work them in one batch",
-  `  --deadline-ms <n>       the ceiling on the run (default: ${DEFAULT_DEADLINE_MS})`,
-  "  --stale-after-ms <n>    how long a claim may sit (default: 604800000 — a week)",
-  "  --help                  this text",
-].join("\n");
 
 /** The message of a failure, whatever it was thrown as. */
 export function errorMessage(failure: unknown): string {
@@ -158,68 +152,98 @@ export function errorMessage(failure: unknown): string {
 }
 
 /**
- * Read the command line.
+ * The options the command reads, as citty reads them.
+ *
+ * One list: the command line, the usage and the runner's own options are the
+ * same list, and a flag that is written down twice is a flag whose two copies
+ * drift.
+ */
+export const ARGS = {
+  repo: { type: "string", description: "the repository the issue lives in (default: the checkout's origin)" },
+  issue: { type: "string", description: "the issue to work (default: the queue's first eligible one)" },
+  all: { type: "boolean", description: "work every eligible issue, one after another" },
+  merge: { type: "boolean", description: "land the reviewed, green pull requests the runner opened" },
+  checkout: { type: "string", description: "the checkout the worktree is made from (default: the cwd)" },
+  remote: { type: "string", description: "the remote the base comes from (default: origin)" },
+  base: { type: "string", description: "the branch the base is read from (default: main)" },
+  "lock-dir": { type: "string", description: "where the lock lives (default: <checkout>/build/afk-runner)" },
+  "worktree-root": { type: "string", description: "where the worktrees are created (default: <checkout>/../afk-worktrees)" },
+  model: { type: "string", description: "the model the agent runs on (default: the provider's first)" },
+  "no-verify": { type: "boolean", description: "skip the target repository's pre-push hook when pushing" },
+  "batch-related": { type: "boolean", description: "look for related ready-for-agent issues and work them in one batch" },
+  gate: { type: "string", description: "the gates to run, separated by commas — they replace the repository's own list" },
+  "gate-timeout-ms": { type: "string", description: "how long one gate may take (default: 3600000)" },
+  "deadline-ms": { type: "string", description: "the ceiling on the run (default: the three shares, added up)" },
+  "stale-after-ms": { type: "string", description: "how long a claim may sit (default: 604800000 — a week)" },
+} as const satisfies ArgsDef;
+
+/**
+ * The command, as citty holds it.
+ *
+ * The command has no `run`: the run belongs to {@link main}, which owns the
+ * exit code — a scheduler reads a number, and a number a library invents is a
+ * number nobody agreed on.
+ */
+export const command = defineCommand({
+  meta: {
+    name: "pi-afk-runner",
+    description: "work one issue from the queue and open a reviewed pull request",
+  },
+  args: ARGS,
+});
+
+/** The usage the command prints when it is asked or when it is wrong. */
+export async function usage(): Promise<string> {
+  return renderUsage(command);
+}
+
+/**
+ * The options the command reads.
  *
  * The options are read the way a scheduler sets them: long names, one value
  * each. There is no short form and no bundling, because a systemd unit is
  * read by a person at three in the morning.
  */
 export function parseArgs(argv: readonly string[]): CliOptions {
-  const values = new Map<string, string>();
-  let repo: string | undefined;
-
-  for (let index = 0; index < argv.length; index += 1) {
-    const argument = argv[index] ?? "";
-    if (!argument.startsWith("--")) {
-      throw new Error(`unexpected argument: ${argument}`);
-    }
-    const name = argument.slice(2);
-    if (name === "help") {
-      throw new Error("help");
-    }
-    if (name === "no-verify" || name === "all" || name === "merge" || name === "batch-related") {
-      // A flag, not an option with a value.
-      values.set(name, "true");
-      continue;
-    }
-    const value = argv[index + 1];
-    if (value === undefined || value.startsWith("--")) {
-      throw new Error(`the option --${name} needs a value`);
-    }
-    values.set(name, value);
-    index += 1;
+  if (argv.includes("--help")) {
+    throw new Error("help");
   }
+  rejectUnknownOptions(argv);
+  rejectRepeatedGate(argv);
+  const parsed = parseCittyArgs([...argv], ARGS) as Record<string, unknown>;
 
-  repo = values.get("repo");
+  const repo = text(parsed["repo"]);
   if (repo !== undefined && !repo.includes("/")) {
     throw new Error("--repo must name a repository, as owner/name");
   }
 
-  const issue = values.get("issue");
-  const all = values.has("all");
-  const merge = values.has("merge");
+  const issueText = text(parsed["issue"]);
+  const issue = issueText === undefined ? undefined : positiveNumber(issueText, "--issue");
+  const all = parsed["all"] === true;
+  const merge = parsed["merge"] === true;
   if (all && issue !== undefined) {
     throw new Error("--all works every issue, so it cannot be combined with --issue");
   }
   if (merge && (all || issue !== undefined)) {
     throw new Error("--merge is its own mode; it cannot be combined with --all or --issue");
   }
-  const checkout = resolve(values.get("checkout") ?? process.cwd());
-  const remote = values.get("remote") ?? "origin";
-  const baseBranch = values.get("base") ?? "main";
-  const lockDirectory =
-    values.get("lock-dir") ?? join(checkout, "build", "afk-runner");
+  const checkout = resolve(text(parsed["checkout"]) ?? process.cwd());
+  const remote = text(parsed["remote"]) ?? "origin";
+  const baseBranch = text(parsed["base"]) ?? "main";
+  const lockDirectory = text(parsed["lock-dir"]) ?? join(checkout, "build", "afk-runner");
   const worktreeRoot =
-    values.get("worktree-root") ?? join(dirname(checkout), "afk-worktrees");
-  const model = values.get("model");
-  const noVerify = values.has("no-verify");
-  const batchRelated = values.has("batch-related");
-  const deadlineMs = number(values.get("deadline-ms"), DEFAULT_DEADLINE_MS, "--deadline-ms");
-  const staleAfterMs = number(values.get("stale-after-ms"), DEFAULT_STALE_AFTER_MS, "--stale-after-ms");
+    text(parsed["worktree-root"]) ?? join(dirname(checkout), "afk-worktrees");
+  const model = text(parsed["model"]);
+  const noVerify = parsed["no-verify"] === true;
+  const batchRelated = parsed["batch-related"] === true;
+  const deadlineMs = number(text(parsed["deadline-ms"]), undefined, "--deadline-ms");
+  const staleAfterMs = number(text(parsed["stale-after-ms"]), undefined, "--stale-after-ms");
+  const gates = list(parsed["gate"], "--gate");
+  const gateTimeoutMs = number(text(parsed["gate-timeout-ms"]), undefined, "--gate-timeout-ms");
 
   return {
     ...(repo === undefined ? {} : { repo }),
-    ...(issue === undefined ? {} : { issue: positiveNumber(issue, "--issue") }),
+    ...(issue === undefined ? {} : { issue }),
     ...(all ? { all: true } : {}),
     ...(merge ? { merge: true } : {}),
     checkout,
@@ -230,9 +254,67 @@ export function parseArgs(argv: readonly string[]): CliOptions {
     ...(model === undefined ? {} : { model }),
     ...(noVerify ? { verifyPushes: false } : {}),
     ...(batchRelated ? { batchRelated: true } : {}),
-    deadlineMs,
-    staleAfterMs,
+    ...(deadlineMs === undefined ? {} : { deadlineMs }),
+    ...(staleAfterMs === undefined ? {} : { staleAfterMs }),
+    ...(gates === undefined ? {} : { gates }),
+    ...(gateTimeoutMs === undefined ? {} : { gateTimeoutMs }),
   };
+}
+
+/**
+ * Say that an option is not one the command has.
+ *
+ * citty keeps the options it does not know, and a runner that read them would
+ * ignore a flag the operator believed in — a misspelled `--gate` would run the
+ * default gates and say nothing.
+ */
+function rejectUnknownOptions(argv: readonly string[]): void {
+  for (const argument of argv) {
+    if (!argument.startsWith("--")) {
+      continue;
+    }
+    const name = (argument.slice(2).split("=")[0] ?? "").trim();
+    if (name !== "" && !(name in ARGS)) {
+      throw new Error(`unknown option --${name}`);
+    }
+  }
+}
+
+/**
+ * Say that the gates were named more than once.
+ *
+ * citty keeps the **last** of a repeated flag, so a second `--gate` would
+ * quietly drop the first one and the run would judge the tree by half the
+ * list the operator asked for. The list is one flag: `--gate "a, b"`.
+ */
+function rejectRepeatedGate(argv: readonly string[]): void {
+  const named = argv.filter((argument) => argument === "--gate" || argument.startsWith("--gate="));
+  if (named.length > 1) {
+    throw new Error("the gates are named in one --gate, separated by commas");
+  }
+}
+
+/** An option's value, as text — or nothing when it was not given. */
+function text(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+/** A list of commands, as one comma-separated value. */
+function list(value: unknown, name: string): string[] | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== "string") {
+    throw new Error(`${name} must be a list of commands`);
+  }
+  const commands = value
+    .split(",")
+    .map((command) => command.trim())
+    .filter((command) => command !== "");
+  if (commands.length === 0) {
+    throw new Error(`${name} must name at least one command`);
+  }
+  return commands;
 }
 
 /**
@@ -285,7 +367,11 @@ function positiveNumber(raw: string, name: string): number {
 }
 
 /** Read a number, or say that the number is not one. */
-function number(raw: string | undefined, fallback: number, name: string): number {
+function number(
+  raw: string | undefined,
+  fallback: number | undefined,
+  name: string,
+): number | undefined {
   if (raw === undefined) {
     return fallback;
   }
@@ -342,8 +428,10 @@ export function runOptionsFrom(
     gh: dependencies.gh ?? runGh,
     run: dependencies.run ?? runCommand,
     session,
-    deadlineMs: options.deadlineMs,
-    staleAfterMs: options.staleAfterMs,
+    deadlineMs: options.deadlineMs ?? DEFAULT_DEADLINE_MS,
+    staleAfterMs: options.staleAfterMs ?? DEFAULT_STALE_AFTER_MS,
+    ...(options.gates === undefined ? {} : { gates: options.gates }),
+    ...(options.gateTimeoutMs === undefined ? {} : { gateTimeoutMs: options.gateTimeoutMs }),
     ...(options.verifyPushes === undefined ? {} : { verifyPushes: options.verifyPushes }),
     ...(options.batchRelated === undefined ? {} : { batchRelated: options.batchRelated }),
     // A named issue took its lock before the run read anything. A run that lets
@@ -374,7 +462,7 @@ export async function prepareRun(
   argv: readonly string[],
   dependencies: CliDependencies = {},
 ): Promise<
-  | { readonly ok: true; readonly options: CliOptions & { readonly repo: string }; readonly lock: Awaited<ReturnType<typeof takeLock>> }
+  | { readonly ok: true; readonly options: ResolvedOptions; readonly lock: Awaited<ReturnType<typeof takeLock>> }
   | { readonly ok: false; readonly failure: unknown }
 > {
   let options: CliOptions;
@@ -391,14 +479,47 @@ export async function prepareRun(
     return { ok: false, failure };
   }
 
+  // The gates a run runs: the command's or the repository's own file. A run
+  // that is told neither runs no gate, and the ceiling follows them.
+  let settings: GateSettings;
+  try {
+    settings = resolveGateSettings({
+      cli: {
+        ...(resolved.gates === undefined ? {} : { gates: resolved.gates }),
+        ...(resolved.gateTimeoutMs === undefined
+          ? {}
+          : { gateTimeoutMs: resolved.gateTimeoutMs }),
+      },
+      repo: await readGateSettings(resolved.checkout),
+    });
+  } catch (failure) {
+    return { ok: false, failure };
+  }
+  const withSettings: ResolvedOptions = {
+    ...resolved,
+    gates: settings.gates,
+    gateTimeoutMs: settings.gateTimeoutMs,
+    deadlineMs: resolved.deadlineMs ?? defaultDeadlineMs(settings.gates.length),
+    staleAfterMs: resolved.staleAfterMs ?? DEFAULT_STALE_AFTER_MS,
+  };
+
   const take = dependencies.lock ?? takeLock;
   try {
-    const lock = await take(resolved.lockDirectory, lockNameFor(resolved));
-    return { ok: true, options: resolved, lock };
+    const lock = await take(withSettings.lockDirectory, lockNameFor(withSettings));
+    return { ok: true, options: withSettings, lock };
   } catch (failure) {
     return { ok: false, failure };
   }
 }
+
+/** The options of a run that is ready to start. */
+export type ResolvedOptions = CliOptions & {
+  readonly repo: string;
+  readonly gates: readonly string[];
+  readonly gateTimeoutMs: number;
+  readonly deadlineMs: number;
+  readonly staleAfterMs: number;
+};
 
 /**
  * A duration, as a reader reads it.
@@ -545,10 +666,9 @@ export async function main(
     const failure = prepared.failure;
     const message = errorMessage(failure);
     if (message === "help") {
-      process.stdout.write(`${USAGE}\n`);
+      process.stdout.write(`${await usage()}\n`);
       return EXIT_OK;
     }
-    // parseArgs errors are usage errors
     if (failure instanceof LockHeld) {
       process.stderr.write(`${failure.message}\n`);
       return EXIT_LOCKED;
@@ -557,20 +677,9 @@ export async function main(
       process.stderr.write(`${failure.message}\n`);
       return EXIT_NO_LOCK;
     }
-    // distinguish: if from parseArgs, message+usage; else just message
-    // We can't easily know; check if message matches? Keep simple: usage-style for parse errors.
-    // Heuristic: LockHeld/Unusable handled; resolve errors print message only.
-    // For parse errors, print usage. Detect by trying parseArgs again.
-    let isUsage = false;
-    try { parseArgs(argv); } catch { isUsage = true; }
-    if (isUsage) {
-      process.stderr.write(`${message}\n\n${USAGE}\n`);
-      return EXIT_USAGE;
-    }
-    process.stderr.write(`${message}\n`);
-    // Could be resolveRepo failure -> usage per original
-    // Original treated resolveRepo as EXIT_USAGE. Keep:
-    // But we already returned? Need mark. We'll handle below by checking if resolved? 
+    // Everything else is the command line that was wrong: the options, the
+    // repository, or the settings file the repository carries.
+    process.stderr.write(`${message}\n\n${await usage()}\n`);
     return EXIT_USAGE;
   }
   const resolved = prepared.options;
