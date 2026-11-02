@@ -3873,10 +3873,15 @@ describe("the CLI's run", () => {
 
       // And the second run was told about the first run's commit, so the triage
       // cannot read it as work that has landed.
+      const wipSha = (await gitOutput(
+        ["log", "--format=%h", "--grep=wip: the work a run that did not finish left behind", workBranch(42)],
+        { cwd: fixture.repo, env: fixture.env },
+      ))
+        .trim()
+        .split("\n")[0]!
+        .trim();
       const worktree = sections.find((entry) => entry[WORKTREE_SECTION] !== undefined);
-      expect(worktree?.[WORKTREE_SECTION]).toContain(
-        "wip: the work a run that did not finish left behind",
-      );
+      expect(worktree?.[WORKTREE_SECTION]).toContain(wipSha);
       expect(worktree?.[WORKTREE_SECTION]).toContain("commit(s) the base does not have");
     } finally {
       await fixture.dispose();
