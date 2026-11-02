@@ -48,12 +48,10 @@ import {
   RunFailed,
   SETUP_SCRIPT,
   prepareWorktreeSetup,
-  blockedReason,
   newRunId,
   runOnce,
   type RunOptions,
   type RunResult,
-  unworkableReason,
   emptyQueueSentence,
   workedIssueSentence,
 } from "./runner.js";
@@ -551,11 +549,9 @@ export function liveFrontDoor(
         const result = await (dependencies.work ?? runOnce)(runOptions);
         if (result.outcome === "unworkable") {
           const issueNum = result.issue ?? options.issue;
-          const reason =
-            blockedReason(result.blockedBy) ?? unworkableReason(result.derivedState);
           talk(
             ctx,
-            `afk-runner: issue ${issueNum ?? ""} could not be worked — ${reason}`,
+            `afk-runner: issue ${issueNum ?? ""} could not be worked — ${result.reason}`,
             "warning",
           );
           finish(ctx, run, "done");
