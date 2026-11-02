@@ -1872,16 +1872,39 @@ describe("the review", () => {
    * A `git` that answers the tree questions the review asks, and remembers
    * what it was told.
    *
-   * The review reads the head before its session and puts the worktree back
-   * to the tree it judged afterwards, so a fake that says nothing but the
-   * head is enough.
+   * The review reads the head and the branch before its session and puts the
+   * worktree back to the tree it judged afterwards, so a fake that says
+   * nothing but the head and the branch is enough.
+   *
+   * The branch is a queue: the first answer is the branch before the session
+   * and the second the branch after it, so a fake can say that the reviewer
+   * left another branch checked out.
    */
-  function stubGit(calls: string[] = []): (
+  function stubGit(
+    calls: string[] = [],
+    options: {
+      /** The branch the worktree is on, before the session and after it. */
+      readonly branches?: readonly (string | null)[];
+      /** The command that fails, when one does. */
+      readonly fails?: string;
+    } = {},
+  ): (
     args: readonly string[],
     options: { readonly cwd: string },
   ) => Promise<string> {
+    const branches = options.branches ?? ["agent/issue-42", "agent/issue-42"];
+    let asked = 0;
     return async (args) => {
-      calls.push(`git ${args.join(" ")}`);
+      const command = `git ${args.join(" ")}`;
+      calls.push(command);
+      if (options.fails !== undefined && command === options.fails) {
+        throw new CommandFailed(128, "git", args, "", "fatal: the tree is not there");
+      }
+      if (args[0] === "rev-parse" && args[1] === "--abbrev-ref") {
+        const branch = branches[Math.min(asked, branches.length - 1)] ?? null;
+        asked += 1;
+        return branch === null ? "HEAD\n" : `${branch}\n`;
+      }
       if (args[0] === "rev-parse") {
         return "abc1234\n";
       }
@@ -2075,6 +2098,218 @@ describe("the review", () => {
     expect(at("git rev-parse HEAD")).toBeLessThan(at("the review's session"));
     expect(at("git reset --hard abc1234")).toBeGreaterThan(at("the review's session"));
     expect(at("git clean -fd")).toBeGreaterThan(at("the review's session"));
+  });
+
+  it("test_the_review_puts_the_worktree_back_even_when_its_session_fails", async () => {
+    // A session that failed still leaves what it left behind: the tree goes
+    // back to the tree the reviewer judged. Without the restore the leftover
+    // would ride along with the fix that follows it, and a fix that changed
+    // nothing would look like a fix that changed something.
+    const calls: string[] = [];
+    const factory = async (): Promise<AgentSession> => ({
+      async prompt() {
+        calls.push("the review's session");
+        throw new Error("the session died");
+      },
+      async abort() {},
+      dispose() {},
+    });
+
+    await expect(
+      reviewPullRequest({
+        repo: "gazon1/sing",
+        pullRequest: 1040,
+        cwd: "/tmp/does-not-matter",
+        factory: factory as never,
+        gh: async () => "",
+        run: async () => "",
+        git: stubGit(calls),
+        deadlineMs: 60_000,
+      }),
+    ).rejects.toThrow("the session died");
+
+    // The tree went back after the session, not before it.
+    const at = (prefix: string): number =>
+      calls.findIndex((call) => call.startsWith(prefix));
+    expect(at("git reset --hard abc1234")).toBeGreaterThan(at("the review's session"));
+    expect(at("git clean -fd")).toBeGreaterThan(at("the review's session"));
+  });
+
+  it("test_a_tree_that_could_not_be_put_back_says_so", async () => {
+    // A tree that cannot be put back is a tree that cannot be pushed, and the
+    // review goes with it. The failure says that in the runner's own words:
+    // git's own message says nothing about the review.
+    const factory = async (options: {
+      tools?: readonly unknown[];
+    }): Promise<AgentSession> => ({
+      async prompt() {
+        const tool = options.tools?.[0] as {
+          execute: (id: string, params: unknown) => Promise<unknown>;
+        };
+        await tool.execute("call-1", { verdict: "pass", findings: [] });
+      },
+      async abort() {},
+      dispose() {},
+    });
+
+    await expect(
+      reviewPullRequest({
+        repo: "gazon1/sing",
+        pullRequest: 1040,
+        cwd: "/tmp/does-not-matter",
+        factory: factory as never,
+        gh: async () => "",
+        run: async () => "",
+        git: stubGit([], { fails: "git reset --hard abc1234" }),
+        deadlineMs: 60_000,
+      }),
+    ).rejects.toThrow("the review's tree could not be put back");
+  });
+
+  it("test_a_failed_session_and_a_tree_that_could_not_be_put_back_are_named_together", async () => {
+    // The two failures are one failure: the review did not happen, and the
+    // tree it did not judge is not back either. A reader who has one of them
+    // would not know of the other.
+    const factory = async (): Promise<AgentSession> => ({
+      async prompt() {
+        throw new Error("the session died");
+      },
+      async abort() {},
+      dispose() {},
+    });
+
+    await expect(
+      reviewPullRequest({
+        repo: "gazon1/sing",
+        pullRequest: 1040,
+        cwd: "/tmp/does-not-matter",
+        factory: factory as never,
+        gh: async () => "",
+        run: async () => "",
+        git: stubGit([], { fails: "git reset --hard abc1234" }),
+        deadlineMs: 60_000,
+      }),
+    ).rejects.toThrow(/the review's session failed .*could not be put back/);
+  });
+
+  it("test_the_review_does_not_move_a_branch_the_reviewer_checked_out", async () => {
+    // The reviewer works in the worktree, on the branch the run made. A
+    // reviewer that checked out another branch would have that branch moved by
+    // a plain reset — a branch the review never judged, and one that is not
+    // the runner's to move.
+    const fixture = await createFixtureRepository();
+    try {
+      const git = async (args: readonly string[], options: { readonly cwd: string }) =>
+        gitOutput(args, { cwd: options.cwd, env: fixture.env });
+      const base = await gitOutput(["rev-parse", "main"], {
+        cwd: fixture.repo,
+        env: fixture.env,
+      });
+      const worktreePath = join(fixture.root, "worktree");
+      await addWorktree(git, fixture.repo, {
+        path: worktreePath,
+        branch: "agent/issue-42",
+        baseSha: base,
+      });
+      // A branch of somebody else's, with a commit of its own: a branch that
+      // moved would show it.
+      await git(["commit", "-q", "--allow-empty", "-m", "somebody else's commit"], {
+        cwd: fixture.repo,
+      });
+      const foreign = await gitOutput(["rev-parse", "HEAD"], {
+        cwd: fixture.repo,
+        env: fixture.env,
+      });
+      await git(["branch", "somebody-elses-branch", foreign], { cwd: fixture.repo });
+
+      const factory = async (options: {
+        tools?: readonly unknown[];
+      }): Promise<AgentSession> => ({
+        async prompt() {
+          await git(["checkout", "somebody-elses-branch"], { cwd: worktreePath });
+          const tool = options.tools?.[0] as {
+            execute: (id: string, params: unknown) => Promise<unknown>;
+          };
+          await tool.execute("call-1", { verdict: "pass", findings: [] });
+        },
+        async abort() {},
+        dispose() {},
+      });
+
+      await reviewPullRequest({
+        repo: "gazon1/sing",
+        pullRequest: 1040,
+        cwd: worktreePath,
+        factory: factory as never,
+        gh: async () => "",
+        run: async () => "",
+        git,
+        deadlineMs: 60_000,
+      });
+
+      // The branch the review judged is where it was, and the worktree is on
+      // it again.
+      expect(
+        await gitOutput(["rev-parse", "--abbrev-ref", "HEAD"], {
+          cwd: worktreePath,
+          env: fixture.env,
+        }),
+      ).toBe("agent/issue-42");
+      expect(
+        await gitOutput(["rev-parse", "agent/issue-42"], { cwd: fixture.repo, env: fixture.env }),
+      ).toBe(base);
+      // And the branch the reviewer checked out did not move.
+      expect(
+        await gitOutput(["rev-parse", "somebody-elses-branch"], {
+          cwd: fixture.repo,
+          env: fixture.env,
+        }),
+      ).toBe(foreign);
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("test_the_review_moves_the_branch_it_judged_when_the_reviewer_detached_the_worktree", async () => {
+    // A reviewer that detached the worktree left the branch the review judged
+    // where it was — and a plain reset would not move it back, so a commit the
+    // reviewer made on it would stay on the branch. The branch the review
+    // judged is moved by name, and the worktree goes back onto it.
+    const calls: string[] = [];
+    const factory = async (options: {
+      tools?: readonly unknown[];
+    }): Promise<AgentSession> => ({
+      async prompt() {
+        calls.push("the review's session");
+        const tool = options.tools?.[0] as {
+          execute: (id: string, params: unknown) => Promise<unknown>;
+        };
+        await tool.execute("call-1", { verdict: "pass", findings: [] });
+      },
+      async abort() {},
+      dispose() {},
+    });
+
+    await reviewPullRequest({
+      repo: "gazon1/sing",
+      pullRequest: 1040,
+      cwd: "/tmp/does-not-matter",
+      factory: factory as never,
+      gh: async () => "",
+      run: async () => "",
+      // The worktree is on the branch before the session and detached after it.
+      git: stubGit(calls, { branches: ["agent/issue-42", null] }),
+      deadlineMs: 60_000,
+    });
+
+    const at = (prefix: string): number =>
+      calls.findIndex((call) => call.startsWith(prefix));
+    expect(at("git branch --force agent/issue-42 abc1234")).toBeGreaterThan(
+      at("the review's session"),
+    );
+    expect(at("git checkout --force agent/issue-42")).toBeGreaterThan(
+      at("the review's session"),
+    );
   });
 
   it("test_the_runner_makes_no_bare_ci_claim", async () => {

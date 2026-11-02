@@ -607,16 +607,84 @@ export interface ReviewOutcome {
   readonly findings: readonly string[];
   /** The CI line, when the runner read one. */
   readonly ciVerdict: string | null;
-  /**
-   * The head of the tree the review judged.
-   *
-   * The tree the reviewer read is the tree the verdict names, so the two are
-   * the same fact and are read once: the caller does not go looking for the
-   * head itself.
-   */
-  readonly reviewedSha: string;
   /** The tokens and the cost of the review, when the provider reported them. */
   readonly usage?: RunUsage;
+}
+
+/**
+ * The branch the worktree is on, or `null` when the worktree is detached.
+ *
+ * Git answers `HEAD` for a detached worktree, which is not a branch and is
+ * said here as what it is.
+ */
+async function currentBranch(git: GitRunner, cwd: string): Promise<string | null> {
+  const name = (await git(["rev-parse", "--abbrev-ref", "HEAD"], { cwd })).trim();
+  return name === "" || name === "HEAD" ? null : name;
+}
+
+/**
+ * Put the tree the review judged back.
+ *
+ * The tree goes back to the head the reviewer read, on the branch the reviewer
+ * read it on. The branch matters: a plain reset moves **whatever branch is
+ * checked out**, so a reviewer that checked out another branch would have that
+ * branch moved to the reviewed head — a branch the review never judged. So the
+ * branch the review judged is moved by name, and the branch the reviewer
+ * checked out is left where it is.
+ *
+ * The branch is detached first, because a branch that is checked out in a
+ * worktree cannot be moved.
+ */
+async function restoreTheTree(
+  git: GitRunner,
+  cwd: string,
+  head: string,
+  branch: string | null,
+): Promise<void> {
+  const now = await currentBranch(git, cwd);
+  if (now === branch) {
+    // The worktree is still on the branch the review judged: a reset moves
+    // that branch back to the head the review judged.
+    await restoreTree(git, cwd, head);
+    return;
+  }
+  await git(["checkout", "--force", "--detach", head], { cwd });
+  if (branch !== null) {
+    await git(["branch", "--force", branch, head], { cwd });
+    await git(["checkout", "--force", branch], { cwd });
+  }
+  await git(["clean", "-fd"], { cwd });
+}
+
+/**
+ * Put the tree the review judged back, and name the failure when it cannot.
+ *
+ * The session's failure and the restore's failure are one failure: the review
+ * did not happen, and the tree it did not judge is not back either. Both are
+ * named, because a reader who has one of them would not know of the other.
+ */
+async function putBackTheTree(options: {
+  readonly git: GitRunner;
+  readonly cwd: string;
+  /** The head the reviewer judged. */
+  readonly head: string;
+  /** The branch the review judged, when the worktree was on one. */
+  readonly branch: string | null;
+  /** The session's own failure, when the session failed. */
+  readonly sessionFailure?: unknown;
+}): Promise<void> {
+  try {
+    await restoreTheTree(options.git, options.cwd, options.head, options.branch);
+  } catch (restoreError) {
+    const because =
+      options.sessionFailure === undefined
+        ? ""
+        : `the review's session failed (${errorMessage(options.sessionFailure)}) and `;
+    throw new Error(
+      `${because}the review's tree could not be put back (${errorMessage(restoreError)})`,
+      { cause: options.sessionFailure ?? restoreError },
+    );
+  }
 }
 
 /**
@@ -680,7 +748,12 @@ export async function reviewPullRequest(options: {
   // The head is read **before** the session: a reviewer that committed
   // something of its own would have moved it, and the tree that is pushed has
   // to be the tree the reviewer judged.
+  //
+  // The branch is read too, for the same reason: the tree goes back on the
+  // branch the review judged, and not on whatever branch the reviewer left
+  // checked out.
   const reviewedHead = await headSha(options.git, options.cwd);
+  const reviewedBranch = await currentBranch(options.git, options.cwd);
 
   const session = await options.factory({
     cwd: options.cwd,
@@ -724,20 +797,24 @@ export async function reviewPullRequest(options: {
     // back to the tree the reviewer judged. A restore that fails is a tree
     // that cannot be pushed, and it is said so — the session's own failure
     // is named beside it.
-    try {
-      await restoreTree(options.git, options.cwd, reviewedHead);
-    } catch (restoreError) {
-      throw new Error(
-        `the review's session failed (${errorMessage(error)}) and the worktree could not be put back (${errorMessage(restoreError)})`,
-        { cause: error },
-      );
-    }
+    await putBackTheTree({
+      git: options.git,
+      cwd: options.cwd,
+      head: reviewedHead,
+      branch: reviewedBranch,
+      sessionFailure: error,
+    });
     throw error;
   }
 
   // The tree goes back to the tree the reviewer judged, whatever the session
   // left behind.
-  await restoreTree(options.git, options.cwd, reviewedHead);
+  await putBackTheTree({
+    git: options.git,
+    cwd: options.cwd,
+    head: reviewedHead,
+    branch: reviewedBranch,
+  });
 
   if (result.aborted) {
     // The same cut the work session reports; a review that did not finish is
@@ -791,7 +868,6 @@ export async function reviewPullRequest(options: {
     comment,
     findings: verdict.findings,
     ciVerdict: ciLine === null ? null : `${CI_BEFORE_RECOUNT}: ${ciLine}`,
-    reviewedSha: reviewedHead,
     ...(usage === undefined ? {} : { usage }),
   };
 }
@@ -2689,6 +2765,9 @@ async function runPlan(
               exhausted = true;
               return "fail";
             }
+            // The head the review is about to judge: the tree the reviewer
+            // reads is the tree the verdict names.
+            state.reviewedSha = await headSha(options.git, state.worktreePath);
             const reviewed = await reviewPullRequest({
               repo: options.repo,
               pullRequest: state.pullRequest,
@@ -2706,9 +2785,6 @@ async function runPlan(
             state.usage = addUsage(state.usage, reviewed.usage);
             state.findings = reviewed.findings;
             state.reviewCount += 1;
-            // The head the review judged: the tree the reviewer read, and the
-            // tree the verdict names.
-            state.reviewedSha = reviewed.reviewedSha;
             return reviewed.verdict;
           },
           fix: async () => {
