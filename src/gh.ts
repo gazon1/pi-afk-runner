@@ -197,20 +197,15 @@ export function pullRequestArgs(repo: string, branch: string): string[] {
  * deleted, so a merged pull request is still found after the merge mode
  * deleted the branch.
  */
-export function mergedPullRequestArgs(repo: string, branch: string): string[] {
+export function mergedPullRequestArgs(repo: string, issueNumber: number): string[] {
   return [
-    "pr",
-    "list",
+    "issue",
+    "view",
+    String(issueNumber),
     "--repo",
     repo,
-    "--head",
-    branch,
-    "--state",
-    "merged",
-    "--limit",
-    "1",
     "--json",
-    "number",
+    "closedByPullRequestsReferences",
   ];
 }
 
@@ -500,14 +495,17 @@ export async function readPullRequest(
  */
 export async function readMergedPullRequest(
   repo: string,
-  branch: string,
+  issueNumber: number,
   gh: GhRunner = runGh,
 ): Promise<number | null> {
-  const parsed: unknown = JSON.parse(await gh(mergedPullRequestArgs(repo, branch)));
-  if (!Array.isArray(parsed) || parsed.length === 0) {
+  const parsed = JSON.parse(await gh(mergedPullRequestArgs(repo, issueNumber))) as {
+    closedByPullRequestsReferences?: Array<{ number?: unknown }>;
+  };
+  const refs = parsed.closedByPullRequestsReferences;
+  if (!Array.isArray(refs) || refs.length === 0) {
     return null;
   }
-  const first = parsed[0] as Record<string, unknown> | null;
+  const first = refs[0];
   return typeof first?.number === "number" ? first.number : null;
 }
 
