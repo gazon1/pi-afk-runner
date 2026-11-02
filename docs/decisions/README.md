@@ -15,6 +15,7 @@ for the rule that the copies follow.
 
 | Decision | What it settles |
 |---|---|
+| `2026-11-05-the-sweep-works-several-issues-at-once.md` | the sweep works several issues at once: `--all --workers N`, the workers inside one sweep rather than several runners, the line that names its issue, and the git commands that are serialized |
 | `2026-11-05-the-pool-asks-the-engine-what-it-carries.md` | the pool on the Mastra engine: the catalogue it asks, the session that can be moved, and the level the file names — **supersedes** `2026-11-02-the-model-pool-is-a-file-the-host-owns.md` and `2026-11-02-the-file-names-the-effort-of-each-model.md`: the pool asks the engine what it carries, and the level is reported rather than applied |
 | `2026-11-05-the-engine-tells-the-model-when-a-turn-ends-on-a-tool.md` | the engine tells the model, between its steps, that the turn ends on a tool: the review's verdict is reached instead of being cut off by the step limit |
 | `2026-11-05-a-run-gates-nothing-and-builds-nothing.md` | a run gates nothing and builds nothing: the gates are off by default and the agent may not compile — **supersedes** `2026-11-05-the-workflow-runs-the-gates.md` |

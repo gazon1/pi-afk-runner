@@ -72,6 +72,25 @@ describe("the command line", () => {
   it("says that --all and --issue cannot be combined", () => {
     expect(() => parseArgs(["--all", "--issue", "42"])).toThrow("cannot be combined");
   });
+
+  it("reads how many issues --all works at once", () => {
+    const options = parseArgs(["--all", "--workers", "3"]);
+
+    expect(options.workers).toBe(3);
+  });
+
+  it("works one issue at a time when the command does not say otherwise", () => {
+    expect(parseArgs(["--all"]).workers).toBeUndefined();
+  });
+
+  it("says that --workers needs --all", () => {
+    // The workers are the sweep's: there is no queue to work without it.
+    expect(() => parseArgs(["--workers", "2"])).toThrow("needs --all");
+  });
+
+  it("says that the number of workers is a number", () => {
+    expect(() => parseArgs(["--all", "--workers", "many"])).toThrow("--workers must be a number");
+  });
 });
 
 describe("the gates a run runs", () => {
