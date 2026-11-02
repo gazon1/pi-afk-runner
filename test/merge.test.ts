@@ -736,4 +736,44 @@ describe("the merge pipeline", () => {
       await fixture.dispose();
     }
   });
+
+  it("test_a_stopped_merge_ends_at_the_next_step_and_lands_nothing", async () => {
+    const fixture = await createFixtureRepository({ files: { "scripts/setup-worktree.sh": SETUP } });
+    try {
+      await pushBranch(fixture);
+      const { gh, merged } = stubGh([reviewedPullRequest()]);
+      // The flag is asked once before the candidate and once before every
+      // step, so the third ask is the one that finds the stop: the worktree
+      // step ran, and the step after it does not.
+      let asks = 0;
+      const stopped = (): boolean => {
+        asks += 1;
+        return asks >= 3;
+      };
+
+      const result = await mergeReviewedPullRequests(options(fixture, gh, { stopped }));
+
+      // The pull request stays open and unlanded.
+      expect(result.merged).toEqual([]);
+      expect(merged).toEqual([]);
+      // The failure names the step the merge stopped at.
+      expect(result.failed[0]?.step).toBe("merge-sync");
+      expect(result.failed[0]?.message).toContain("stopped");
+
+      const record = await readFile(
+        join(
+          fixture.repo,
+          "build",
+          "diagnostics",
+          "merge",
+          "pr-7",
+          "2026-11-02T09-00-00-000Z-abcdef12.md",
+        ),
+        "utf8",
+      );
+      expect(record).toContain("merge-sync — stopped");
+    } finally {
+      await fixture.dispose();
+    }
+  });
 });
