@@ -11,9 +11,9 @@ and its CI say so.
 ## Status
 
 The runner works end to end: claim, worktree, agent, gates, push, pull request, review and re-count
-have been run against a real GitHub repository, unattended and through the live chat. It is not published
-to npm yet — attach it to a Pi session with `--extension`, or install it from a checkout. The plan
-and the specification live in the repository this runner operates on — see
+have been run against a real GitHub repository, unattended. It is not published to npm yet — build
+it from a checkout and run the command. The plan and the specification live in the repository this
+runner operates on — see
 [the change directory](https://github.com/gazon1/sing/tree/main/openspec/changes/afk-issue-agent-pipeline)
 and [the contract](https://github.com/gazon1/sing/blob/main/docs/architecture/afk-runner.md).
 
@@ -35,45 +35,32 @@ in `package.json` and in `.pi/settings.json`:
 
 | Component | Version | What it does |
 |---|---|---|
-| `pi-queue-steer-factory` | 0.17.11 | the steer queue: a human's correction, delivered at a turn boundary |
 | `@gotgenes/pi-permission-system` | 42.0.0 | the guard: what must never be touched |
+| `@mastra/core` | 1.81.0 | the Mastra engine: the agent, the workspace, the model gateway |
 
 Three things are irreducibly ours: the **exclusive claim** (a remote ref carrying a nonce — a
 label cannot be a lock, because adding one is idempotent), the **binding to the contract above**,
 and the **record** of a run.
 
-## Two things to know before running it
-
-**`--approve` is not optional.** Project-local packages load only when the project is trusted, and
-the trust is granted **per run** — there is no persistent trusted-project list. A session started
-without the flag loads the global packages and silently ignores `.pi/settings.json`.
-
-```bash
-pi --mode rpc --approve
-```
-
-**`pi list` does not show project-local packages.** It lists the user's. To see what this project
-actually depends on, read `.pi/settings.json`.
-
 ## The version gate
 
-An extension is code that runs inside the agent, against the agent's own API. When Pi changes that
-interface, an extension written against the old one does not fail loudly — it fails by doing the
-wrong thing.
+The runner drives Pi's SDK, against Pi's own API. When Pi changes that interface, a runner written
+against the old one does not fail loudly — it fails by doing the wrong thing.
 
-So the extension declares the range of Pi it was written for and **refuses to run outside it**. A
-runner that stops is recoverable; a runner that half-works is not.
+So the runner declares the range of Pi it was written for and **refuses to run outside it**. A
+runner that stops is recoverable; a runner that half-works is not. The gate runs before the first
+session is made, so a mismatched Pi is refused at the start of the run.
 
 ```ts
 import { assertInstalledPiVersion } from "pi-afk-runner";
 
-await assertInstalledPiVersion(); // throws PiVersionMismatch outside the pinned range
+assertInstalledPiVersion(); // throws PiVersionMismatch outside the pinned range
 ```
 
 ## Install
 
-The runner is a **Pi package**: Pi loads it, and the components it is built from are Pi packages
-too.
+The runner is a **command**: it takes the lock, works one issue — or, with `--all`, every eligible
+issue one after another — writes the record and gives the lock back.
 
 ### From a checkout
 
@@ -82,26 +69,17 @@ git clone <this repository> pi-afk-runner
 cd pi-afk-runner
 npm ci                 # install what the lockfile says
 npm run build          # compile, and copy the prompt files next to the module
-pi install -l --approve ./
+node dist/cli.js --checkout ~/work/singularity
 ```
 
-That last command registers the extension with the Pi in this directory. Pi reads
-`.pi/settings.json`, which lists the ten components the runner is built from, and loads them
-along with the extension itself.
-
-**`--approve` is not optional.** Project-local packages load only when the project is trusted, and
-the trust is granted **per run** — there is no persistent trusted-project list. A session started
-without the flag loads the global packages and silently ignores `.pi/settings.json`, and the
-runner's components are simply not there. `pi list` does not show project-local packages either; to
-see what this project actually depends on, read `.pi/settings.json`.
-
-### From npm, once it is published
-
-```bash
-pi install npm:pi-afk-runner
-```
+`npm link` puts the same command on the `PATH` as `pi-afk-runner`. The peer dependency
+`@earendil-works/pi-coding-agent` has to be installed next to it, because the runner drives Pi's
+SDK.
 
 ### What the install brings
+
+The work session runs in a **Pi session**, and the session discovers the packages the target
+repository declares in its own `.pi/settings.json`:
 
 | Package | What it does |
 |---|---|
@@ -109,7 +87,6 @@ pi install npm:pi-afk-runner
 | `pi-advisor-flow` | the executor/advisor flow |
 | `@quintinshaw/pi-dynamic-workflows` | the multi-step workflow |
 | `pi-lens` | live lint and format feedback inside the turn |
-| `pi-queue-steer-factory` | the steer queue behind the live chat's corrections |
 | `@gotgenes/pi-permission-system` | the guard: what must never be touched |
 | `agents-cron` | cron, isolated runs, the run store |
 | `@signalridge/pi-worktree` | the worktree |
@@ -137,8 +114,7 @@ repository without them fails at the worktree step, and nothing after it runs:
   comment — the issue's body. An issue with neither is refused rather than worked.
 
 A model has to resolve, too: `--model <provider/id>` names one; without it the CLI uses the first
-model of the first provider with a credential, and the live chat uses the model of the session it
-was started in.
+model of the first provider with a credential.
 
 ### The gates the runner runs
 
@@ -170,66 +146,7 @@ started, has no exit code, and the record does not claim one.
 could not run says so: `the gate just tcheck-evals could not run: just is not on this host` is
 not the same as a gate that refused the change.
 
-### From Pi — the live chat
-
-```bash
-pi install npm:pi-afk-runner          # or, from a checkout: pi install -l --approve ../pi-afk-runner
-cd /path/to/the/repository/you/want/to/work/in
-pi --approve
-```
-
-The extension loads with the session. It registers two commands:
-
-```
-/afk-runner-version              which Pi this is, and whether this extension supports it
-/afk-runner-run [--issue <N>]    work one issue, in a session this extension owns
-/afk-runner-stop                 stop the run under way
-/afk-runner-attach               open the run's session as this chat, history and all
-```
-
-`/afk-runner-run` takes the CLI's options, and two of them are defaults rather than
-requirements: the **repository** is the checkout's `origin` (start Pi in the repository you want
-worked), and the **model** is the one the session is already running on. `--repo` and `--model`
-override them.
-
-`/afk-runner-run` starts a run in the session the runner owns — a session whose `cwd` is the
-worktree, created by the same factory the CLI uses — and returns while it works. The footer then
-carries one line:
-
-```
-#42 · Fix the thing · session
-```
-
-which is the issue, its title, and the step the run has reached. The line is a session entry as well
-as a footer: open the session again and the line the run ended on is still there.
-
-Above the editor, six lines of the run itself — the agent's tool calls and the lines it says, as it
-says them — so a run can be watched from the session that started it:
-
-```
-→ bash: ./check.sh
-· The suite is red on the auth module; I will fix the fixture first.
-→ edit: shared/src/jvmTest/.../SecureSessionManagerTest.kt
-```
-
-While a run is under way, anything typed into the host session is **steering**: it is queued, and
-delivered into the work session at its next real boundary — after the assistant turn that is
-running, before the next model call. Images travel with it. Slash commands and `!` shell lines are
-left to the host session. One run at a time; a second `/afk-runner-run` says so.
-
-`/afk-runner-attach` is how a human gets into the work session: it is headless while it runs, but
-its transcript is a Pi session file, and the command switches this chat to it — the whole
-conversation, and you can carry on from it. It refuses while the agent is working (stop first, or
-wait for it to settle) and restores the worktree if the run's own cleanup already removed it.
-`/afk-runner-run` makes that same switch as soon as the work session exists, so the run can be
-watched from this chat; when the run's cleanup then removes the worktree the chat is sitting in, the
-run puts it back before it ends.
-
-`/afk-runner-stop` cuts the agent's turn the way the deadline does: the run fails where it stands
-and its failure path releases the claim and the worktree, while the branch keeps the commits it has.
-Killing the process instead leaves the claim to go stale.
-
-### From the CLI — unattended
+### The command — unattended
 
 ```bash
 pi-afk-runner --checkout ~/work/singularity          # --repo defaults to that checkout's origin
@@ -305,6 +222,25 @@ runner's own gates are not part of that rule: they run the whole list on every
 worked issue, because they are the run's own verdict and not the repository's
 hook. CI still gates landing in the merge mode.
 
+### The engines
+
+A run works on one of **two engines**, and the flag chooses:
+
+```bash
+pi-afk-runner --checkout ~/work/singularity                  # --engine pi, the default
+pi-afk-runner --checkout ~/work/singularity --engine mastra
+```
+
+**Pi** is the engine the runner has always used: Pi's own session, its own tools, its own
+model discovery. **Mastra** is the new one — a Mastra agent with Mastra's tools, its own
+memory and a Mastra model gateway (`--model provider/model`, the key from the
+environment). The two are the **same session** with two implementations: the run, the
+gates, the record and the contract do not know which engine is underneath.
+
+The Mastra engine's memory lives in the process for now, so a run that restarts loses
+its context. The Mastra module is loaded only when it is asked for, so a Pi run does not
+pay for it.
+
 ### What a run leaves behind
 
 - a branch `agent/issue-<N>` and a pull request on it, carrying a review that opens with
@@ -319,10 +255,7 @@ hook. CI still gates landing in the merge mode.
   log of what it printed beside it.
 
 The worktree itself is scratch and is removed when the run finishes, successful or not: the branch
-holds the work — unless this chat was switched into the run's session, in which case the worktree is
-put back first, because a chat whose working directory is gone can read nothing. A worktree that is
-put back is **prepared** as well: the repository's own `scripts/setup-worktree.sh` runs in it, so the
-gates work in it the way they work in a worktree the runner made. The claim label stays
+holds the work. The claim label stays
 on the issue until it closes — an issue without it is back in the
 queue — so the target repository's own workflow removes it on close
 (`.github/workflows/afk-label-cleanup.yml` in the repository this runner was written for).

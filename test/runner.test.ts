@@ -318,7 +318,7 @@ describe("the repository the run works", () => {
     };
 
     const options = await resolveRepo(
-      { checkout: "/checkout", remote: "origin", baseBranch: "main", lockDirectory: "/lock", worktreeRoot: "/wt", agentDirectory: "/agent", deadlineMs: 1, staleAfterMs: 1 },
+      { checkout: "/checkout", remote: "origin", baseBranch: "main", lockDirectory: "/lock", worktreeRoot: "/wt", agentDirectory: "/agent", engine: "pi", deadlineMs: 1, staleAfterMs: 1 },
       git,
     );
 
@@ -341,14 +341,14 @@ describe("the repository the run works", () => {
   it("keeps --repo when the command names one, and refuses a nameless origin", async () => {
     const git = async (): Promise<string> => "";
     const named = await resolveRepo(
-      { repo: "owner/name", checkout: "/c", remote: "origin", baseBranch: "main", lockDirectory: "/l", worktreeRoot: "/w", agentDirectory: "/a", deadlineMs: 1, staleAfterMs: 1 },
+      { repo: "owner/name", checkout: "/c", remote: "origin", baseBranch: "main", lockDirectory: "/l", worktreeRoot: "/w", agentDirectory: "/a", engine: "pi", deadlineMs: 1, staleAfterMs: 1 },
       git,
     );
     expect(named.repo).toBe("owner/name");
 
     await expect(
       resolveRepo(
-        { checkout: "/c", remote: "origin", baseBranch: "main", lockDirectory: "/l", worktreeRoot: "/w", agentDirectory: "/a", deadlineMs: 1, staleAfterMs: 1 },
+        { checkout: "/c", remote: "origin", baseBranch: "main", lockDirectory: "/l", worktreeRoot: "/w", agentDirectory: "/a", engine: "pi", deadlineMs: 1, staleAfterMs: 1 },
         git,
       ),
     ).rejects.toThrow("does not name a repository");

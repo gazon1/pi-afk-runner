@@ -1,6 +1,7 @@
 ---
 title: A prompt may only name a skill the runner carries
-status: accepted
+status: superseded
+superseded-by: 2026-11-05-the-run-runs-on-mastra
 date: 2026-11-02
 authors: MiniMax Code
 deciders: Singularity Developer

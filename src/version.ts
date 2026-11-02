@@ -1,15 +1,15 @@
 /**
- * The Pi version this extension is written against.
+ * The Pi version this runner is written against.
  *
  * Why this exists
  * ---------------
- * An extension is code that runs *inside* the agent, against the agent's own API. When Pi
- * changes its extension interface, an extension written against the old one does not fail
- * loudly — it fails by doing the wrong thing: a hook that no longer fires, a context field
- * that is now a different shape, a tool that is registered and never called.
+ * The runner drives Pi's SDK, against Pi's own API. When Pi changes that interface, a
+ * runner written against the old one does not fail loudly — it fails by doing the wrong
+ * thing: a hook that no longer fires, a context field that is now a different shape, a
+ * tool that is registered and never called.
  *
  * A runner that half-works against a different Pi is worse than one that stops. So the
- * extension declares the range it was written for and refuses to run outside it.
+ * runner declares the range of Pi it was written for and refuses to run outside it.
  *
  * The range is a conjunction of comparators — `">=1.4.0 <1.5.0"` — parsed by the small
  * comparator below rather than by a semver dependency: the grammar needed here is one line
@@ -19,7 +19,7 @@
 
 import { readFileSync } from "node:fs";
 
-/** The range of Pi versions this extension is written against. */
+/** The range of Pi versions this runner is written against. */
 export const PINNED_PI_RANGE = ">=1.4.0 <1.5.0";
 
 /** A parsed semantic version. */
@@ -39,7 +39,7 @@ export class PiVersionMismatch extends Error {
   constructor(installed: string, range: string) {
     super(
       `pi-afk-runner is written for Pi ${range}, and ${installed} is installed. ` +
-        `Refusing to run: an extension that half-works against a different Pi is worse than ` +
+        `Refusing to run: a runner that half-works against a different Pi is worse than ` +
         `one that stops.`,
     );
     this.name = "PiVersionMismatch";
@@ -173,12 +173,12 @@ export function checkPiVersion(
 ): VersionCheck {
   const version = parsePiVersion(installed);
   if (version === null) {
-    return { ok: false, reason: `\`${installed}\` is not a version this extension can compare` };
+    return { ok: false, reason: `\`${installed}\` is not a version this runner can compare` };
   }
   if (!satisfiesRange(version, range)) {
     return {
       ok: false,
-      reason: `Pi ${installed} is outside the range this extension is written for (${range})`,
+      reason: `Pi ${installed} is outside the range this runner is written for (${range})`,
     };
   }
   return { ok: true, reason: null };
@@ -198,7 +198,7 @@ export function assertPiVersion(
 }
 
 /**
- * The version of Pi this extension is running inside.
+ * The version of Pi this runner is driving.
  *
  * The SDK's own `package.json` is read rather than its exported `VERSION`, so that this module
  * stays importable — and testable — without loading the agent's own machinery. The SDK's
@@ -220,7 +220,7 @@ export function installedPiVersion(): string {
 }
 
 /**
- * The gate the extension and the CLI call before they do anything else.
+ * The gate the runner calls before it does anything else.
  *
  * It throws `PiVersionMismatch` when the installed Pi is outside the pinned range. That is the
  * whole point: a runner that stops is recoverable, and a runner that half-works is not.

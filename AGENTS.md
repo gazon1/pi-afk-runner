@@ -5,15 +5,15 @@ carry the detail.
 
 ## What this repository is
 
-A **Pi extension**: a package Pi loads, written in TypeScript, that takes an issue labelled
+A **command**: a TypeScript program, written against Pi's SDK, that takes an issue labelled
 `ready-for-agent`, works it in an isolated worktree, opens a pull request and has a second agent
 review it. **The work pipeline never merges**; landing is the separate, opt-in `--merge` mode, and
 it only lands what the work pipeline opened and reviewed.
 
 It is a **separate repository** from the one it operates on, on purpose — the target is a Kotlin
 Multiplatform application with its own gates, and a JavaScript toolchain inside it would put the
-extension's code under the app's gates. The reasoning is in
-[docs/decisions/2026-10-30-the-afk-runner-is-a-pi-extension.md](docs/decisions/2026-10-30-the-afk-runner-is-a-pi-extension.md).
+runner's code under the app's gates. The reasoning is in
+[docs/decisions/2026-11-05-the-runner-is-a-command-and-not-a-pi-extension.md](docs/decisions/2026-11-05-the-runner-is-a-command-and-not-a-pi-extension.md).
 
 ## Working here through the runner
 
@@ -34,6 +34,20 @@ files next to the module, and a package Pi loads that does not build is a packag
 
 **Do not run the target repository's gates here.** `./check.sh`, `just gate` and the Gradle build
 belong to the repository the runner operates on; there is no Gradle in this repository.
+
+## The engines
+
+A run works on one of **two engines**: Pi (`--engine pi`, the default) or Mastra
+(`--engine mastra`). They are the same session with two implementations, so the run,
+the gates, the record and the contract do not know which engine is underneath.
+
+The runner's own description of a tool is in `src/tools.ts` — one description, two
+adapters (`src/pi-tools.ts`, `src/mastra/tools.ts`). A tool written twice is a tool
+whose two copies drift. The same holds for the guard's rules (`src/guard.ts` holds the
+list; both engines apply it) and for the journal (`src/journal.ts` writes it).
+
+The decision is in
+[docs/decisions/2026-11-05-the-run-runs-on-mastra.md](docs/decisions/2026-11-05-the-run-runs-on-mastra.md).
 
 ## The contract comes first
 

@@ -58,9 +58,8 @@ describe("the path of an issue's worktree", () => {
   });
 
   it("is asked for by every place that creates, removes or restores the worktree", async () => {
-    // The runner's worktree step, its review path and the reclaim, and the
-    // live door that puts the worktree back.
-    for (const file of ["runner.ts", "claim.ts", "extension.ts"]) {
+    // The runner's worktree step, its review path and the reclaim.
+    for (const file of ["runner.ts", "claim.ts"]) {
       const source = await readFile(join(SOURCE, file), "utf8");
       expect(source, file).toContain("issueWorktreePath(");
     }

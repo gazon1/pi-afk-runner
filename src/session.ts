@@ -25,7 +25,6 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
 import {
@@ -41,6 +40,7 @@ import {
   type IssueDetail,
 } from "./gh.js";
 import { createLeftoverTool, normaliseTitle } from "./leftovers.js";
+import { defineTool, type ToolSpec } from "./tools.js";
 import {
   cutOffError,
   runStates,
@@ -442,7 +442,7 @@ export type SessionFactory = (options: {
   readonly cwd: string;
   readonly systemPromptSections: Record<string, string>;
   /** The tools the session is given — the verdict tool, for a review. */
-  readonly tools?: readonly ToolDefinition[];
+  readonly tools?: readonly ToolSpec[];
   /**
    * Told what a turn cost, when the provider reported it.
    *

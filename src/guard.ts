@@ -4,9 +4,8 @@
  * The mechanism is `@gotgenes/pi-permission-system`'s: it gates every tool call
  * and reads its policy from a file. What is ours is the **policy** — the files
  * nobody hands to an agent — and the fact that it is installed at all: the work
- * session discovers the host's extensions (that is where the model providers are)
- * and drops only this package's own, so the guard is named explicitly rather than
- * left to discovery.
+ * session discovers the host's extensions (that is where the model providers are),
+ * and the guard is named explicitly rather than left to discovery.
  *
  * The policy is a file because a file is the only way the guard accepts one.
  * It is written into the session's **project** scope, `<cwd>/.pi/...`, and not

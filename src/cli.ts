@@ -23,8 +23,8 @@
  */
 
 import { homedir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { dirname, join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
 import {
   DefaultResourceLoader,
@@ -39,6 +39,7 @@ import { readClaimed, readQueue, runGh, type GhRunner } from "./gh.js";
 import { guardExtensionPath, installGuardPolicy } from "./guard.js";
 import { runCommand, runGit, type CommandRunner, type GitRunner } from "./git.js";
 import { LockHeld, LockUnusable, lockNameFor, takeLock, workLockName } from "./lock.js";
+import { toPiTools } from "./pi-tools.js";
 import {
   mergeReviewedPullRequests,
   type MergeOptions,
@@ -59,6 +60,8 @@ import {
   type RunUsage,
   type SessionFactory,
 } from "./session.js";
+import { assertInstalledPiVersion } from "./version.js";
+import { assistantTextLines, describeToolCall } from "./journal.js";
 
 /** The run finished, or the queue was empty. */
 export const EXIT_OK = 0;
@@ -102,6 +105,15 @@ export const DEFAULT_STALE_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
  */
 export { DEFAULT_DEADLINE_MS };
 
+/**
+ * The agent engine a run works on.
+ *
+ * `pi` is the runner's own history — the engine the runner has always used.
+ * `mastra` is the new one, beside it. The flag chooses; the run itself does
+ * not know which engine it is on.
+ */
+export type Engine = "pi" | "mastra";
+
 /** What the command line says. */
 export interface CliOptions {
   /**
@@ -131,6 +143,8 @@ export interface CliOptions {
   readonly agentDirectory: string;
   /** The model the agent runs on — `provider/id`. */
   readonly model?: string;
+  /** The agent engine the run works on. */
+  readonly engine: Engine;
   /** Whether the target repository's pre-push hook may gate the pushes. */
   readonly verifyPushes?: boolean;
   /** Whether to look for related issues and work them in one batch. */
@@ -158,6 +172,7 @@ export const USAGE = [
   "  --worktree-root <path>  where the worktrees are created (default: <checkout>/../afk-worktrees)",
   "  --agent-dir <path>      Pi's agent directory (default: ~/.pi/agent)",
   "  --model <provider/id>   the model the agent runs on (default: the provider's first)",
+  "  --engine <pi|mastra>    the agent engine the run works on (default: pi)",
   "  --no-verify             skip the target repository's pre-push hook when pushing",
   "  --batch-related         look for related ready-for-agent issues and work them in one batch",
   `  --deadline-ms <n>       the ceiling on the run (default: ${DEFAULT_DEADLINE_MS})`,
@@ -232,6 +247,7 @@ export function parseArgs(argv: readonly string[]): CliOptions {
     process.env.PI_AGENT_DIR ??
     join(homedir(), ".pi", "agent");
   const model = values.get("model");
+  const engine = engineOf(values.get("engine"));
   const noVerify = values.has("no-verify");
   const batchRelated = values.has("batch-related");
   const deadlineMs = number(values.get("deadline-ms"), DEFAULT_DEADLINE_MS, "--deadline-ms");
@@ -249,11 +265,28 @@ export function parseArgs(argv: readonly string[]): CliOptions {
     worktreeRoot,
     agentDirectory,
     ...(model === undefined ? {} : { model }),
+    engine,
     ...(noVerify ? { verifyPushes: false } : {}),
     ...(batchRelated ? { batchRelated: true } : {}),
     deadlineMs,
     staleAfterMs,
   };
+}
+
+/**
+ * The engine the command names.
+ *
+ * The two names are the two engines the runner carries. A third name is a
+ * typo, and a typo that named an engine would quietly run the wrong one.
+ */
+function engineOf(value: string | undefined): Engine {
+  if (value === undefined) {
+    return "pi";
+  }
+  if (value !== "pi" && value !== "mastra") {
+    throw new Error(`--engine must name an engine, as pi or mastra — got ${value}`);
+  }
+  return value;
 }
 
 /**
@@ -347,23 +380,14 @@ export function useProxyFromEnvironment(env: NodeJS.ProcessEnv = process.env): b
  * every one of them is tagged, so no line of the stream reads as runner
  * output. A blank line carries nothing and is dropped.
  */
-export function assistantTextLines(text: string): string[] {
-  const lines: string[] = [];
-  for (const line of text.split("\n")) {
-    if (line.trim() !== "") {
-      lines.push(`· ${line}`);
-    }
-  }
-  return lines;
-}
+export { assistantTextLines } from "./journal.js";
 
 /**
  * The loader the session's resources come from.
  *
- * It is the SDK's own loader, with three things said: the guard's extension is
- * installed into the session, the runner's own skills are in its skill paths,
- * and this package's own extension is dropped from the set the loader
- * discovered.
+ * It is the SDK's own loader, with two things said: the guard's extension is
+ * installed into the session, and the runner's own skills are in its skill
+ * paths.
  */
 export function createResourceLoader(options: {
   readonly cwd: string;
@@ -389,10 +413,6 @@ export function createResourceLoader(options: {
     // every host — so a skill the runner depends on is a skill the runner
     // carries.
     additionalSkillPaths: [skillsDirectory()],
-    extensionsOverride: (loaded) => ({
-      ...loaded,
-      extensions: loaded.extensions.filter((extension) => !isOwnExtension(extension.path)),
-    }),
     extensionFactories: [
       {
         name: "afk-runner-guardrail",
@@ -478,12 +498,10 @@ export function createResourceLoader(options: {
  * "unknown" when the host has no default model saved — so the runner names
  * one, and says so when it cannot find any.
  *
- * The extension is installed **into the session**, not into the host's Pi — a
- * session the runner creates must not be steered by the extension that also
- * creates sessions. That is what `extensionsOverride` enforces: discovery stays
- * on, because the host's model providers are extensions and a session that
- * discovered nothing would have no model to run on, and **this** extension is
- * dropped by path before the session's runner is built.
+ * The extension is installed **into the session**, not into the host's Pi — the
+ * guardrail the runner needs has to be in the session, and the session the
+ * runner creates must not be steered by anything the host happens to have
+ * loaded.
  */
 export function piSessionFactory(options: {
   readonly agentDirectory: string;
@@ -492,6 +510,10 @@ export function piSessionFactory(options: {
   /** Told what the agent is doing, as it does it. */
   readonly onEvent?: (line: string) => void;
 }): SessionFactory {
+  // The Pi the runner drives has to be the Pi it was written for. A session
+  // that half-works against a different SDK is worse than a session that
+  // refuses to start, so the gate runs before the first one is made.
+  assertInstalledPiVersion();
   return async ({ cwd, systemPromptSections, tools, onUsage }) => {
     useProxyFromEnvironment();
     await installGuardPolicy({ cwd });
@@ -510,7 +532,7 @@ export function piSessionFactory(options: {
       // directory", not "the extensions of this one and the credentials of another".
       agentDir: options.agentDirectory,
       resourceLoader: loader,
-      ...(tools === undefined ? {} : { customTools: [...tools] }),
+      ...(tools === undefined ? {} : { customTools: toPiTools(tools) }),
     });
 
     // `session_start` is the host's event, and this session has no host: the SDK
@@ -532,44 +554,11 @@ export function piSessionFactory(options: {
   };
 }
 
-/** The name of the directory this package is installed in, whatever the install. */
-const OWN_PACKAGE = basename(dirname(dirname(fileURLToPath(import.meta.url))));
-
 /**
- * Whether a discovered extension is this package's own.
- *
- * It is decided by the **package**, not by the file: a host can have two copies
- * of this package installed (a project install and a global one), and the copy
- * the host activated is not necessarily the copy a work session discovers. A path
- * comparison would let the other copy in — and that copy's hooks would fire in
- * the session this package created.
- *
- * A synthetic path is not a package at all. It is the loader's name for an
- * extension that has no file — `<inline:...>` for the factory this package
- * registers, `builtin:...` for the SDK's own. `resolve()` turns one into a
- * path under the working directory, and the package name is then read off the
- * working directory's **parent**: on a CI runner the checkout sits at
- * `<repo>/<repo>`, so the parent is named after the package and the runner's own
- * inline factory was mistaken for a second copy of itself — and dropped, taking
- * the tool-call log with it.
- */
-export function isOwnExtension(path: string): boolean {
-  // A synthetic path names no file: `builtin:` for the SDK's own, `<...>` for
-  // the factory this package registers. The SDK's own rule, kept in step with
-  // it — the SDK does not export `isSyntheticPath`.
-  if (path.startsWith("builtin:") || path.startsWith("<")) {
-    return false;
-  }
-  // `<package>/dist/extension.js` from an install, `<package>/src/extension.ts` from source.
-  return basename(dirname(dirname(resolve(path)))) === OWN_PACKAGE;
-}
-
-/**
- * The run both front doors give the runner.
+ * The run the command gives the runner.
  *
  * Everything here comes from the command line or from the injected dependencies;
- * the doors differ only in how they report a run — a scheduler reads stdout, a
- * human reads the footer — so those callbacks are added by each door. One map,
+ * the callbacks — how a run reports itself — are added by the caller. One map,
  * because two maps of thirteen fields drift the first time a flag is added.
  */
 export function runOptionsFrom(
@@ -601,22 +590,12 @@ export function runOptionsFrom(
   };
 }
 
-/** One line about a tool call: the tool, and the command when there is one. */
-export function describeToolCall(event: { toolName: string; input?: unknown }): string {
-  const input = event.input;
-  const command =
-    typeof input === "object" &&
-    input !== null &&
-    "command" in input &&
-    typeof (input as { command: unknown }).command === "string"
-      ? (input as { command: string }).command
-      : undefined;
-  if (command === undefined) {
-    return event.toolName;
-  }
-  const first = command.split("\n")[0] ?? "";
-  return `${event.toolName}: ${first.length > 120 ? `${first.slice(0, 120)}…` : first}`;
-}
+/**
+ * One line about a tool call: the tool, and the command when there is one.
+ *
+ * It lives with the run's journal — the Mastra engine reads it too.
+ */
+export { describeToolCall };
 
 /**
  * The model the session runs on.
@@ -895,15 +874,32 @@ export async function main(
   process.on("SIGINT", interrupt);
   process.on("SIGTERM", interrupt);
 
-  const base =
+  const say = (line: string): void => {
+    process.stdout.write(`${line}\n`);
+  };
+
+  // The Pi engine is the default and the one the runner has always used; the
+  // Mastra engine sits beside it. Its module is loaded only when it is asked
+  // for, so a Pi run does not pay for it.
+  let mastra: SessionFactory | undefined;
+  const base: SessionFactory =
     dependencies.session ??
-    piSessionFactory({
-      agentDirectory: resolved.agentDirectory,
-      ...(resolved.model === undefined ? {} : { model: resolved.model }),
-      onEvent: (line) => {
-        process.stdout.write(`${line}\n`);
-      },
-    });
+    (resolved.engine === "mastra"
+      ? async (options) => {
+          if (mastra === undefined) {
+            const { mastraSessionFactory } = await import("./mastra/session.js");
+            mastra = mastraSessionFactory({
+              ...(resolved.model === undefined ? {} : { model: resolved.model }),
+              onEvent: say,
+            });
+          }
+          return mastra(options);
+        }
+      : piSessionFactory({
+          agentDirectory: resolved.agentDirectory,
+          ...(resolved.model === undefined ? {} : { model: resolved.model }),
+          onEvent: say,
+        }));
   const session: SessionFactory = async (options) => {
     const created = await base(options);
     active = created;
