@@ -124,6 +124,11 @@ once, for the whole sweep, and given back at the end; each issue it works also
 takes that issue's lock while it is being worked, so a hand-started `--issue
 <N>` run and the sweep cannot work the same issue at the same time.
 
+The unit works one issue at a time. An operator who wants the sweep to work
+several issues at once adds `--workers N` to the unit's arguments, and the
+number is the host's to choose: the workers share one host's CPU, its network
+and its model pool's limits.
+
 `TimeoutStartSec` is `infinity`. A sweep has no fixed length, so any finite
 value is a kill in the middle of one. Each issue's turn is still bounded by the
 runner's own budget: the session's share of it. The cost of the backstop being

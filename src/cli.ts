@@ -22,6 +22,7 @@
  * mode that lands the reviewed, green pull requests the work pipeline opened.
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -131,6 +132,14 @@ export interface CliOptions {
   readonly issue?: number;
   /** Work every eligible issue, one after another. Not with `--issue`. */
   readonly all?: boolean;
+  /**
+   * How many issues a sweep works at once.
+   *
+   * Absent when the command did not name it: a sweep then works one issue at a
+   * time, the way it always has. The issues are still worked one by one — each
+   * one to the end of its journey — but several of them are in flight at once.
+   */
+  readonly workers?: number;
   /** Land the reviewed, green pull requests the work pipeline opened. */
   readonly merge?: boolean;
   /** The checkout the worktree is made from. */
@@ -193,6 +202,37 @@ export function errorMessage(failure: unknown): string {
 }
 
 /**
+ * The issue the line being written belongs to.
+ *
+ * A sweep that works several issues at once writes them all to one stream, and
+ * a line that does not say which issue it is about is a line nobody can read.
+ * The context travels with the run, so the line is written where it belongs.
+ */
+const issueContext = new AsyncLocalStorage<number>();
+
+/**
+ * The line as the reader sees it: it names the issue it belongs to.
+ *
+ * A sweep with one worker names nothing — the lines were never mixed, and the
+ * journal looks the way it always has.
+ */
+function tagged(text: string): string {
+  const issue = issueContext.getStore();
+  return issue === undefined ? text : `issue ${issue} — ${text}`;
+}
+
+/**
+ * The run of one issue, in the context that names it.
+ *
+ * One worker at a time needs no context: nothing else is writing to the
+ * stream, so a line that does not name its issue is still a line a reader can
+ * place.
+ */
+async function inIssue<T>(issue: number, workers: number, run: () => Promise<T>): Promise<T> {
+  return workers > 1 ? issueContext.run(issue, run) : run();
+}
+
+/**
  * The options the command reads, as citty reads them.
  *
  * One list: the command line, the usage and the runner's own options are the
@@ -203,6 +243,7 @@ export const ARGS = {
   repo: { type: "string", description: "the repository the issue lives in (default: the checkout's origin)" },
   issue: { type: "string", description: "the issue to work (default: the queue's first eligible one)" },
   all: { type: "boolean", description: "work every eligible issue, one after another" },
+  workers: { type: "string", description: "how many issues --all works at once (default: 1)" },
   merge: { type: "boolean", description: "land the reviewed, green pull requests the runner opened" },
   checkout: { type: "string", description: "the checkout the worktree is made from (default: the cwd)" },
   remote: { type: "string", description: "the remote the base comes from (default: origin)" },
@@ -271,6 +312,11 @@ export function parseArgs(argv: readonly string[]): CliOptions {
   if (merge && (all || issue !== undefined)) {
     throw new Error("--merge is its own mode; it cannot be combined with --all or --issue");
   }
+  const workersText = text(parsed["workers"]);
+  const workers = workersText === undefined ? undefined : positiveNumber(workersText, "--workers");
+  if (workers !== undefined && !all) {
+    throw new Error("--workers works the whole queue, so it needs --all");
+  }
   const checkout = resolve(text(parsed["checkout"]) ?? process.cwd());
   const remote = text(parsed["remote"]) ?? "origin";
   const baseBranch = text(parsed["base"]) ?? "main";
@@ -292,6 +338,7 @@ export function parseArgs(argv: readonly string[]): CliOptions {
     ...(repo === undefined ? {} : { repo }),
     ...(issue === undefined ? {} : { issue }),
     ...(all ? { all: true } : {}),
+    ...(workers === undefined ? {} : { workers }),
     ...(merge ? { merge: true } : {}),
     checkout,
     remote,
@@ -845,20 +892,24 @@ export async function main(
   // is an issue nobody can take. The signal becomes the stop the deadline already
   // uses: the session is aborted, its step fails, and the failure path releases.
   let stopped = false;
-  let active: AgentSession | null = null;
+  // Every session that is alive: a sweep that works several issues at once has
+  // one per issue, and a stop cuts them all.
+  const active = new Set<AgentSession>();
   const interrupt = (): void => {
     if (stopped) {
       // A second signal is somebody insisting; the release is best effort.
       process.exit(130);
     }
     stopped = true;
-    void active?.abort().catch(() => {});
+    for (const session of active) {
+      void session.abort().catch(() => {});
+    }
   };
   process.on("SIGINT", interrupt);
   process.on("SIGTERM", interrupt);
 
   const say = (line: string): void => {
-    process.stdout.write(`${line}\n`);
+    process.stdout.write(`${tagged(line)}\n`);
   };
 
   // The provider is reached through the proxy when there is one — the SDK's own
@@ -900,22 +951,39 @@ export async function main(
       ...options,
       ...(chosen === undefined ? {} : { model: chosen.reference }),
     });
-    active = created;
-    if (chosen === undefined || !chosen.pooled || injected) {
-      return created;
-    }
+    // The session is tracked while it lives: a stop cuts every session that is
+    // running, and a sweep that works several issues at once has one per issue.
     const move = created.setModel;
+    const tracked: AgentSession = {
+      prompt: (text) => created.prompt(text),
+      abort: () => created.abort(),
+      dispose: () => {
+        active.delete(tracked);
+        created.dispose();
+      },
+      get messages(): readonly TurnMessage[] {
+        return created.messages ?? [];
+      },
+      get reference(): string | undefined {
+        return created.reference;
+      },
+      ...(move === undefined ? {} : { setModel: (reference: string) => move(reference) }),
+    };
+    active.add(tracked);
+    if (chosen === undefined || !chosen.pooled || injected) {
+      return tracked;
+    }
     if (move === undefined) {
       throw new Error(
         "the session cannot be moved onto another model — the model pool needs it",
       );
     }
     const host: PoolHost = {
-      prompt: (text) => created.prompt(text),
-      abort: () => created.abort(),
-      dispose: () => created.dispose(),
+      prompt: (text) => tracked.prompt(text),
+      abort: () => tracked.abort(),
+      dispose: () => tracked.dispose(),
       get messages(): readonly TurnMessage[] | undefined {
-        return created.messages;
+        return tracked.messages;
       },
       setModel: (reference) => move(reference),
     };
@@ -939,7 +1007,7 @@ export async function main(
     poolEvents,
     onStep: (record) => {
       const detail = record.detail === "" ? "" : ` — ${record.detail}`;
-      process.stdout.write(`[${record.step}] ${record.outcome}${detail}\n`);
+      process.stdout.write(`${tagged(`[${record.step}] ${record.outcome}${detail}`)}\n`);
     },
     stopped: () => stopped,
   };
@@ -977,7 +1045,7 @@ export async function main(
       });
     }
     if (resolved.all === true) {
-      return await sweep(run, resolved.repo);
+      return await sweep(run, resolved.repo, resolved.workers ?? 1);
     }
     const outcome = await work(run, resolved.issue);
     if (outcome.result !== undefined) {
@@ -1003,8 +1071,19 @@ export async function main(
  * The lock belongs to the caller and is held for the whole sweep. An issue
  * that is not worked counts against the sweep, so the code never says the
  * queue was drained while an issue was left in it.
+ *
+ * **Several workers.** The issues are still worked one by one — each one to
+ * the end of its journey — but with `--workers N` there are N of them in
+ * flight at once. Each takes the lock of the issue it works, so the workers
+ * do not meet on the same issue; the sweep's own lock still keeps two sweeps
+ * apart. A line names the issue it belongs to, because the workers write to
+ * one stream.
  */
-async function sweep(runOptions: RunOptions, repo: string): Promise<number> {
+async function sweep(
+  runOptions: RunOptions,
+  repo: string,
+  workers: number,
+): Promise<number> {
   let issues: readonly { readonly number: number }[];
   try {
     issues = [
@@ -1026,28 +1105,49 @@ async function sweep(runOptions: RunOptions, repo: string): Promise<number> {
   let stoppedEarly = false;
   let noModel = false;
   const results: RunResult[] = [];
-  for (const issueNumber of numbers) {
-    // A human who stopped the run stopped the sweep, not one issue of it.
-    if (runOptions.stopped?.() === true) {
-      stoppedEarly = true;
-      break;
+  // The issues the workers have not taken yet: the list is worked by number,
+  // and every worker takes the next one that is free.
+  let next = 0;
+
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      // No model is left: the sweep stops, not only this worker.
+      if (noModel) {
+        return;
+      }
+      const issueNumber = numbers[next];
+      next += 1;
+      if (issueNumber === undefined) {
+        return;
+      }
+      // A human who stopped the run stopped the sweep, not one issue of it.
+      if (runOptions.stopped?.() === true) {
+        stoppedEarly = true;
+        return;
+      }
+      const outcome = await inIssue(issueNumber, workers, () =>
+        work({ ...runOptions, issueNumber }, issueNumber),
+      );
+      if (outcome.code === EXIT_NO_MODEL) {
+        // No model is left: the next issue would fail the same way, and a sweep
+        // that fails every issue in the queue is not a sweep.
+        noModel = true;
+        return;
+      }
+      if (outcome.result !== undefined) {
+        // One line per issue: a sweep is a journal.
+        results.push(outcome.result);
+        process.stdout.write(`${sweepIssueLine(outcome.result)}\n`);
+      }
+      if (outcome.code !== EXIT_OK && firstFailure === 0) {
+        firstFailure = outcome.code;
+      }
     }
-    const outcome = await work({ ...runOptions, issueNumber }, issueNumber);
-    if (outcome.code === EXIT_NO_MODEL) {
-      // No model is left: the next issue would fail the same way, and a sweep
-      // that fails every issue in the queue is not a sweep.
-      noModel = true;
-      break;
-    }
-    if (outcome.result !== undefined) {
-      // One line per issue: a sweep is a journal.
-      results.push(outcome.result);
-      process.stdout.write(`${sweepIssueLine(outcome.result)}\n`);
-    }
-    if (outcome.code !== EXIT_OK && firstFailure === 0) {
-      firstFailure = outcome.code;
-    }
-  }
+  };
+
+  await Promise.all(
+    Array.from({ length: Math.min(workers, numbers.length) }, () => worker()),
+  );
   process.stdout.write(`${sweepTotal(results, numbers.length)}\n`);
   if (noModel) {
     process.stderr.write("the sweep stopped: no model was available\n");
@@ -1099,12 +1199,15 @@ async function work(
     // The run finished: the caller says what it did.
     return { code: EXIT_OK, result };
   } catch (failure) {
+    // The lines below that do not name their issue are named by the context
+    // they are written in: a sweep with several workers writes them all to one
+    // stream.
     if (failure instanceof LockHeld) {
-      process.stderr.write(`${failure.message}\n`);
+      process.stderr.write(`${tagged(failure.message)}\n`);
       return { code: EXIT_LOCKED };
     }
     if (failure instanceof LockUnusable) {
-      process.stderr.write(`${failure.message}\n`);
+      process.stderr.write(`${tagged(failure.message)}\n`);
       return { code: EXIT_NO_LOCK };
     }
     // No model is not a step that failed: it is a reason there was no step to
@@ -1112,14 +1215,14 @@ async function work(
     // error, so the cause is looked for.
     const noModel = causeOf(failure, (error) => error instanceof NoModelAvailable);
     if (noModel !== null) {
-      process.stderr.write(`${noModel.message}\n`);
+      process.stderr.write(`${tagged(noModel.message)}\n`);
       return { code: EXIT_NO_MODEL };
     }
     if (failure instanceof RunFailed) {
-      process.stderr.write(`${failure.message}\n`);
+      process.stderr.write(`${tagged(failure.message)}\n`);
       return { code: STEP_EXIT_CODES[failure.step] ?? 1 };
     }
-    process.stderr.write(`${errorMessage(failure)}\n`);
+    process.stderr.write(`${tagged(errorMessage(failure))}\n`);
     return { code: 1 };
   }
 }

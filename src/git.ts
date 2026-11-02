@@ -785,13 +785,28 @@ export async function fetchCommit(
   }
 }
 
-/** Bring one ref's objects down from the remote. */
+/** The fetches of this process, one after another. */
+let fetchQueue: Promise<unknown> = Promise.resolve();
+
+/**
+ * Bring one ref's objects down from the remote.
+ *
+ * The fetch of one checkout is **one at a time**. The ref it updates — the
+ * remote-tracking one — belongs to the checkout and not to the run, and two
+ * fetches that want it at the same time make the second one fail with
+ * "cannot lock ref". The workers of one sweep share the checkout, so they
+ * take turns.
+ */
 export async function fetchRef(
   git: GitRunner,
   cwd: string,
   options: { readonly remote: string; readonly ref: string },
 ): Promise<void> {
-  await git(["fetch", options.remote, options.ref], { cwd });
+  const fetch = fetchQueue.then(() => git(["fetch", options.remote, options.ref], { cwd }));
+  // The queue goes on even when a fetch fails: the next one is not this one's
+  // business.
+  fetchQueue = fetch.catch(() => {});
+  await fetch;
 }
 
 /**
@@ -799,8 +814,55 @@ export async function fetchRef(
  *
  * The branch is created here, on the base the claim recorded, so the work
  * starts from exactly the commit the claim was taken against.
+ *
+ * The worktrees of one checkout are made **one at a time**. `git worktree add`
+ * writes the registration before it creates the directory, and `git worktree
+ * prune` — which a finished run calls — removes a registration whose directory
+ * is not there yet. The workers of one sweep share the checkout, so they take
+ * turns.
  */
 export async function addWorktree(
+  git: GitRunner,
+  cwd: string,
+  options: {
+    readonly path: string;
+    readonly branch: string;
+    readonly baseSha: string;
+  },
+): Promise<void> {
+  await alone(() => addWorktreeNow(git, cwd, options));
+}
+
+/**
+ * Put a worktree on a commit, detached.
+ *
+ * The worktrees of one checkout are made **one at a time**, this one included:
+ * it writes the registration before it creates the directory, and a `prune`
+ * from another worker would delete it.
+ */
+export async function addDetachedWorktree(
+  git: GitRunner,
+  cwd: string,
+  options: { readonly path: string; readonly sha: string },
+): Promise<void> {
+  await alone(() =>
+    git(["worktree", "add", "--detach", options.path, options.sha], { cwd }),
+  );
+}
+
+/** The worktree commands of this process, one after another. */
+let worktreeQueue: Promise<unknown> = Promise.resolve();
+
+/** Run a command of the checkout on its own. */
+async function alone<T>(run: () => Promise<T>): Promise<T> {
+  const next = worktreeQueue.then(run);
+  // The queue goes on even when a command fails: the next one is not this one's
+  // business.
+  worktreeQueue = next.catch(() => {});
+  return next;
+}
+
+async function addWorktreeNow(
   git: GitRunner,
   cwd: string,
   options: {
@@ -851,6 +913,14 @@ export async function addWorktree(
  * its commits alone, so the work a failed run did is durable.
  */
 export async function removeWorktree(
+  git: GitRunner,
+  cwd: string,
+  path: string,
+): Promise<void> {
+  await alone(() => removeWorktreeNow(git, cwd, path));
+}
+
+async function removeWorktreeNow(
   git: GitRunner,
   cwd: string,
   path: string,
