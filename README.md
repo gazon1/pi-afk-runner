@@ -151,6 +151,7 @@ checkEveryMs: 300000
 models:
   - model: fake/beam
     priority: 100
+    effort: high
   - model: fake/proxied
     priority: 90
     proxy: true
@@ -167,6 +168,9 @@ models:
 A fuller example is in [`models.example.yaml`](models.example.yaml).
 
 - `priority` — the bigger number is preferred; the order of the file settles a tie.
+- `effort` — the level the model thinks at: `off`, `minimal`, `low`, `medium`, `high`, `xhigh` or
+  `max`. A model without it runs at the level the SDK gives it, and a level the model does not have
+  becomes the nearest one it has.
 - `peak` — the hours the model is at its peak tariff. A model in its peak hours is **not used**:
   the pool moves to the next one. `timezone` says where those hours are counted — the host's own
   when it is absent.
@@ -176,8 +180,8 @@ A fuller example is in [`models.example.yaml`](models.example.yaml).
   direct.
 - `checkEveryMs` — how often the pool is looked at again. Five minutes by default.
 
-`--show-pool` says what the file means **now**: every model, why it would be used, and why it would
-not. It is a question, not a run — nothing is worked and no lock is taken.
+`--show-pool` says what the file means **now**: every model, the level it thinks at, why it would be
+used, and why it would not. It is a question, not a run — nothing is worked and no lock is taken.
 
 The runner moves between the pool's models on its own:
 

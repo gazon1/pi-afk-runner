@@ -26,6 +26,7 @@ import {
   pickPoolModel,
   readPool,
   windowHolds,
+  type EffortLevel,
   type Pool,
   type PooledModel,
 } from "../src/pool.js";
@@ -83,6 +84,7 @@ class FakeRuntime {
 class FakeHost {
   readonly prompts: string[] = [];
   readonly models: string[] = [];
+  readonly efforts: EffortLevel[] = [];
   messages: readonly { role: string; stopReason: string; errorMessage?: string }[] = [];
 
   private turn = 0;
@@ -112,6 +114,10 @@ class FakeHost {
 
   async setModel(model: PooledModel): Promise<void> {
     this.models.push(model.id);
+  }
+
+  setThinkingLevel(level: EffortLevel): void {
+    this.efforts.push(level);
   }
 }
 
@@ -167,6 +173,21 @@ describe("the model pool", () => {
     );
   });
 
+  it("reads_the_effort_a_model_thinks_at_out_of_the_file", () => {
+    const pool = parsePool(
+      "models:\n  - model: fake/beam\n    priority: 100\n    effort: high\n  - model: fake/spare\n    priority: 50\n",
+    );
+
+    expect(pool.models[0]?.effort).toBe("high");
+    // A model the file says nothing about keeps the level the SDK gives it.
+    expect(pool.models[1]?.effort).toBeUndefined();
+
+    // A mistyped level that is ignored is a model that thinks at the wrong
+    // level, and nothing would say so.
+    expect(() => parsePool("models:\n  - model: fake/beam\n    effort: hign\n")).toThrow(/effort/);
+    expect(() => parsePool("models:\n  - model: fake/beam\n    effort: 3\n")).toThrow(/effort/);
+  });
+
   it("counts_the_peak_hours_in_the_model_own_timezone", () => {
     const model = {
       reference: "deepseek/deepseek-chat",
@@ -215,13 +236,15 @@ describe("the model pool", () => {
 
   it("says_what_the_file_means_now", () => {
     const pool = parsePool(
-      "models:\n  - model: fake/beam\n    priority: 100\n  - model: fake/spare\n    priority: 50\n    peak: ['00:00-23:59']\n",
+      "models:\n  - model: fake/beam\n    priority: 100\n    effort: high\n  - model: fake/spare\n    priority: 50\n    peak: ['00:00-23:59']\n",
     );
 
     const lines = describePool(pool, { now: new Date("2026-11-02T10:00:00Z") });
 
     expect(lines[0]).toContain("fake/beam");
     expect(lines[0]).toContain("it would be used");
+    // The host has to see the level its file names, or the file is a secret.
+    expect(lines[0]).toContain("effort high");
     expect(lines[1]).toContain("fake/spare");
     expect(lines[1]).toContain("peak");
   });
@@ -284,6 +307,52 @@ describe("a session in the pool", () => {
     expect(host.prompts).toEqual(["do the work", "do the work"]);
     expect(host.models).toEqual(["spare"]);
     expect(session.reference).toBe("fake/spare");
+    session.dispose();
+  });
+
+  it("runs_a_model_at_the_effort_the_file_names", async () => {
+    const runtime = new FakeRuntime(["fake/beam", "fake/spare"]);
+    const host = new FakeHost(["commandcode API error (429): RATE_LIMITED", null]);
+    const session = new PoolSession({
+      host,
+      runtime: runtime.runtime,
+      pool: parsePool(
+        "models:\n  - model: fake/beam\n    priority: 100\n    effort: high\n  - model: fake/spare\n    priority: 50\n    effort: low\n",
+      ),
+      reference: "fake/beam",
+      state: newPoolState(),
+      proxyConfigured: true,
+    });
+
+    // The session starts on the model the file names, at the level it names.
+    expect(host.efforts).toEqual(["high"]);
+
+    await session.prompt("do the work");
+
+    // And the model it moves to runs at its own level.
+    expect(host.efforts).toEqual(["high", "low"]);
+    session.dispose();
+  });
+
+  it("leaves_the_level_alone_when_the_file_does_not_name_one", async () => {
+    const runtime = new FakeRuntime(["fake/beam", "fake/spare"]);
+    const host = new FakeHost(["commandcode API error (429): RATE_LIMITED", null]);
+    const session = new PoolSession({
+      host,
+      runtime: runtime.runtime,
+      pool: parsePool(
+        "models:\n  - model: fake/beam\n    priority: 100\n  - model: fake/spare\n    priority: 50\n",
+      ),
+      reference: "fake/beam",
+      state: newPoolState(),
+      proxyConfigured: true,
+    });
+
+    await session.prompt("do the work");
+
+    // The file did not say, so the runner did not say either: the SDK's own
+    // level for the model stands.
+    expect(host.efforts).toEqual([]);
     session.dispose();
   });
 

@@ -13,8 +13,27 @@
 import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 
-import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import type { AgentSession, ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { parse as parseYaml } from "yaml";
+
+/**
+ * The level a model thinks at — the SDK's own levels.
+ *
+ * The list is the SDK's, taken from its own type: the runner does not invent
+ * levels the SDK would refuse.
+ */
+export type EffortLevel = Parameters<AgentSession["setThinkingLevel"]>[0];
+
+/** The levels a file may name. */
+const EFFORT_LEVELS = [
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+] as const satisfies readonly EffortLevel[];
 
 /** One model in the pool. */
 export interface PoolModel {
@@ -22,6 +41,13 @@ export interface PoolModel {
   readonly reference: string;
   /** The bigger number is preferred. */
   readonly priority: number;
+  /**
+   * The level the model thinks at.
+   *
+   * Absent when the file does not say: the model runs at the level the SDK
+   * gives it, and the SDK knows what its own models can do.
+   */
+  readonly effort?: EffortLevel;
   /**
    * The proxy this model's requests go through.
    *
@@ -180,7 +206,7 @@ function parseModel(entry: unknown, index: number, source: string): PoolModel {
     throw new Error(`${source}: model ${index} is not a mapping`);
   }
   for (const key of Object.keys(entry)) {
-    if (!["model", "priority", "proxy", "peak", "timezone"].includes(key)) {
+    if (!["model", "priority", "proxy", "peak", "timezone", "effort"].includes(key)) {
       throw new Error(`${source}: model ${index} has a key the pool does not know: ${key}`);
     }
   }
@@ -190,6 +216,7 @@ function parseModel(entry: unknown, index: number, source: string): PoolModel {
   }
   const priority =
     entry.priority === undefined ? 0 : numberOf(entry.priority, `model ${index} priority`, source);
+  const effort = effortOf(entry.effort, index, source);
   const proxy = proxyOf(entry.proxy, index, source);
   const peak = peakOf(entry.peak, index, source);
   for (const window of peak) {
@@ -200,10 +227,31 @@ function parseModel(entry: unknown, index: number, source: string): PoolModel {
   return {
     reference,
     priority,
+    ...(effort === undefined ? {} : { effort }),
     proxy,
     peak,
     ...(timezone === undefined ? {} : { timezone }),
   };
+}
+
+/**
+ * The level one model thinks at.
+ *
+ * A level the SDK does not know is refused when the file is read: a mistyped
+ * `effort: hign` that is ignored is a model that thinks at the wrong level,
+ * and nothing would say so.
+ */
+function effortOf(value: unknown, index: number, source: string): EffortLevel | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  const level = stringOf(value, `model ${index} effort`, source);
+  if (!(EFFORT_LEVELS as readonly string[]).includes(level)) {
+    throw new Error(
+      `${source}: model ${index} effort must be one of ${EFFORT_LEVELS.join(", ")} — got ${level}`,
+    );
+  }
+  return level as EffortLevel;
 }
 
 /**
@@ -458,7 +506,8 @@ export function describePool(pool: Pool, choice: PoolChoice = {}): readonly stri
         : reasons.length === 0
           ? "it would not be used"
           : reasons.join(", ");
-    lines.push(`${model.reference} — priority ${model.priority} — ${why}`);
+    const effort = model.effort === undefined ? "" : ` — effort ${model.effort}`;
+    lines.push(`${model.reference} — priority ${model.priority}${effort} — ${why}`);
   }
   if (chosen === undefined) {
     lines.push("no model can be used right now");

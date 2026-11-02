@@ -19,6 +19,7 @@ for the rule that the copies follow.
 | `2026-11-01-only-a-gone-session-is-swallowed.md` | which failures the front door swallows, and which ones it lets out |
 | `2026-11-04-the-record-quotes-the-tail-and-names-the-log.md` | what the record quotes of a gate's output, and where the whole of it is |
 | `2026-11-02-the-model-pool-is-a-file-the-host-owns.md` | the model pool: the file the host owns, the models in it, when the runner moves between them, and each model's own proxy |
+| `2026-11-02-the-file-names-the-effort-of-each-model.md` | the level each model in the pool thinks at, and who says it |
 | `2026-11-01-the-self-review-runs-the-gates-again.md` | the self-review runs the gates again, and the agent's work is pushed only when they are green — **superseded** by the runner running the gates itself |
 | `2026-10-30-the-host-lock-is-a-real-flock.md` | the host lock, and why the runner is a Linux tool |
 | `2026-11-01-the-lock-is-per-issue.md` | the lock's unit: one per issue, one for the sweep, one for merge |
