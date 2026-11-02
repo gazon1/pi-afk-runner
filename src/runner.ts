@@ -1480,27 +1480,40 @@ export interface RunOptions {
 }
 
 /** What a run did. */
-export interface RunResult {
-  /** The issue the run worked, or null when it worked none. */
-  readonly issue: number | null;
-  /**
-   * What the run did with the issue.
-   *
-   * `skipped` and `split` are finished runs: the triage or the scope turn
-   * decided the issue is not one run's work, the run closed it, and the queue
-   * moves on. Neither is a failure.
-   */
-  readonly outcome: "completed" | "empty" | "unworkable" | "skipped" | "split";
-  readonly steps: readonly StepRecord[];
-  /** Where the record was written. */
-  readonly record: string;
-  /** The derived state that made a named issue unworkable. */
-  readonly derivedState?: DerivedState;
-  /** Why the issue was skipped or split, when it was. */
-  readonly reason?: string;
-  /** The parent issues that are still open, when that is why the issue waits. */
-  readonly blockedBy?: readonly number[];
-}
+export type RunResult =
+  | {
+      /** The issue the run worked, or null when it worked none. */
+      readonly issue: number | null;
+      readonly outcome: "completed";
+      readonly steps: readonly StepRecord[];
+      /** Where the record was written. */
+      readonly record: string;
+    }
+  | {
+      readonly issue: null;
+      readonly outcome: "empty";
+      readonly steps: readonly StepRecord[];
+      readonly record: string;
+    }
+  | {
+      readonly issue: number | null;
+      readonly outcome: "unworkable";
+      readonly steps: readonly StepRecord[];
+      readonly record: string;
+      /** Why the issue could not be worked. */
+      readonly reason: string;
+      /** The parent issues that are still open, when that is why the issue waits. */
+      readonly blockedBy?: readonly number[];
+    }
+  | {
+      readonly issue: number | null;
+      readonly outcome: "skipped" | "split";
+      readonly steps: readonly StepRecord[];
+      readonly record: string;
+      /** Why the issue was skipped or split. */
+      readonly reason?: string;
+      readonly blockedBy?: readonly number[];
+    };
 
 /**
  * Why an issue could not be worked, in the words the front doors say.
@@ -1508,7 +1521,7 @@ export interface RunResult {
  * One mapping, so the CLI and the live door say the same thing about the
  * same derived state.
  */
-export function unworkableReason(derivedState: DerivedState | undefined): string {
+export function unworkableReason(derivedState: DerivedState): string {
   switch (derivedState) {
     case "Claimed":
       return "it is held by another runner";
@@ -1516,8 +1529,15 @@ export function unworkableReason(derivedState: DerivedState | undefined): string
       return "already reviewed";
     case "Counted":
       return "already counted";
-    default:
-      return "check whether it is claimed by another runner, already reviewed, or already counted";
+    case "Queue":
+    case "Orphaned":
+    case "Pushed":
+    case "Opened":
+      throw new Error("not an unworkable state");
+    default: {
+      const _exhaustive: never = derivedState;
+      throw new Error(`unworkable reason missing for state ${String(_exhaustive)}`);
+    }
   }
 }
 
@@ -1836,6 +1856,7 @@ export async function runOnce(options: RunOptions): Promise<RunResult> {
         outcome: "unworkable",
         steps: [],
         record: "",
+        reason: "the issue could not be read, or it turned out to hold nothing to work",
       };
     }
     return { issue: null, outcome: "empty", steps: [], record: "" };
@@ -1846,7 +1867,7 @@ export async function runOnce(options: RunOptions): Promise<RunResult> {
       outcome: "unworkable",
       steps: [],
       record: "",
-      derivedState: planOrUnworkable.derivedState,
+      reason: unworkableReason(planOrUnworkable.derivedState),
       ...(planOrUnworkable.blockedBy === undefined
         ? {}
         : { blockedBy: planOrUnworkable.blockedBy }),

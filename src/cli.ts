@@ -44,7 +44,7 @@ import {
   type MergeOptions,
   type MergeResult,
 } from "./merge.js";
-import { RunFailed, blockedReason, runOnce, type RunOptions, unworkableReason } from "./runner.js";
+import { RunFailed, blockedReason, runOnce, type RunOptions } from "./runner.js";
 import { skillsDirectory, type AgentSession, type SessionFactory } from "./session.js";
 
 /** The run finished, or the queue was empty. */
@@ -838,7 +838,7 @@ async function work(runOptions: RunOptions, namedIssue: number | undefined): Pro
     } else if (result.outcome === "unworkable") {
       const issueNum = result.issue ?? namedIssue;
       const reason =
-        blockedReason(result.blockedBy) ?? unworkableReason(result.derivedState);
+        blockedReason(result.blockedBy) ?? result.reason;
       process.stderr.write(
         `issue ${issueNum} could not be worked — ${reason}\n`,
       );
