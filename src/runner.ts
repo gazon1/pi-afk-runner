@@ -309,14 +309,41 @@ export async function prepareWorktree(
     baseSha: options.baseSha,
   });
 
-  await run({
-    command: "bash",
-    args: [SETUP_SCRIPT],
-    cwd: options.worktreePath,
-  });
+  const reason = await prepareWorktreeSetup(run, options.worktreePath);
+  if (reason !== null) {
+    throw new Error(reason);
+  }
 
   return { path: options.worktreePath, branch };
 }
+
+/**
+ * Run the repository's own setup script in a worktree, from that worktree's own
+ * copy, and answer with the reason it could not run, or null when it did.
+ *
+ * Every worktree-maker calls this; what a caller does with a failure is its
+ * own (failing the run, or reporting it as a limit).
+ */
+export async function prepareWorktreeSetup(
+  run: CommandRunner,
+  worktreePath: string,
+): Promise<string | null> {
+  try {
+    await run({
+      command: "bash",
+      args: [SETUP_SCRIPT],
+      cwd: worktreePath,
+    });
+    return null;
+  } catch (failure) {
+    return errorMessage(failure);
+  }
+}
+
+/** Alias kept for callers that name the preparation by its effect. */
+export const prepareWorktreeScript = prepareWorktreeSetup;
+export const runWorktreeSetup = prepareWorktreeSetup;
+export const setupWorktree = prepareWorktreeSetup;
 
 /** The tool that computes a change's contract digest — the repository's own. */
 export const DIGEST_TOOL = "scripts/check-review-verdicts.py";
@@ -2123,11 +2150,10 @@ export async function checkoutPullRequestBranch(options: {
   await options.git(["worktree", "add", "--detach", options.worktreePath, sha], {
     cwd: options.checkout,
   });
-  await options.run({
-    command: "bash",
-    args: [SETUP_SCRIPT],
-    cwd: options.worktreePath,
-  });
+  const reason = await prepareWorktreeSetup(options.run, options.worktreePath);
+  if (reason !== null) {
+    throw new Error(reason);
+  }
   return sha;
 }
 
