@@ -467,6 +467,7 @@ async function mergeOne(
       subject: "pull request",
       ...(options.onStep === undefined ? {} : { onStep: options.onStep }),
       ...(options.onStepStart === undefined ? {} : { onStepStart: options.onStepStart }),
+      ...(options.stopped === undefined ? {} : { stopped: options.stopped }),
       release: async () => {
         await removeWorktree(options.git, options.checkout, worktreePath);
       },
