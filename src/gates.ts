@@ -156,17 +156,19 @@ function gateFailureMessage(options: {
   if (options.reason === "unfinished") {
     return `the gate ${options.gate} did not finish: ${options.detail ?? "it was killed"}`;
   }
-  const said = firstLine(options.output);
+  const said = lastLine(options.output);
   const how = options.exitCode === undefined ? "failed" : `failed (exit ${options.exitCode})`;
   return said === ""
     ? `the gate ${options.gate} ${how}`
     : `the gate ${options.gate} ${how}: ${said}`;
 }
 
-/** The first line of what a gate printed. */
-function firstLine(text: string): string {
-  for (const line of text.split("\n")) {
-    if (line.trim() !== "") {
+/** The last non-empty line of what a gate printed. */
+function lastLine(text: string): string {
+  const lines = text.split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i];
+    if (line !== undefined && line.trim() !== "") {
       return line.trim();
     }
   }
