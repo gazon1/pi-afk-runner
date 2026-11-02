@@ -295,9 +295,24 @@ function follow(
     }
     controller.observe(at.observe);
     if (at.boundary !== null) {
-      void controller.dispatch(at.boundary).catch(() => {});
+      void controller.dispatch(at.boundary).catch((failure: unknown) => {
+      if (!isStaleContext(failure)) {
+        console.error(`afk-runner: the queue dispatch failed: ${errorMessage(failure)}`);
+      }
+    });
     }
   });
+}
+
+/**
+ * A host session that has gone away — retired after a session switch or a
+ * reload — reports its failure with the host's wording about a stale context.
+ * That wording is the host's contract for a gone session; the runner recognises
+ * it and keeps such a failure quiet, because a human who has moved on does not
+ * need to be told the door cannot write to the old session.
+ */
+export function isStaleContext(failure: unknown): boolean {
+  return errorMessage(failure).toLowerCase().includes("stale");
 }
 
 export function liveFrontDoor(
@@ -337,9 +352,12 @@ export function liveFrontDoor(
         pi.appendEntry(RUN_STATUS_ENTRY, run.status);
       }
       ctx.ui.setStatus(STATUS_KEY, run.status === null ? undefined : statusLine(run.status));
-    } catch {
+    } catch (failure) {
       // A session switch deactivates the runner this context was made for. The run
       // goes on, and the line is restored from the entry when the session is opened.
+      if (!isStaleContext(failure)) {
+        throw failure;
+      }
     }
   };
 
@@ -360,8 +378,12 @@ export function liveFrontDoor(
     }
     try {
       ctx.ui.setWidget(LOG_KEY, [...log], { placement: "aboveEditor" });
-    } catch {
-      // The session is gone; the record on disk still has the run.
+    } catch (failure) {
+      // The session is gone; the record on disk still has the run. A failure of
+      // the door's own is seen, but the run keeps going to the next boundary.
+      if (!isStaleContext(failure)) {
+        talk(ctx, `afk-runner: the log widget failed: ${errorMessage(failure)}`, "error");
+      }
     }
   };
 
@@ -385,8 +407,11 @@ export function liveFrontDoor(
   ): void => {
     try {
       ctx.ui.notify(message, kind);
-    } catch {
+    } catch (failure) {
       // The session is gone. Its record, not its footer, is what survives.
+      if (!isStaleContext(failure)) {
+        throw failure;
+      }
     }
   };
 
@@ -490,7 +515,13 @@ export function liveFrontDoor(
           last.transcript = transcript;
           talk(ctx, `afk-runner: the run's transcript is ${transcript}`, "info");
           if (hostContext !== null) {
-            autoAttach = attach(hostContext, true).catch(() => {});
+            autoAttach = attach(hostContext, true).catch((failure: unknown) => {
+            if (!isStaleContext(failure)) {
+              if (hostContext !== null) {
+                talk(hostContext, `afk-runner: the auto-attach failed: ${errorMessage(failure)}`, "error");
+              }
+            }
+          });
           }
         }
       },
@@ -598,8 +629,11 @@ export function liveFrontDoor(
         }
         try {
           ctx.ui.setWidget(LOG_KEY, undefined);
-        } catch {
-          // The session is gone; so is its log.
+        } catch (failure) {
+          // The session is gone; so is its log. A failure of the door's own is seen.
+          if (!isStaleContext(failure)) {
+            talk(ctx, `afk-runner: the log widget failed: ${errorMessage(failure)}`, "error");
+          }
         }
         await lock.release();
       }
@@ -679,7 +713,11 @@ export function liveFrontDoor(
     const targetSession = workSession ?? session;
     if (targetSession !== null && working) {
       stopped = true;
-      void targetSession.abort().catch(() => {});
+      void targetSession.abort().catch((failure: unknown) => {
+      if (!isStaleContext(failure)) {
+        console.error(`afk-runner: the abort failed: ${errorMessage(failure)}`);
+      }
+    });
     }
   };
 
