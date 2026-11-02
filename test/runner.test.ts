@@ -422,13 +422,58 @@ describe("the reason an issue could not be worked", () => {
     expect(unworkableReason("Counted")).toBe("already counted");
   });
 
-  it("falls back to the check when the state says nothing", () => {
-    expect(unworkableReason(undefined)).toBe(
-      "check whether it is claimed by another runner, already reviewed, or already counted",
-    );
-    expect(unworkableReason("Queue")).toBe(
-      "check whether it is claimed by another runner, already reviewed, or already counted",
-    );
+  it("throws for states that are not unworkable", () => {
+    expect(() => unworkableReason("Queue")).toThrow();
+  });
+
+  it("says that the issue waits for a parent that has not landed", async () => {
+    // The named issue waits: its parent is open and nothing of the parent's
+    // work has landed.
+    const gh = async (args: readonly string[]): Promise<string> => {
+      if (args[0] === "issue" && args[1] === "view" && args[2] === "2") {
+        return JSON.stringify({ closedByPullRequestsReferences: [] });
+      }
+      if (args[0] === "issue" && args[1] === "view") {
+        return JSON.stringify({
+          body: "**Depends on:** #2",
+          comments: [],
+          state: "OPEN",
+          title: "the child",
+          updatedAt: "2026-11-02T08:00:00Z",
+          labels: [],
+        });
+      }
+      if (args[0] === "pr" && args[1] === "list") {
+        return "[]";
+      }
+      return "";
+    };
+
+    const result = await runOnce({
+      repo: "gazon1/sing",
+      issueNumber: 42,
+      checkout: "/tmp/does-not-matter",
+      remote: "origin",
+      baseBranch: "main",
+      worktreeRoot: "/tmp/does-not-matter",
+      git: async () => "",
+      gh,
+      run: async () => "",
+      session: async () => {
+        throw new Error("the run should not have reached a session");
+      },
+      deadlineMs: 60_000,
+      staleAfterMs: 60_000,
+      now: new Date("2026-11-02T09:00:00Z"),
+    });
+
+    expect(result.outcome).toBe("unworkable");
+    if (result.outcome !== "unworkable") {
+      throw new Error("the issue was not unworkable");
+    }
+    // The reason is the parent, not a guess about the state.
+    expect(result.reason).toContain("#2");
+    expect(result.blockedBy).toEqual([2]);
   });
 });
 
