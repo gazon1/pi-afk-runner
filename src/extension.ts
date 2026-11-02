@@ -49,6 +49,7 @@ import { RUN_STATUS_ENTRY, statusFromEntries, statusLine, type RunStatus } from 
 import {
   RunFailed,
   SETUP_SCRIPT,
+  prepareWorktreeSetup,
   blockedReason,
   newRunId,
   runOnce,
@@ -819,18 +820,8 @@ export function liveFrontDoor(
      * The repository's own preparation, run from the worktree's own copy of the
      * script — the script works on the checkout it lives in.
      */
-    const prepare = async (): Promise<string | null> => {
-      try {
-        await command({
-          command: "bash",
-          args: [SETUP_SCRIPT],
-          cwd: targetPath,
-        });
-        return null;
-      } catch (failure) {
-        return errorMessage(failure);
-      }
-    };
+    const prepare = async (): Promise<string | null> =>
+      prepareWorktreeSetup(command, targetPath);
 
     await prune();
     if (existsSync(targetPath)) {
