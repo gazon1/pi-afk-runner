@@ -130,7 +130,7 @@ larger than the value. An explicit `--no-verify` still wins.
 
 ## Links
 
-- `src/workflow.ts` — the two scripts, `runWorkSession`, and `runReviewGate`.
+- `src/workflow/work-session.ts` and `src/workflow/review-gate.ts` — the two scripts, `runWorkSession`, and `runReviewGate`.
 - `src/session.ts` — the triage and scope tools, the action nodes, and the split.
 - `src/prompts/00-triage.md`, `src/prompts/00-scope.md` — the two decisions.
 - `src/runner.ts` — the dependency check, the small-change rule, and the loop.

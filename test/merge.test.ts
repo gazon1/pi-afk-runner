@@ -19,10 +19,10 @@ import {
   type MergeOptions,
 } from "../src/merge.js";
 import {
-  VERDICT_TOOL_NAME,
   type AgentSession,
   type SessionFactory,
 } from "../src/session.js";
+import { VERDICT_TOOL_NAME } from "../src/decisions/index.js";
 import { createFixtureRepository, gitOutput } from "./git-sandbox.js";
 
 /** The stand-in for the repository's own setup script. */

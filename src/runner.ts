@@ -38,19 +38,21 @@ import { GateFailed, runGates } from "./gates.js";
 import {
   UNTRUSTED_INPUT_RULE,
   UNTRUSTED_INPUT_SECTION,
-  VERDICT_TOOL_NAME,
   addUsage,
   briefFence,
-  createVerdictTool,
   cutOffMessage,
   runPromptArray,
   startAgent,
   type PromptArrayResult,
-  type ReviewVerdict,
   type RunUsage,
   type Scheduler,
   type SessionFactory,
 } from "./session.js";
+import {
+  VERDICT_TOOL_NAME,
+  createVerdictTool,
+  type ReviewVerdict,
+} from "./decisions/index.js";
 import {
   CommandFailed,
   addWorktree,
@@ -89,7 +91,7 @@ import {
   type IssueSummary,
   type PullRequestSummary,
 } from "./gh.js";
-import { FixChangedNothing, ReviewStatedNoVerdict, cutOffError, runReviewGate } from "./workflow.js";
+import { FixChangedNothing, ReviewStatedNoVerdict, cutOffError, runReviewGate } from "./workflow/index.js";
 import type { Lock } from "./lock.js";
 
 /** The states that can be derived from the observables. */

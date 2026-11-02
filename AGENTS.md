@@ -42,17 +42,22 @@ and the contract do not know what the engine is underneath — the seam is the s
 (`AgentSession`, `SessionFactory` in `src/session.ts`).
 
 The runner's own description of a tool is in `src/tools.ts`, and the engine's object
-over it is in `src/mastra/tools.ts`. The guard's rules are in `src/guard.ts` and the
+over it is in `src/mastra/tools.ts`. The tools a turn ends on — the triage's decision,
+the scope's decision, the related issues to batch, the review's verdict — are in
+`src/decisions/`, one decision per file. The guard's rules are in `src/guard.ts` and the
 engine applies them (`src/mastra/guard.ts`); the journal is in `src/journal.ts`. One
 description, one carrier, one spelling: a rule written twice is a rule whose two copies
 drift.
 
-The **graph** — the states a session moves through — is the runner's own TypeScript
-(`src/workflow.ts`). It is not an engine's: the rules of the run (the deadline, the
-stop, the cut-off, the review loop) are the runner's own.
+The **graph** — the states a session moves through — runs on Mastra's workflow engine
+(`@mastra/core/workflows`). It is a set of components in `src/workflow/`: the states,
+the tokens the branch is keyed by, the errors, the step that runs one state, the
+straight line, the work session, the review loop. The engine carries the states, the
+branch and the loop; the rules of the run (the deadline, the stop, the cut-off) stay the
+runner's own.
 
 The decision is in
-[docs/decisions/2026-11-05-pi-is-gone.md](docs/decisions/2026-11-05-pi-is-gone.md).
+[docs/decisions/2026-11-06-the-graph-runs-on-the-mastra-workflow-engine.md](docs/decisions/2026-11-06-the-graph-runs-on-the-mastra-workflow-engine.md).
 
 ## A run gates nothing and builds nothing
 
