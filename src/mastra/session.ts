@@ -22,6 +22,29 @@ import { skillDirectories } from "./skills.js";
 /** The thread the run's turns are kept in. */
 const THREAD = "afk-runner";
 
+/**
+ * How many LLM steps a turn may take.
+ *
+ * Mastra's own default is five, and five is too few for a turn that reads the
+ * tree: the model spends its steps on `cat` and `grep` and never reaches the
+ * tool that ends the turn. A review that runs out of steps says nothing, and a
+ * run that reads nothing is not a run.
+ *
+ * The deadline is the real bound — an abort ends the turn whatever this says.
+ */
+const MAX_STEPS = 40;
+
+/**
+ * How many steps the model may take before the session tells it to finish.
+ *
+ * A turn that reads the tree does not stop by itself: the model finds one more
+ * file to look at, and one more after that. The engine's step limit ends such a
+ * turn with nothing decided — the review that read everything and said
+ * nothing is a review without a verdict. Telling the model, between its steps,
+ * that the turn ends with a tool is what makes it end.
+ */
+const FINAL_TOOL_AFTER_STEPS = 8;
+
 /** The message a failed turn leaves behind. */
 function failedTurn(failure: unknown): TurnMessage {
   return {
@@ -86,6 +109,8 @@ export async function createMastraSession(options: {
   readonly systemPromptSections: Record<string, string>;
   /** The runner's tools. */
   readonly tools?: readonly ToolSpec[];
+  /** The tool the turn must end on — the verdict tool, for a review. */
+  readonly finalTool?: string;
   /** Told what a turn cost, when the provider reported it. */
   readonly onUsage?: (usage: RunUsage) => void;
   /** Told what the agent is doing, as it does it. */
@@ -104,16 +129,48 @@ export async function createMastraSession(options: {
   let messages: TurnMessage[] = [];
   let running: AbortController | null = null;
 
+  // Whether the turn's own final tool has been called already. The engine's
+  // step hook sees one iteration at a time, so the answer is carried here.
+  let finalToolCalled = false;
+
   return {
     async prompt(text: string): Promise<void> {
       const controller = new AbortController();
       running = controller;
+      finalToolCalled = false;
       try {
         const answer = await agent.generate(text, {
           abortSignal: controller.signal,
+          // A turn that reads the tree needs more than Mastra's five steps.
+          maxSteps: MAX_STEPS,
           // The memory is what carries a turn into the next one: the work
           // session is one conversation.
           memory: { thread: THREAD, resource: cwd },
+          // The model that reads forever is told, between its steps, that the
+          // turn ends with a tool. Without this the turn is cut off by the
+          // step limit, and a review that read everything and decided nothing
+          // is a review without a verdict.
+          ...(options.finalTool === undefined
+            ? {}
+            : {
+                onIterationComplete: (context: {
+                  iteration: number;
+                  toolCalls: { readonly name: string }[];
+                }) => {
+                  if (context.toolCalls.some((call) => call.name === options.finalTool)) {
+                    finalToolCalled = true;
+                    return undefined;
+                  }
+                  if (finalToolCalled || context.iteration < FINAL_TOOL_AFTER_STEPS) {
+                    return undefined;
+                  }
+                  return {
+                    feedback:
+                      `You have read enough. Stop exploring and call the ${options.finalTool} ` +
+                      "tool now, with the verdict you reached and the findings you found.",
+                  };
+                },
+              }),
         });
         logTurn(answer, options.onEvent);
         const usage = usageOf(answer);

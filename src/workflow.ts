@@ -245,11 +245,22 @@ async function runState(
 export async function runStates(options: {
   readonly states: readonly WorkflowState[];
   readonly run: TurnRunner;
+  /**
+   * A state the run says it does not need is not run.
+   *
+   * The answer is asked before the state runs, so a state that depends on what
+   * the earlier states did — a second chance, given only when the first one
+   * did not do its job — is skipped or not, and the run says which.
+   */
+  readonly skip?: (state: WorkflowState) => boolean;
 }): Promise<StatesResult> {
   const completed: WorkflowState[] = [];
   uniqueNames(options.states);
 
   for (const state of options.states) {
+    if (options.skip?.(state) === true) {
+      continue;
+    }
     try {
       await runState(state, options.run, completed);
     } catch (error) {

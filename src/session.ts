@@ -400,6 +400,16 @@ export type SessionFactory = (options: {
   /** The tools the session is given — the verdict tool, for a review. */
   readonly tools?: readonly ToolSpec[];
   /**
+   * The tool the turn must end on.
+   *
+   * A turn that reads the tree can go on for as long as it likes: the model
+   * finds something else to look at, and the turn ends when the engine cuts it
+   * off — with nothing decided. The engine that can push the model between its
+   * steps is told which tool ends the turn, and says so when the model has read
+   * enough.
+   */
+  readonly finalTool?: string;
+  /**
    * Told what a turn cost, when the provider reported it.
    *
    * The **events** the session emits carry the usage, and the factory is the
@@ -674,6 +684,14 @@ export async function runPromptArray(options: {
    * `skip`, the scope's `fits` or `split`. A turn without one returns `ok`.
    */
   readonly after?: (state: WorkflowState) => string;
+  /**
+   * A state the run says it does not need is not run.
+   *
+   * Asked before each turn: a turn that is only needed when the earlier ones
+   * did not do their job — the second chance a review gets when it stated no
+   * verdict — is skipped when the run says so.
+   */
+  readonly skip?: (state: WorkflowState) => boolean;
 }): Promise<PromptArrayResult> {
   const schedule = options.schedule ?? defaultScheduler;
   let aborted = false;
@@ -764,7 +782,11 @@ export async function runPromptArray(options: {
   try {
     const result = branched
       ? await runWorkSession({ nodes, run })
-      : await runStates({ states: nodes, run });
+      : await runStates({
+          states: nodes,
+          run,
+          ...(options.skip === undefined ? {} : { skip: options.skip }),
+        });
     const completed = result.completed.filter((state) => state.counts).length;
     return { completed, total, aborted: aborted || result.aborted, cutReason, abortError };
   } catch (error) {
@@ -1296,7 +1318,10 @@ export function createVerdictTool(holder: { value?: ReviewVerdict }) {
         verdict: params.verdict,
         findings: params.findings,
       };
-      holder.value = verdict;
+      // The first verdict stands. A review that ends on the tool and then gets
+      // asked for the verdict again must not change what it already decided:
+      // the review is one verdict, and the comment the runner posts is one.
+      holder.value ??= verdict;
       return {
         content: [
           {

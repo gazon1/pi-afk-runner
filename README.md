@@ -235,11 +235,17 @@ record says what cut it off. A review that still fails leaves its finding on
 the issue and fails the run: the claim is released, the branch and the pull
 request stay, and the next run continues them.
 
+A review that **stated no verdict** — the reviewer answered, but never called
+the verdict tool — gets a second turn in the same session: it is told what is
+missing and ends the review with the verdict it reached. A review that already
+stated its verdict ends there, and the first verdict stands: a second one
+cannot change it.
+
 A **small change** — a few files, a few dozen lines — skips the repository's
 pre-push hook; an explicit `--no-verify`, or its absence, decides the rest. The
-runner's own gates are not part of that rule: they run the whole list on every
-worked issue, because they are the run's own verdict and not the repository's
-hook. CI still gates landing in the merge mode.
+runner's own gates are not part of that rule: a run that was told to run them runs
+the whole list on every worked issue, because they are the run's own verdict and
+not the repository's hook. CI still gates landing in the merge mode.
 
 ### The engine
 

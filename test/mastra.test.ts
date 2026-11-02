@@ -360,6 +360,73 @@ describe("the session of the Mastra engine", () => {
     }
   });
 
+  it("tells the model to end the turn when it has read enough", async () => {
+    // A model that reads forever has to be told, between its steps, that the
+    // turn ends with a tool. Without the words, the step limit ends the turn
+    // with nothing decided — and a review that decided nothing is no review.
+    const cwd = await mkdtemp(join(tmpdir(), "afk-worktree-"));
+    const seen: string[] = [];
+    const reader = {
+      specificationVersion: "v2",
+      provider: "test",
+      modelId: "test-model",
+      supportedUrls: {},
+      async doGenerate(options: { prompt: unknown }) {
+        seen.push(JSON.stringify(options.prompt));
+        return toolTurn("agent_test", { value: "read" }, `call-${seen.length}`);
+      },
+      async doStream(): Promise<never> {
+        throw new Error("the mock model does not stream");
+      },
+    } as unknown as MastraModel;
+    const session = await createMastraSession({
+      model: reader,
+      cwd,
+      systemPromptSections: {},
+      tools: [specOf()],
+      finalTool: "agent_verdict",
+    });
+    try {
+      await session.prompt("review the change");
+      expect(seen.some((prompt) => prompt.includes("You have read enough"))).toBe(true);
+    } finally {
+      session.dispose();
+    }
+  });
+
+  it("does not tell the model to end the turn it already ended", async () => {
+    // The tool that ends the turn was called: there is nothing to say about
+    // it any more.
+    const cwd = await mkdtemp(join(tmpdir(), "afk-worktree-"));
+    const seen: string[] = [];
+    const finisher = {
+      specificationVersion: "v2",
+      provider: "test",
+      modelId: "test-model",
+      supportedUrls: {},
+      async doGenerate(options: { prompt: unknown }) {
+        seen.push(JSON.stringify(options.prompt));
+        return toolTurn("agent_verdict", { value: "pass" }, `call-${seen.length}`);
+      },
+      async doStream(): Promise<never> {
+        throw new Error("the mock model does not stream");
+      },
+    } as unknown as MastraModel;
+    const session = await createMastraSession({
+      model: finisher,
+      cwd,
+      systemPromptSections: {},
+      tools: [specOf({ name: "agent_verdict" })],
+      finalTool: "agent_verdict",
+    });
+    try {
+      await session.prompt("review the change");
+      expect(seen.some((prompt) => prompt.includes("You have read enough"))).toBe(false);
+    } finally {
+      session.dispose();
+    }
+  });
+
   it("carries the turn on when a tool refuses the call", async () => {
     // A refusal is not a crash: the runner's own bound — the split that is too
     // small, the leftover that is already open — is a refusal, and the model

@@ -1909,6 +1909,121 @@ describe("the review", () => {
     expect(calls.filter((call) => call.startsWith("gh pr comment"))).toHaveLength(1);
   });
 
+  it("test_a_review_that_stated_no_verdict_gets_a_second_turn", async () => {
+    // A reviewer that stops in the middle of the review — it says what it is
+    // about to do and ends its turn there — has decided nothing. The run gives
+    // it one more turn, in the same session, and the verdict that comes out of
+    // it is the review.
+    const turns: string[] = [];
+    const factory = async (options: {
+      cwd: string;
+      systemPromptSections: Record<string, string>;
+      tools?: readonly unknown[];
+    }): Promise<AgentSession> => ({
+      async prompt(text: string) {
+        turns.push(text);
+        // The first turn ends without the verdict tool.
+        if (turns.length === 1) {
+          return;
+        }
+        const tool = options.tools?.[0] as {
+          execute: (id: string, params: unknown) => Promise<unknown>;
+        };
+        await tool.execute("call-1", { verdict: "pass", findings: ["nothing blocking"] });
+      },
+      async abort() {},
+      dispose() {},
+    });
+
+    const outcome = await reviewPullRequest({
+      repo: "gazon1/sing",
+      pullRequest: 1040,
+      cwd: "/tmp/does-not-matter",
+      factory: factory as never,
+      gh: async () => "",
+      run: async () => "",
+      git: stubGit(),
+      deadlineMs: 60_000,
+    });
+
+    // Two turns: the review, and the turn that gave it a verdict.
+    expect(turns).toHaveLength(2);
+    expect(turns[1]).toContain("did not end with a verdict");
+
+    // And the review ends with the verdict, not with a failure.
+    expect(outcome.verdict).toBe("pass");
+    expect(outcome.comment).toContain("**Verdict:** pass");
+  });
+
+  it("test_a_review_that_reached_its_verdict_does_not_take_the_second_turn", async () => {
+    // The second turn is a second chance, not an extra turn: a review that
+    // stated its verdict ends there, and the turn is not spent.
+    let turns = 0;
+    const factory = async (options: {
+      cwd: string;
+      systemPromptSections: Record<string, string>;
+      tools?: readonly unknown[];
+    }): Promise<AgentSession> => ({
+      async prompt() {
+        turns += 1;
+        const tool = options.tools?.[0] as {
+          execute: (id: string, params: unknown) => Promise<unknown>;
+        };
+        await tool.execute("call-1", { verdict: "pass", findings: [] });
+      },
+      async abort() {},
+      dispose() {},
+    });
+
+    const outcome = await reviewPullRequest({
+      repo: "gazon1/sing",
+      pullRequest: 1040,
+      cwd: "/tmp/does-not-matter",
+      factory: factory as never,
+      gh: async () => "",
+      run: async () => "",
+      git: stubGit(),
+      deadlineMs: 60_000,
+    });
+
+    expect(turns).toBe(1);
+    expect(outcome.verdict).toBe("pass");
+  });
+
+  it("test_the_review_names_the_tool_its_turn_ends_on", async () => {
+    // The review ends on the verdict tool, and the session has to know which
+    // one that is: a reviewer that keeps reading is told, between its steps,
+    // that the turn ends there.
+    let named: string | undefined;
+    const factory = async (options: {
+      tools?: readonly unknown[];
+      finalTool?: string;
+    }): Promise<AgentSession> => ({
+      async prompt() {
+        named = options.finalTool;
+        const tool = options.tools?.[0] as {
+          execute: (id: string, params: unknown) => Promise<unknown>;
+        };
+        await tool.execute("call-1", { verdict: "pass", findings: [] });
+      },
+      async abort() {},
+      dispose() {},
+    });
+
+    await reviewPullRequest({
+      repo: "gazon1/sing",
+      pullRequest: 1040,
+      cwd: "/tmp/does-not-matter",
+      factory: factory as never,
+      gh: async () => "",
+      run: async () => "",
+      git: stubGit(),
+      deadlineMs: 60_000,
+    });
+
+    expect(named).toBe("agent_review_verdict");
+  });
+
   it("test_the_review_puts_the_worktree_back_to_the_tree_it_judged", async () => {
     // The reviewer works in the worktree, and whatever it leaves behind stays
     // in the tree. The tree the reviewer judged is the tree that is pushed,

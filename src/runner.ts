@@ -38,6 +38,7 @@ import { GateFailed, runGates } from "./gates.js";
 import {
   UNTRUSTED_INPUT_RULE,
   UNTRUSTED_INPUT_SECTION,
+  VERDICT_TOOL_NAME,
   addUsage,
   briefFence,
   createVerdictTool,
@@ -804,6 +805,9 @@ export async function reviewPullRequest(options: {
       [UNTRUSTED_INPUT_SECTION]: UNTRUSTED_INPUT_RULE,
     },
     tools: [createVerdictTool(holder)],
+    // The review ends on the verdict tool. A reviewer that keeps reading is
+    // told, between its steps, that the turn ends there.
+    finalTool: VERDICT_TOOL_NAME,
     onUsage: (reported) => {
       usage = addUsage(usage, reported);
     },
@@ -828,9 +832,18 @@ export async function reviewPullRequest(options: {
   try {
     result = await runPromptArray({
       session,
-      prompts: [prompt],
-      // The review is one state: the verdict, in one turn.
-      states: [{ name: "review", phase: "Review" }],
+      prompts: [prompt, VERDICT_REMINDER],
+      // The review is two states: the review itself, and the verdict it ends
+      // on. The second one is the answer to a reviewer that answered without
+      // a verdict — the same second chance a gate's refusal gets.
+      states: [
+        { name: "review", phase: "Review" },
+        { name: "verdict", phase: "Review" },
+      ],
+      // The second turn is a second chance, not an extra turn: it runs only
+      // when the reviewer stated no verdict. A review that reached its verdict
+      // ends there — the turn it would have taken is not spent.
+      skip: (state) => state.name === "verdict" && holder.value !== undefined,
       deadlineMs: options.deadlineMs,
       ...(options.stopped === undefined ? {} : { stopped: options.stopped }),
       ...(options.schedule === undefined ? {} : { schedule: options.schedule }),
@@ -915,7 +928,8 @@ export async function reviewPullRequest(options: {
   };
 }
 
-/** The prompt the reviewer is given. */
+/**
+ * The prompt the reviewer is given. */
 export const REVIEW_PROMPT = [
   "Review the pull request in this repository, as a reader who did not write it.",
   "",
@@ -929,6 +943,24 @@ export const REVIEW_PROMPT = [
   "only thing that leaves this session.",
   "",
   "Then end with the verdict tool. It is your last action.",
+].join("\n");
+
+/**
+ * The turn that follows a review that answered without a verdict.
+ *
+ * A reviewer that stops without calling the verdict tool has decided nothing,
+ * and a run that ends there has no review to show for the work it did. The
+ * second turn is the same second chance a gate's refusal gets: the reviewer
+ * is told what is missing and ends the review with it.
+ */
+export const VERDICT_REMINDER = [
+  "Your review did not end with a verdict.",
+  "",
+  "If the verdict tool has already been called in this session, the verdict is recorded: do not call it",
+  "again and do not change it — answer with the single word: done.",
+  "",
+  "If it has not, finish the review now — read what you have not read — and then call the verdict tool",
+  "with the verdict you reached. Say what you did not reach in the findings.",
 ].join("\n");
 
 /** Post the review comment. */

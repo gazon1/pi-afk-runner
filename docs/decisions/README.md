@@ -15,9 +15,11 @@ for the rule that the copies follow.
 
 | Decision | What it settles |
 |---|---|
-| `2026-11-05-the-command-line-is-parsed-by-citty.md` | the command line is parsed by citty: one list of flags, the usage rendered from it, and the exit code still the runner's |
+| `2026-11-05-the-engine-tells-the-model-when-a-turn-ends-on-a-tool.md` | the engine tells the model, between its steps, that the turn ends on a tool: the review's verdict is reached instead of being cut off by the step limit |
 | `2026-11-05-a-run-gates-nothing-and-builds-nothing.md` | a run gates nothing and builds nothing: the gates are off by default and the agent may not compile — **supersedes** `2026-11-05-the-workflow-runs-the-gates.md` |
+| `2026-11-05-a-review-that-stated-no-verdict-gets-a-second-turn.md` | a review that stated no verdict gets a second turn in the same session, the first verdict stands, and the second turn is skipped when the verdict is there |
 | `2026-11-05-the-workflow-runs-the-gates.md` | the workflow runs the gates and the agent does not: a refusal comes back to the agent as a turn, which gates run is the repository's own business, and the gates run with the repository's own PATH — **superseded** by `2026-11-05-a-run-gates-nothing-and-builds-nothing.md`: the gates are off by default |
+| `2026-11-05-the-command-line-is-parsed-by-citty.md` | the command line is parsed by citty: one list of flags, the usage rendered from it, and the exit code still the runner's |
 | `2026-11-05-pi-is-gone.md` | Pi is out: the SDK, the workflow engine and the permission system go, Mastra is the only engine, and the graph is the runner's own TypeScript |
 | `2026-11-05-the-runner-is-a-command-and-not-a-pi-extension.md` | the door goes: the runner is a command, and what survives of the Pi extension record — **superseded** by `2026-11-05-pi-is-gone.md`: the command stands, the version gate goes with Pi |
 | `2026-11-05-the-run-runs-on-mastra.md` | the run runs on Mastra: the agent, the graph and the memory are Mastra's, and the seams and the contract stay — **superseded** by `2026-11-05-pi-is-gone.md`: the seams stand, the graph is the runner's own |
