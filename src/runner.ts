@@ -997,7 +997,7 @@ export function planFor(observation: IssueObservation): Plan {
 /** What one step of a run did. */
 export interface StepRecord {
   readonly step: string;
-  readonly outcome: "ok" | "failed";
+  readonly outcome: "ok" | "failed" | "stopped";
   /** The first line the step printed — enough to tell two failures apart. */
   readonly detail: string;
   /**
@@ -1283,11 +1283,23 @@ export async function runSteps(options: {
   readonly onStep?: (record: StepRecord) => void;
   /** Told about a step as it starts. */
   readonly onStepStart?: (step: string) => void;
+  /** Whether a human has stopped the run. */
+  readonly stopped?: () => boolean;
 }): Promise<RunOutcome> {
   const steps: StepRecord[] = [];
   let failure: { readonly step: string; readonly error: Error } | null = null;
 
   for (const step of options.steps) {
+    if (options.stopped?.() === true) {
+      const record: StepRecord = {
+        step: step.name,
+        outcome: "stopped",
+        detail: "the run was stopped before this step",
+      };
+      steps.push(record);
+      options.onStep?.(record);
+      break;
+    }
     let record: StepRecord;
     try {
       options.onStepStart?.(step.name);
@@ -2684,6 +2696,7 @@ async function runPlan(
     steps,
     ...(options.onStep === undefined ? {} : { onStep: options.onStep }),
     ...(options.onStepStart === undefined ? {} : { onStepStart: options.onStepStart }),
+    ...(options.stopped === undefined ? {} : { stopped: options.stopped }),
     release: async () => {
       if (!state.claimed) {
         return;
