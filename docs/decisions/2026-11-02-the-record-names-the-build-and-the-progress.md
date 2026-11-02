@@ -49,7 +49,7 @@ beside the module; the commit is written to `dist/build-info.json` by the build.
 
 ## Rationale
 
-**Why the count and not the state's name.** The count comes from the workflow's
+**Why the count and not the state's name.** The states stay named, and the count comes from the workflow's
 own `completed` list and works for every session shape, including the branched
 work session; naming the state would be a second source of truth about the
 graph. The reader's question — did it get past the implementation? — is
@@ -80,3 +80,5 @@ read where the record is rendered.
 - `scripts/build-info.mjs` — the build stamp.
 - `docs/decisions/2026-11-02-a-run-that-did-not-finish-leaves-its-work.md` — what
   a failed run leaves behind, which is the other half of the incident.
+- `docs/decisions/2026-11-02-the-session-is-a-workflow.md` — the states stay
+  named; the record uses the count, not the state's name.

@@ -95,9 +95,10 @@ be told what the previous one learned.
   point pulls it in, and the host provides it.
 - The engine's own logs are **not** written: the record of a run belongs to
   the runner, under `build/diagnostics/`.
-- The work session's states are named, so a run's record can say which state
-  it reached. The review session and the merge resolution declare one state
-  each.
+- The work session's states are named — the graph stays readable, and the
+  review and merge sessions declare one state each — but a run's record says
+  how far it got as a count, not a state name: see
+  `2026-11-02-the-record-names-the-build-and-the-progress.md`.
 - A state that fails ends the run where it stands. A state that is cut off
   ends it as an aborted run.
 - The engine is a new thing to keep up with: its version is pinned, and its
