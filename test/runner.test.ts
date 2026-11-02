@@ -4694,6 +4694,103 @@ describe("the CLI's run", () => {
     }
   }, 60_000);
 
+  it("test_a_sweep_with_several_workers_works_issues_at_the_same_time", async () => {
+    const fixture = await fixtureWithSetupScript();
+    const lockDirectory = join(fixture.root, "afk-runner");
+    try {
+      const { gh } = stubGh([
+        { number: 42, title: "the first" },
+        { number: 43, title: "the second" },
+      ]);
+
+      // The turn of an issue ends only when another issue's turn has started.
+      // A sweep that worked the issues one after another would wait for ever,
+      // and the wait is what says that the workers are at the same time.
+      const worktrees = new Set<string>();
+      let release: (() => void) | undefined;
+      const both = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const guard = new Promise<never>((_, reject) => {
+        const timer = setTimeout(
+          () => reject(new Error("the second issue never started")),
+          10_000,
+        );
+        timer.unref();
+      });
+      const worked = new Set<string>();
+      const session: SessionFactory = async ({ cwd, tools }) => {
+        if (isReviewer(tools)) {
+          return {
+            async prompt() {
+              const tool = tools?.[0] as unknown as {
+                execute: (id: string, params: unknown) => Promise<unknown>;
+              };
+              await tool.execute("call-1", { verdict: "pass", findings: [] });
+            },
+            async abort() {},
+            dispose() {},
+          };
+        }
+        return {
+          async prompt() {
+            worktrees.add(cwd);
+            if (worktrees.size === 2) {
+              release?.();
+            }
+            await Promise.race([both, guard]);
+            if (!worked.has(cwd)) {
+              worked.add(cwd);
+              await writeFile(join(cwd, "work.txt"), "the work\n", "utf8");
+              await runGit(["add", "-A"], { cwd });
+              await runGit(
+                [
+                  "-c",
+                  "user.name=Fixture",
+                  "-c",
+                  "user.email=fixture@example.com",
+                  "commit",
+                  "-q",
+                  "-m",
+                  "the work",
+                ],
+                { cwd },
+              );
+            }
+          },
+          async abort() {},
+          dispose() {},
+        };
+      };
+
+      const code = await main(
+        [
+          "--repo",
+          "gazon1/sing",
+          "--checkout",
+          fixture.repo,
+          "--worktree-root",
+          join(fixture.root, "worktrees"),
+          "--lock-dir",
+          lockDirectory,
+          "--all",
+          "--workers",
+          "2",
+        ],
+        {
+          gh,
+          session,
+          run: async () => JSON.stringify({ verdict: "ci.yml  run 1  success" }),
+        },
+      );
+
+      expect(code).toBe(0);
+      expect(worktrees.size).toBe(2);
+    } finally {
+      await fixture.dispose();
+    }
+  }, 60_000);
+
   it("test_an_interrupted_run_releases_its_claim", async () => {
     const fixture = await fixtureWithSetupScript();
     const lockDirectory = join(fixture.root, "afk-runner");
@@ -5004,6 +5101,63 @@ describe("the CLI's run", () => {
       // And only the first issue was claimed: the sweep stopped at it.
       const claims = calls.filter((call) => call.includes("--add-label agent-in-progress"));
       expect(claims).toHaveLength(1);
+    } finally {
+      await fixture.dispose();
+    }
+  }, 60_000);
+
+  it("test_a_sweep_with_several_workers_stops_when_the_model_is_gone", async () => {
+    // The workers share the pool. When the pool is gone, the sweep stops
+    // instead of failing every issue in the queue: the worker that is still
+    // working does not take another issue.
+    const fixture = await fixtureWithSetupScript();
+    const lockDirectory = join(fixture.root, "afk-runner");
+    try {
+      const { gh, calls } = stubGh([
+        { number: 42, title: "the first" },
+        { number: 43, title: "the second" },
+        { number: 44, title: "the third" },
+        { number: 45, title: "the fourth" },
+      ]);
+
+      // The first session has no model to run on; the others work.
+      let created = 0;
+      const working = workingSession();
+      const session: SessionFactory = async (options) => {
+        created += 1;
+        if (created === 1) {
+          throw new NoModelAvailable("no model in the pool can be used");
+        }
+        return working(options);
+      };
+
+      const code = await main(
+        [
+          "--repo",
+          "gazon1/sing",
+          "--checkout",
+          fixture.repo,
+          "--worktree-root",
+          join(fixture.root, "worktrees"),
+          "--lock-dir",
+          lockDirectory,
+          "--all",
+          "--workers",
+          "2",
+        ],
+        {
+          gh,
+          session,
+          run: async () => JSON.stringify({ verdict: "ci.yml  run 1  success" }),
+        },
+      );
+
+      // The code says that no model was available.
+      expect(code).toBe(EXIT_NO_MODEL);
+      // And only the issues that were in flight were claimed: the sweep
+      // stopped instead of working the whole queue.
+      const claims = calls.filter((call) => call.includes("--add-label agent-in-progress"));
+      expect(claims).toHaveLength(2);
     } finally {
       await fixture.dispose();
     }

@@ -56,6 +56,7 @@ import {
 import { createPackTool } from "./packing.js";
 import {
   CommandFailed,
+  addDetachedWorktree,
   addWorktree,
   branchesWithWork,
   fetchCommit,
@@ -2546,8 +2547,9 @@ export async function checkoutPullRequestBranch(options: {
     ref: headRef(options.branch),
   });
   await removeWorktree(options.git, options.checkout, options.worktreePath);
-  await options.git(["worktree", "add", "--detach", options.worktreePath, sha], {
-    cwd: options.checkout,
+  await addDetachedWorktree(options.git, options.checkout, {
+    path: options.worktreePath,
+    sha,
   });
   const setup = await prepareWorktreeSetup(options.run, options.worktreePath);
   if (setup.reason !== null) {

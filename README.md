@@ -182,6 +182,13 @@ A systemd timer runs it every hour; the unit passes `--all`, so one invocation d
 works every eligible issue in turn, each one to the end of its journey (claim, worktree, triage,
 scope, agent, gates, push, pull request, review, re-count) — and then stops.
 
+`--all --workers N` works **N issues at once**. The issues are still worked one by one — each one to
+the end of its journey — but N of them are in flight together, so a sweep of ten issues on a host
+that can carry four takes four rounds instead of ten. It needs `--all`: the flag means "the whole
+queue", and there is no queue to spread without one. One worker is the default, so nothing changes
+for a run that does not name it. Each issue takes its own lock, so the workers never meet on the
+same issue, and the lines they write name the issue they belong to (`issue 42 — [claim] ok — …`).
+
 The **exit code says which step the run reached**, because a scheduler has nothing else to read:
 `0` is a finished run, `1` says an issue could not be worked, `10`..`80` are the steps, `75` says
 another runner holds the lock and `76` says the lock could not be taken. A run that stopped at the

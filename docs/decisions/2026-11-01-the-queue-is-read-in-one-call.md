@@ -109,7 +109,10 @@ person looking at it has to know which call hung. `gh pr list timed out after 90
 ## Links
 
 - `src/gh.ts` — `allOpenPullRequestsArgs`, `readAllOpenPullRequests`, `runGhWithTimeout`,
-  `GhCommandTimedOut`, `GH_KILL_GRACE_MS`.
+  `GhCommandTimedOut`.
+- `src/bound.ts` — `KILL_GRACE_MS`, the grace a child is given before the run stops waiting for it;
+  it moved here from `src/gh.ts` — see
+  [2026-11-05-the-bound-is-one-rule.md](2026-11-05-the-bound-is-one-rule.md).
 - `src/git.ts` — `branchesWithWork`, `COMMAND_TIMEOUT_MS`.
 - `src/runner.ts` — `chooseIssue`, `observeIssue`, `pullRequestsByBranch`.
 - `test/runner.test.ts` — `test_the_calls_do_not_grow_with_the_issues_the_runner_has_ever_worked`,

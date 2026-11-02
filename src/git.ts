@@ -30,6 +30,9 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { createWriteStream, existsSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { resolve, join } from "node:path";
+import { simpleGit } from "simple-git";
+
+import { KILL_GRACE_MS, withHardStop } from "./bound.js";
 
 /** Who the claim is attributed to. Part of the tag object's identity. */
 export const CLAIM_TAGGER = {
@@ -192,19 +195,133 @@ class OutputTail {
 }
 
 /**
- * Runs the real `git`.
+ * Runs the real `git`, through simple-git.
  *
- * `spawn` rather than `execFile`, because `git mktag` reads its payload from
- * stdin, and `execFile` has no way to write to it — the command would wait
- * for input that never comes.
+ * The runner's git is the real git: a claim is a ref, a push is a push, and a
+ * claim that is not exclusive is a claim two runners hold. simple-git runs the
+ * binary, feeds it and reads it; what the commands **mean** is this file's.
+ *
+ * Every option is spelled out in full: simple-git puts
+ * `GIT_TEST_DISALLOW_ABBREVIATED_OPTIONS` into the child, and a git that is
+ * told to refuse abbreviations refuses a short one.
  */
 export const runGit: GitRunner = (args, options) =>
-  runCommand({
-    command: "git",
-    args: [...args],
-    cwd: options.cwd,
-    ...(options.input === undefined ? {} : { input: options.input }),
-  });
+  runGitWithTimeout(args, options, COMMAND_TIMEOUT_MS);
+
+/**
+ * What a git call said about itself.
+ *
+ * The shape simple-git hands over, named here so that the failure can be built
+ * from it without a git in sight.
+ */
+export interface GitCallResult {
+  /** The git's own answer, or `null` when it was killed before it answered. */
+  readonly exitCode: number | null;
+  readonly stdOut: readonly Buffer[];
+  readonly stdErr: readonly Buffer[];
+}
+
+/**
+ * The failure a git call raises, from what the call said about itself.
+ *
+ * simple-git wraps the error it is given into one of its own, and the code
+ * above this one knows the runner's errors — a claim that was refused is a
+ * `CommandFailed`, and that is what says so. The failure is built here and
+ * thrown as it is.
+ *
+ * A command that answered has no failure to report, and that is what `undefined`
+ * means here: the handler is called for every task, the successful ones too.
+ */
+export function gitFailure(
+  error: Buffer | Error | undefined,
+  result: GitCallResult,
+  context: {
+    /** Whether the bound was spent and the git was asked to stop. */
+    readonly aborted: boolean;
+    readonly timeoutMs: number;
+    readonly args: readonly string[];
+  },
+): Error | undefined {
+  if (error === undefined && result.exitCode === 0) {
+    return undefined;
+  }
+  const stdout = Buffer.concat(result.stdOut).toString("utf8");
+  const stderr = Buffer.concat(result.stdErr).toString("utf8");
+  if (context.aborted) {
+    // The bound was spent and the git was killed before it answered.
+    return new CommandTimedOut(context.timeoutMs, "git", context.args, stdout, stderr);
+  }
+  if (result.exitCode !== null && result.exitCode !== undefined && result.exitCode !== 0) {
+    // Git itself refused: the exit code is its answer, and what it said on the
+    // error stream is the reason.
+    return new CommandFailed(result.exitCode, "git", context.args, stdout, stderr);
+  }
+  // The process failed before it could answer — it is not there, or it was
+  // killed. Its own error says what happened to it.
+  return error instanceof Error ? error : new CommandFailed(1, "git", context.args, stdout, stderr);
+}
+
+/**
+ * Runs the real `git`, with the bound every command gets.
+ *
+ * The bound is ours as well as the child's: simple-git asks the child to stop
+ * and waits for it, and a child that ignores the request would keep the call
+ * open — and the run waiting on it — for as long as it likes. The run stops
+ * waiting whether the child does or not.
+ */
+export async function runGitWithTimeout(
+  args: readonly string[],
+  options: { readonly cwd: string; readonly input?: string },
+  timeoutMs: number,
+  killGraceMs: number = KILL_GRACE_MS,
+): Promise<string> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  // The failure the git call raised, kept here: simple-git wraps the error it
+  // is given into one of its own, and what the caller catches has to be the
+  // error this file wrote.
+  let failure: Error | undefined;
+  try {
+    const git = simpleGit({
+      baseDir: options.cwd,
+      // The deadline is the runner's: a git that hangs must not hold a run for
+      // ever, and a git that was killed has not answered.
+      abort: controller.signal,
+      // The whole environment, as the child git has always seen it: simple-git
+      // keeps the `GIT_*` keys out of the child unless they are named, and
+      // `GIT_CONFIG_COUNT` carries a credential in CI — a git that cannot see it
+      // cannot authenticate.
+      allowEnvironment: Object.keys(process.env),
+      // The payload of a command that reads its input — `mktag`,
+      // `update-ref --stdin`. A command that reads nothing gets an empty
+      // payload, so its standard input is closed rather than left open.
+      input: () => (options.input === undefined ? Buffer.alloc(0) : options.input),
+      errors: (error, result) => {
+        const raised = gitFailure(error, result, {
+          aborted: controller.signal.aborted,
+          timeoutMs,
+          args,
+        });
+        failure = raised;
+        return raised;
+      },
+    });
+    return await withHardStop(git.raw([...args]), {
+      timeoutMs,
+      killGraceMs,
+      // The git was asked to stop and did not: the run stops waiting, and the
+      // output of a git that never answered is empty.
+      timeoutError: () => new CommandTimedOut(timeoutMs, "git", args, "", ""),
+    });
+  } catch (thrown) {
+    if (failure !== undefined) {
+      throw failure;
+    }
+    throw thrown;
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 /**
  * Kill the command, and the tree it started when it leads one.
@@ -229,9 +346,9 @@ function killTree(child: ChildProcess, group: boolean): void {
 /**
  * Runs a command.
  *
- * `spawn` rather than `execFile`, because `git mktag` reads its payload from
- * stdin, and `execFile` has no way to write to it — the command would wait
- * for input that never comes.
+ * The repository's own gates: `spawn` rather than `execFile`, because a gate
+ * may have to write to the command's standard input, and `execFile` has no way
+ * to write to it — the command would wait for input that never comes.
  */
 export const runCommand: CommandRunner = (spec) =>
   new Promise<string>((resolve, reject) => {
@@ -785,13 +902,28 @@ export async function fetchCommit(
   }
 }
 
-/** Bring one ref's objects down from the remote. */
+/** The fetches of this process, one after another. */
+let fetchQueue: Promise<unknown> = Promise.resolve();
+
+/**
+ * Bring one ref's objects down from the remote.
+ *
+ * The fetch of one checkout is **one at a time**. The ref it updates — the
+ * remote-tracking one — belongs to the checkout and not to the run, and two
+ * fetches that want it at the same time make the second one fail with
+ * "cannot lock ref". The workers of one sweep share the checkout, so they
+ * take turns.
+ */
 export async function fetchRef(
   git: GitRunner,
   cwd: string,
   options: { readonly remote: string; readonly ref: string },
 ): Promise<void> {
-  await git(["fetch", options.remote, options.ref], { cwd });
+  const fetch = fetchQueue.then(() => git(["fetch", options.remote, options.ref], { cwd }));
+  // The queue goes on even when a fetch fails: the next one is not this one's
+  // business.
+  fetchQueue = fetch.catch(() => {});
+  await fetch;
 }
 
 /**
@@ -799,8 +931,55 @@ export async function fetchRef(
  *
  * The branch is created here, on the base the claim recorded, so the work
  * starts from exactly the commit the claim was taken against.
+ *
+ * The worktrees of one checkout are made **one at a time**. `git worktree add`
+ * writes the registration before it creates the directory, and `git worktree
+ * prune` — which a finished run calls — removes a registration whose directory
+ * is not there yet. The workers of one sweep share the checkout, so they take
+ * turns.
  */
 export async function addWorktree(
+  git: GitRunner,
+  cwd: string,
+  options: {
+    readonly path: string;
+    readonly branch: string;
+    readonly baseSha: string;
+  },
+): Promise<void> {
+  await alone(() => addWorktreeNow(git, cwd, options));
+}
+
+/**
+ * Put a worktree on a commit, detached.
+ *
+ * The worktrees of one checkout are made **one at a time**, this one included:
+ * it writes the registration before it creates the directory, and a `prune`
+ * from another worker would delete it.
+ */
+export async function addDetachedWorktree(
+  git: GitRunner,
+  cwd: string,
+  options: { readonly path: string; readonly sha: string },
+): Promise<void> {
+  await alone(() =>
+    git(["worktree", "add", "--detach", options.path, options.sha], { cwd }),
+  );
+}
+
+/** The worktree commands of this process, one after another. */
+let worktreeQueue: Promise<unknown> = Promise.resolve();
+
+/** Run a command of the checkout on its own. */
+async function alone<T>(run: () => Promise<T>): Promise<T> {
+  const next = worktreeQueue.then(run);
+  // The queue goes on even when a command fails: the next one is not this one's
+  // business.
+  worktreeQueue = next.catch(() => {});
+  return next;
+}
+
+async function addWorktreeNow(
   git: GitRunner,
   cwd: string,
   options: {
@@ -851,6 +1030,14 @@ export async function addWorktree(
  * its commits alone, so the work a failed run did is durable.
  */
 export async function removeWorktree(
+  git: GitRunner,
+  cwd: string,
+  path: string,
+): Promise<void> {
+  await alone(() => removeWorktreeNow(git, cwd, path));
+}
+
+async function removeWorktreeNow(
   git: GitRunner,
   cwd: string,
   path: string,

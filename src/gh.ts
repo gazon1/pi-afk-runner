@@ -26,6 +26,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
+import { KILL_GRACE_MS, withHardStop } from "./bound.js";
 import { COMMAND_TIMEOUT_MS } from "./git.js";
 
 const execFileAsync = promisify(execFile);
@@ -263,16 +264,6 @@ export class GhCommandTimedOut extends Error {
 export const runGh: GhRunner = (args) => runGhWithTimeout(args, GH_TIMEOUT_MS);
 
 /**
- * The grace a killed `gh` gets before the run stops waiting for it.
- *
- * The child is asked to stop at the bound, and a child that obeys is gone
- * within a moment. A child that ignores the request would keep the call open
- * for as long as it likes — and a call that never settles is the wedge the
- * bound exists to prevent.
- */
-export const GH_KILL_GRACE_MS = 5_000;
-
-/**
  * The failure a `gh` call raises.
  *
  * A child that was killed is a timeout — the bound is the only thing here that
@@ -304,7 +295,7 @@ function ghFailure(
 export async function runGhWithTimeout(
   args: readonly string[],
   timeoutMs: number,
-  killGraceMs: number = GH_KILL_GRACE_MS,
+  killGraceMs: number = KILL_GRACE_MS,
 ): Promise<string> {
   const call = execFileAsync("gh", [...args], {
     encoding: "utf8",
@@ -319,21 +310,11 @@ export async function runGhWithTimeout(
   // stop and waits for it, and a child that ignores the request would keep
   // the call open — and the run waiting on it — for as long as it likes. The
   // run stops waiting whether the child does or not.
-  let hardStop: NodeJS.Timeout | undefined;
-  const stop = new Promise<never>((_resolve, reject) => {
-    hardStop = setTimeout(
-      () => reject(new GhCommandTimedOut(args, timeoutMs)),
-      timeoutMs + killGraceMs,
-    );
-    hardStop.unref();
+  return await withHardStop(call, {
+    timeoutMs,
+    killGraceMs,
+    timeoutError: () => new GhCommandTimedOut(args, timeoutMs),
   });
-  try {
-    return await Promise.race([call, stop]);
-  } finally {
-    if (hardStop !== undefined) {
-      clearTimeout(hardStop);
-    }
-  }
 }
 
 function labelNames(value: unknown): string[] {
