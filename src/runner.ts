@@ -44,6 +44,7 @@ import {
   cutOffMessage,
   runPromptArray,
   startAgent,
+  type PromptArrayResult,
   type ReviewVerdict,
   type RunUsage,
   type Scheduler,
@@ -606,6 +607,14 @@ export interface ReviewOutcome {
   readonly findings: readonly string[];
   /** The CI line, when the runner read one. */
   readonly ciVerdict: string | null;
+  /**
+   * The head of the tree the review judged.
+   *
+   * The tree the reviewer read is the tree the verdict names, so the two are
+   * the same fact and are read once: the caller does not go looking for the
+   * head itself.
+   */
+  readonly reviewedSha: string;
   /** The tokens and the cost of the review, when the provider reported them. */
   readonly usage?: RunUsage;
 }
@@ -627,6 +636,10 @@ export interface ReviewOutcome {
  * A `fail` verdict is not a retry. The pull request stays red, no second
  * comment is posted, and no other issue is taken: the findings have to be
  * dealt with, and a later review has to say `pass` again.
+ *
+ * The tree the reviewer judged is the tree that is pushed: whatever the
+ * review session leaves behind is put back the way the gates put their build
+ * back, before the verdict is even read.
  */
 export async function reviewPullRequest(options: {
   readonly repo: string;
@@ -637,6 +650,8 @@ export async function reviewPullRequest(options: {
   readonly factory: SessionFactory;
   readonly gh: GhRunner;
   readonly run: CommandRunner;
+  /** The git the tree the reviewer judged is restored with. */
+  readonly git: GitRunner;
   readonly deadlineMs: number;
   /** Whether somebody has stopped the run. */
   readonly stopped?: () => boolean;
@@ -654,6 +669,19 @@ export async function reviewPullRequest(options: {
   // What the review cost, when the provider said: the session's events carry
   // the numbers, and the factory is the one that sees them.
   let usage: RunUsage | undefined;
+
+  // The tree the reviewer judged is the tree that is pushed. The review
+  // session runs in the worktree, and whatever it leaves behind — a note, a
+  // scratch file, the artifacts of a build it ran — is not part of the
+  // change: the runner's next commit stages everything in the tree, so a
+  // leftover would ride along with the fix that follows it, and a fix that
+  // changed nothing would look like a fix that changed something.
+  //
+  // The head is read **before** the session: a reviewer that committed
+  // something of its own would have moved it, and the tree that is pushed has
+  // to be the tree the reviewer judged.
+  const reviewedHead = await headSha(options.git, options.cwd);
+
   const session = await options.factory({
     cwd: options.cwd,
     systemPromptSections: {
@@ -680,15 +708,37 @@ export async function reviewPullRequest(options: {
   // The session belongs to `runPromptArray` once it is given one: it disposes
   // of it when the run is over. A second owner would make the session's life
   // the business of two places that do not agree on who is responsible.
-  const result = await runPromptArray({
-    session,
-    prompts: [prompt],
-    // The review is one state: the verdict, in one turn.
-    states: [{ name: "review", phase: "Review" }],
-    deadlineMs: options.deadlineMs,
-    ...(options.stopped === undefined ? {} : { stopped: options.stopped }),
-    ...(options.schedule === undefined ? {} : { schedule: options.schedule }),
-  });
+  let result: PromptArrayResult;
+  try {
+    result = await runPromptArray({
+      session,
+      prompts: [prompt],
+      // The review is one state: the verdict, in one turn.
+      states: [{ name: "review", phase: "Review" }],
+      deadlineMs: options.deadlineMs,
+      ...(options.stopped === undefined ? {} : { stopped: options.stopped }),
+      ...(options.schedule === undefined ? {} : { schedule: options.schedule }),
+    });
+  } catch (error) {
+    // A session that failed still leaves what it left behind: the tree goes
+    // back to the tree the reviewer judged. A restore that fails is a tree
+    // that cannot be pushed, and it is said so — the session's own failure
+    // is named beside it.
+    try {
+      await restoreTree(options.git, options.cwd, reviewedHead);
+    } catch (restoreError) {
+      throw new Error(
+        `the review's session failed (${errorMessage(error)}) and the worktree could not be put back (${errorMessage(restoreError)})`,
+        { cause: error },
+      );
+    }
+    throw error;
+  }
+
+  // The tree goes back to the tree the reviewer judged, whatever the session
+  // left behind.
+  await restoreTree(options.git, options.cwd, reviewedHead);
+
   if (result.aborted) {
     // The same cut the work session reports; a review that did not finish is
     // not a review that stated no verdict.
@@ -741,6 +791,7 @@ export async function reviewPullRequest(options: {
     comment,
     findings: verdict.findings,
     ciVerdict: ciLine === null ? null : `${CI_BEFORE_RECOUNT}: ${ciLine}`,
+    reviewedSha: reviewedHead,
     ...(usage === undefined ? {} : { usage }),
   };
 }
@@ -754,6 +805,9 @@ export const REVIEW_PROMPT = [
   "under load, is the risky code tested, is it fast enough, and is every line needed.",
   "",
   "Report defects with a location, not a summary. Say what you did not reach.",
+  "",
+  "Do not change the tree. It is put back to the tree you judged when you finish, and the verdict is the",
+  "only thing that leaves this session.",
   "",
   "Then end with the verdict tool. It is your last action.",
 ].join("\n");
@@ -1867,9 +1921,17 @@ async function gateTheTree(options: {
  *
  * The ignored files stay: the worktree's own Gradle home, its `.env` copy
  * and its build outputs are the repository's, not the runner's to delete.
+ *
+ * The head is **named** when the tree to go back to is not the current one: a
+ * reviewer that committed something of its own moved the branch, and the tree
+ * that is pushed has to be the tree the reviewer judged.
  */
-export async function restoreTree(git: GitRunner, cwd: string): Promise<void> {
-  await git(["reset", "--hard"], { cwd });
+export async function restoreTree(
+  git: GitRunner,
+  cwd: string,
+  head?: string,
+): Promise<void> {
+  await git(head === undefined ? ["reset", "--hard"] : ["reset", "--hard", head], { cwd });
   await git(["clean", "-fd"], { cwd });
 }
 
@@ -2627,7 +2689,6 @@ async function runPlan(
               exhausted = true;
               return "fail";
             }
-            state.reviewedSha = await headSha(options.git, state.worktreePath);
             const reviewed = await reviewPullRequest({
               repo: options.repo,
               pullRequest: state.pullRequest,
@@ -2635,6 +2696,7 @@ async function runPlan(
               factory: options.session,
               gh: options.gh,
               run: options.run,
+              git: options.git,
               deadlineMs: budget,
               ...(options.stopped === undefined ? {} : { stopped: options.stopped }),
               issue: detail,
@@ -2644,6 +2706,9 @@ async function runPlan(
             state.usage = addUsage(state.usage, reviewed.usage);
             state.findings = reviewed.findings;
             state.reviewCount += 1;
+            // The head the review judged: the tree the reviewer read, and the
+            // tree the verdict names.
+            state.reviewedSha = reviewed.reviewedSha;
             return reviewed.verdict;
           },
           fix: async () => {

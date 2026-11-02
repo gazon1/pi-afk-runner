@@ -1868,6 +1868,27 @@ describe("the pull request", () => {
 });
 
 describe("the review", () => {
+  /**
+   * A `git` that answers the tree questions the review asks, and remembers
+   * what it was told.
+   *
+   * The review reads the head before its session and puts the worktree back
+   * to the tree it judged afterwards, so a fake that says nothing but the
+   * head is enough.
+   */
+  function stubGit(calls: string[] = []): (
+    args: readonly string[],
+    options: { readonly cwd: string },
+  ) => Promise<string> {
+    return async (args) => {
+      calls.push(`git ${args.join(" ")}`);
+      if (args[0] === "rev-parse") {
+        return "abc1234\n";
+      }
+      return "";
+    };
+  }
+
   it("test_the_review_comment_opens_with_the_marker", () => {
     const comment = reviewCommentBody({ verdict: "pass" });
 
@@ -1955,6 +1976,7 @@ describe("the review", () => {
       factory: factory as never,
       gh,
       run: async () => "",
+      git: stubGit(),
       deadlineMs: 60_000,
     });
 
@@ -2002,6 +2024,7 @@ describe("the review", () => {
       factory: factory as never,
       gh,
       run: async () => "",
+      git: stubGit(),
       deadlineMs: 60_000,
     });
 
@@ -2011,6 +2034,47 @@ describe("the review", () => {
 
     // One comment, and no second one: a `fail` is not a retry.
     expect(calls.filter((call) => call.startsWith("gh pr comment"))).toHaveLength(1);
+  });
+
+  it("test_the_review_puts_the_worktree_back_to_the_tree_it_judged", async () => {
+    // The reviewer works in the worktree, and whatever it leaves behind stays
+    // in the tree. The tree the reviewer judged is the tree that is pushed,
+    // so the worktree goes back to it — the same restore the gates use.
+    const calls: string[] = [];
+    const factory = async (options: {
+      tools?: readonly unknown[];
+    }): Promise<AgentSession> => ({
+      async prompt() {
+        calls.push("the review's session");
+        const tool = options.tools?.[0] as {
+          execute: (id: string, params: unknown) => Promise<unknown>;
+        };
+        await tool.execute("call-1", { verdict: "pass", findings: [] });
+      },
+      async abort() {},
+      dispose() {},
+    });
+
+    await reviewPullRequest({
+      repo: "gazon1/sing",
+      pullRequest: 1040,
+      cwd: "/tmp/does-not-matter",
+      factory: factory as never,
+      gh: async () => "",
+      run: async () => "",
+      git: stubGit(calls),
+      deadlineMs: 60_000,
+    });
+
+    // The head is read before the session, and the tree is put back to it
+    // afterwards: a restore that ran first would put back a tree the review
+    // had not judged yet.
+    const at = (prefix: string): number =>
+      calls.findIndex((call) => call.startsWith(prefix));
+    expect(at("git rev-parse HEAD")).toBeGreaterThanOrEqual(0);
+    expect(at("git rev-parse HEAD")).toBeLessThan(at("the review's session"));
+    expect(at("git reset --hard abc1234")).toBeGreaterThan(at("the review's session"));
+    expect(at("git clean -fd")).toBeGreaterThan(at("the review's session"));
   });
 
   it("test_the_runner_makes_no_bare_ci_claim", async () => {
@@ -2158,6 +2222,7 @@ describe("the review", () => {
           verdict: "ci.yml  run 39888579980  failure  https://github.com/gazon1/sing/actions/runs/39888579980",
           exit: 1,
         }),
+      git: stubGit(),
       deadlineMs: 60_000,
     });
 
@@ -2188,6 +2253,7 @@ describe("the review", () => {
       factory: factory as never,
       gh: async () => "",
       run: async () => "",
+      git: stubGit(),
       deadlineMs: 60_000,
       issue: {
         title: "an issue",
@@ -2251,6 +2317,7 @@ describe("the review", () => {
       factory: factory as never,
       gh,
       run: async () => "",
+      git: stubGit(),
       deadlineMs: 60_000,
     });
 
@@ -3376,6 +3443,11 @@ describe("the CLI's run", () => {
     // The fix session changed nothing: the branch's head did not move. There
     // is nothing to push and nothing to review again — the loop stops, and
     // the run says why.
+    //
+    // The reviewer leaves a note behind, because that is the case the
+    // comparison has to survive: a leftover in the tree would be swept into
+    // the fix's commit, the head would move, and an empty fix would look like
+    // a real one.
     const fixture = await fixtureWithSetupScript();
     try {
       const { gh, calls } = stubGh([{ number: 42, title: "an issue" }]);
@@ -3394,6 +3466,8 @@ describe("the CLI's run", () => {
             reviews += 1;
             return {
               async prompt() {
+                // The reviewer leaves a note of its own.
+                await writeFile(join(cwd, "review-note.md"), "a note\n", "utf8");
                 const tool = tools?.[0] as unknown as {
                   execute: (id: string, params: unknown) => Promise<unknown>;
                 };
@@ -3461,6 +3535,9 @@ describe("the CLI's run", () => {
       ).split("\n");
       expect(files).toContain("work.txt");
       expect(files).not.toContain("fix.txt");
+      // And the reviewer's note is not there either: the review put the tree
+      // back to the tree it judged, so the note was never committed.
+      expect(files).not.toContain("review-note.md");
 
       // The branch carries the work and nothing else: the fix was not
       // committed and not pushed.
@@ -3477,6 +3554,87 @@ describe("the CLI's run", () => {
         })
       ).trim();
       expect(commits).toBe("1");
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("test_the_reviewers_leftover_never_rides_along_with_the_fix", async () => {
+    // The reviewer works in the worktree, and whatever it leaves behind — a
+    // note, a scratch file — stays in the tree. The runner's own commits are
+    // made with `git add -A`: the leftover would go to the remote with the
+    // fix that follows it.
+    //
+    // The tree the reviewer judged is the tree that is pushed, so the
+    // leftover never reaches the branch.
+    const fixture = await fixtureWithSetupScript();
+    try {
+      const { gh } = stubGh([{ number: 42, title: "an issue" }]);
+      let reviews = 0;
+
+      await runOnce({
+        ...runOptions(fixture, gh),
+        session: async ({ cwd, tools }) => {
+          if (isReviewer(tools)) {
+            reviews += 1;
+            return {
+              async prompt() {
+                // The reviewer leaves a note of its own.
+                await writeFile(join(cwd, "review-note.md"), "a note\n", "utf8");
+                const tool = tools?.[0] as unknown as {
+                  execute: (id: string, params: unknown) => Promise<unknown>;
+                };
+                // The first review finds something, so the fix runs; the
+                // second one passes.
+                await tool.execute(
+                  "call-1",
+                  reviews === 1
+                    ? { verdict: "fail", findings: ["the fix is missing"] }
+                    : { verdict: "pass", findings: [] },
+                );
+              },
+              async abort() {},
+              dispose: () => {},
+            };
+          }
+          // The fix session is the one without tools.
+          if (tools === undefined) {
+            return {
+              async prompt() {
+                await writeFile(join(cwd, "fix.txt"), "the fix\n", "utf8");
+              },
+              async abort() {},
+              dispose: () => {},
+            };
+          }
+          return {
+            async prompt() {
+              await writeFile(join(cwd, "work.txt"), "the work\n", "utf8");
+            },
+            async abort() {},
+            dispose: () => {},
+          };
+        },
+      });
+
+      const pushed = (
+        await gitOutput(["ls-remote", fixture.remote, workBranch(42)], {
+          cwd: fixture.repo,
+          env: fixture.env,
+        })
+      ).trim();
+      const sha = pushed.split(/\s+/)[0] ?? "";
+      const files = (
+        await gitOutput(["ls-tree", "-r", "--name-only", sha], {
+          cwd: fixture.repo,
+          env: fixture.env,
+        })
+      ).split("\n");
+
+      // The work and the fix are there, and the reviewer's note is not.
+      expect(files).toContain("work.txt");
+      expect(files).toContain("fix.txt");
+      expect(files).not.toContain("review-note.md");
     } finally {
       await fixture.dispose();
     }
