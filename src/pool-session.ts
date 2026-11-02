@@ -144,13 +144,19 @@ export class PoolSession implements AgentSession {
     await this.options.host.abort();
   }
 
-  /** Release the session, and the timer that looks at the pool. */
+  /**
+   * Release the session, and the timer that looks at the pool.
+   *
+   * The proxy goes back to the host's own: the model's proxy is the model's,
+   * and the host's chat in the same process must not go through it.
+   */
   dispose(): void {
     if (this.timer !== undefined) {
       clearInterval(this.timer);
       this.timer = undefined;
     }
     this.options.host.dispose();
+    useProxy(undefined);
   }
 
   /**
@@ -248,7 +254,15 @@ export class PoolSession implements AgentSession {
       this.timer = undefined;
     }
     this.timer = setInterval(() => {
-      void this.check();
+      // A look that fails is the pool's problem, not the run's: an unhandled
+      // refusal here would take the whole process down mid-sweep.
+      void this.check().catch((failure) => {
+        this.options.onEvent?.(
+          `the pool could not look again: ${
+            failure instanceof Error ? failure.message : String(failure)
+          }`,
+        );
+      });
     }, this.pool.checkEveryMs);
     // The timer must not keep the process alive: the runner's own deadline is
     // what ends a run.

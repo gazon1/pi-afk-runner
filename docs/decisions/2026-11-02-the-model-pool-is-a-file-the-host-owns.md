@@ -57,7 +57,9 @@ The proxy is installed **globally**, per model: the SDK's provider calls go thro
 `globalThis.fetch`, and the SDK does not pass a `fetch` of its own to the provider, so a proxy
 that is not the global dispatcher is not a proxy at all. The runner therefore installs undici's
 dispatcher — the model's own proxy when the file names one, the host's own from the environment
-otherwise — and replaces the global fetch with undici's, which reads that dispatcher.
+otherwise — and replaces the global fetch with undici's, which reads that dispatcher. The proxy
+is the model's, and it is given back when the session ends: the host's own chat in the same
+process must not go through the model's proxy.
 
 **The file is strict.** A key the runner does not know is an error, not something it ignores.
 A mistyped `priorety` that is skipped is a model used at the wrong priority, and nothing would
@@ -96,7 +98,9 @@ one the runner may move to. The runner moves to a better model when one appears,
 the model it is on when that model's limit is gone. It does not leave a working model for a
 worse one on a whim — but a model the provider no longer offers is not a working model, and the
 runner does leave it. The check runs inside the session, on a timer that does not keep the
-process alive: the runner's own deadline is what ends a run.
+process alive: the runner's own deadline is what ends a run. A look that fails is the pool's
+problem and not the run's: the run says so and goes on — a refusal left unhandled in the timer
+would take the whole process down in the middle of the sweep.
 
 **The file is read again when the host has changed it.** The file is the host's policy, and the
 host may change it while the runner works. The runner reads it again when its timestamp has
@@ -176,9 +180,9 @@ means now, and what the pool did while the run worked.
 - The file is read again while the run works, and a broken file at that moment leaves the run
   on the pool it started with.
 - The file needs `yaml`, which the repository now depends on.
-- The runner installs undici's dispatcher for the whole process, and undici's `fetch` as the
-  global one. A host that needs another dispatcher of its own has to set it after the runner
-  starts.
+- The runner installs undici's dispatcher for as long as the session that uses it runs, and
+  undici's `fetch` as the global one. A host that needs another dispatcher of its own has to
+  set it after the runner starts.
 - `--show-pool` reads the catalogue and the credentials of the host's agent directory, so it
   says which models can be reached — and it needs the same directory the run would use.
 

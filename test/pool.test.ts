@@ -12,7 +12,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { describe, expect, it } from "vitest";
+import { ProxyAgent, getGlobalDispatcher } from "undici";
+import { afterEach, describe, expect, it } from "vitest";
 
 import { piSessionFactory } from "../src/cli.js";
 import {
@@ -29,6 +30,7 @@ import {
   type PooledModel,
 } from "../src/pool.js";
 import { PoolSession } from "../src/pool-session.js";
+import { useProxy } from "../src/proxy.js";
 import { createFixtureRepository } from "./git-sandbox.js";
 
 /** The pool the tests pick from: the best model, one behind a proxy, and a spare. */
@@ -259,6 +261,11 @@ describe("the model pool", () => {
 });
 
 describe("a session in the pool", () => {
+  afterEach(() => {
+    // The dispatcher is global: the tests must not leave one behind.
+    useProxy(undefined, {});
+  });
+
   it("moves_to_the_next_model_when_the_limit_is_gone_and_takes_the_turn_again", async () => {
     const runtime = new FakeRuntime(["fake/beam", "fake/spare"]);
     const host = new FakeHost(["commandcode API error (429): RATE_LIMITED", null]);
@@ -479,6 +486,57 @@ describe("a session in the pool", () => {
     expect(host.models).toEqual(["spare"]);
     expect(session.reference).toBe("fake/spare");
     session.dispose();
+  });
+
+  it("survives_a_look_at_the_pool_that_fails", async () => {
+    const events: string[] = [];
+    const runtime = new FakeRuntime(["fake/beam", "fake/spare"]);
+    runtime.available.add("fake/spare");
+    const host = new FakeHost([null]);
+    host.setModel = async () => {
+      throw new Error("the provider refused the model");
+    };
+    const session = new PoolSession({
+      host,
+      runtime: runtime.runtime,
+      pool: parsePool(
+        "checkEveryMs: 5\nmodels:\n  - model: fake/beam\n    priority: 100\n  - model: fake/spare\n    priority: 120\n",
+      ),
+      reference: "fake/beam",
+      state: newPoolState(),
+      proxyConfigured: true,
+      onEvent: (line) => events.push(line),
+    });
+
+    // The look fails, and the run keeps going: an unhandled refusal here would
+    // take the whole process down in the middle of the sweep.
+    const reported = await waitFor(() =>
+      events.some((line) => line.startsWith("the pool could not look again")),
+    );
+    expect(reported).toBe(true);
+    session.dispose();
+  });
+
+  it("gives_the_proxy_back_when_the_session_is_released", () => {
+    const runtime = new FakeRuntime(["fake/beam"]);
+    const session = new PoolSession({
+      host: new FakeHost([null]),
+      runtime: runtime.runtime,
+      pool: parsePool(
+        "models:\n  - model: fake/beam\n    priority: 100\n    proxy: http://127.0.0.1:3128\n",
+      ),
+      reference: "fake/beam",
+      state: newPoolState(),
+      proxyConfigured: true,
+    });
+
+    // The model's own proxy carries the model's requests while it runs.
+    expect(getGlobalDispatcher()).toBeInstanceOf(ProxyAgent);
+
+    // And the host's own is back when the session is released: the host's chat
+    // in the same process must not go through the model's proxy.
+    session.dispose();
+    expect(getGlobalDispatcher()).not.toBeInstanceOf(ProxyAgent);
   });
 });
 
