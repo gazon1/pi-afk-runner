@@ -553,6 +553,7 @@ export function liveFrontDoor(
     try {
       // The repository is the checkout's `origin` unless the command names one.
       options = await resolveRepo(parseArgs(args.trim().split(/\s+/).filter(Boolean)));
+
     } catch (failure) {
       talk(ctx, `afk-runner: ${errorMessage(failure)}`, "error");
       return;
