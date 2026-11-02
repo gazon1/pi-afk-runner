@@ -589,7 +589,7 @@ async function resolveWithAgent(
       throw failure;
     });
   if (marked.trim() !== "") {
-    throw new Error(`conflict markers remain in ${marked.trim().split("\n")[0] ?? "the tree"}`);
+    throw new Error(`conflict marker "<<<<<<<" remains in ${marked.trim().split("\n")[0] ?? "the tree"}`);
   }
 
   // The resolution is the work; what the session left that the resolution
