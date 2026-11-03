@@ -116,10 +116,11 @@ than failing every issue in the queue.
 The unit runs with `--all`, so one status covers a whole sweep. The sweep reads
 the queue once and works it by number, so an issue that fails does not put
 itself back in front of the queue and no issue is worked twice. A failure does
-not stop the sweep; the status is the **first** failure's code, and `0` means
-every issue in the list was worked. An issue that cannot be worked — a fresh
-claim that belongs to a run elsewhere — is reported and counts as a failure, so
-a sweep never says "drained" while an issue was left. The sweep's lock is taken
+not stop the sweep; the status is the code of the failure of the issue with the
+smallest number, and `0` means every issue in the list was worked. An issue
+that cannot be worked — a fresh claim that belongs to a run elsewhere — is
+reported and counts as a failure, so a sweep never says "drained" while an
+issue was left. The sweep's lock is taken
 once, for the whole sweep, and given back at the end; each issue it works also
 takes that issue's lock while it is being worked, so a hand-started `--issue
 <N>` run and the sweep cannot work the same issue at the same time.

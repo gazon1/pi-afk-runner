@@ -838,6 +838,43 @@ export function sweepTotal(
 }
 
 /**
+ * What one issue's run said, and the code it reached.
+ *
+ * The sweep collects these as its issues are worked, and the code the sweep
+ * ends with is decided from them.
+ */
+export interface SweepOutcome {
+  /** The issue the outcome belongs to. */
+  readonly issue: number;
+  /** The exit code the issue's run reached. */
+  readonly code: number;
+}
+
+/**
+ * The code a sweep ends with.
+ *
+ * The failure of the issue with the **smallest number** decides it. A sweep
+ * that works several issues at once has no "first failure": the failures
+ * happen in whatever order the workers happen to finish in, and the code must
+ * not depend on that. The smallest failing issue is a property of the sweep's
+ * issues, so two runs of the same sweep end with the same code.
+ *
+ * A sweep in which nothing failed ends with the zero.
+ */
+export function sweepExitCode(outcomes: readonly SweepOutcome[]): number {
+  let winner: SweepOutcome | undefined;
+  for (const outcome of outcomes) {
+    if (outcome.code === EXIT_OK) {
+      continue;
+    }
+    if (winner === undefined || outcome.issue < winner.issue) {
+      winner = outcome;
+    }
+  }
+  return winner?.code ?? EXIT_OK;
+}
+
+/**
  * Run once, and say what happened through the exit code.
  *
  * One issue, or the whole queue with `--all`. The lock is taken for the whole
@@ -1083,6 +1120,9 @@ export async function main(
  * do not meet on the same issue; the sweep's own lock still keeps two sweeps
  * apart. A line names the issue it belongs to, because the workers write to
  * one stream.
+ *
+ * The code the sweep ends with is the code of the failure of the issue with
+ * the smallest number — see {@link sweepExitCode}.
  */
 async function sweep(
   runOptions: RunOptions,
@@ -1106,10 +1146,12 @@ async function sweep(
     return EXIT_OK;
   }
 
-  let firstFailure = 0;
   let stoppedEarly = false;
   let noModel = false;
   const results: RunResult[] = [];
+  // What every issue's run said: the code the sweep ends with is decided from
+  // these, and not from the order the failures happened in.
+  const outcomes: SweepOutcome[] = [];
   // The issues the workers have not taken yet: the list is worked by number,
   // and every worker takes the next one that is free.
   let next = 0;
@@ -1144,9 +1186,7 @@ async function sweep(
         results.push(outcome.result);
         process.stdout.write(`${sweepIssueLine(outcome.result)}\n`);
       }
-      if (outcome.code !== EXIT_OK && firstFailure === 0) {
-        firstFailure = outcome.code;
-      }
+      outcomes.push({ issue: issueNumber, code: outcome.code });
     }
   };
 
@@ -1160,10 +1200,11 @@ async function sweep(
   }
   // Issues were left in the queue, so this is not the success the zero would
   // claim; a stop that did not fail a step reports the code a cut session has.
-  if (stoppedEarly && firstFailure === 0) {
+  const code = sweepExitCode(outcomes);
+  if (stoppedEarly && code === EXIT_OK) {
     return STEP_EXIT_CODES.session ?? 1;
   }
-  return firstFailure;
+  return code;
 }
 
 /** What one issue's run did, and what it says about it. */

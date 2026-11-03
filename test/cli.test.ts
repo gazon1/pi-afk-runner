@@ -11,7 +11,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { ARGS, parseArgs, prepareRun, usage } from "../src/cli.js";
+import { ARGS, parseArgs, prepareRun, sweepExitCode, usage } from "../src/cli.js";
 import { defaultDeadlineMs } from "../src/budget.js";
 import type { GitRunner } from "../src/git.js";
 
@@ -177,5 +177,55 @@ describe("the gates a run runs", () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("the code a sweep ends with", () => {
+  it("is the code of the failure of the issue with the smallest number", () => {
+    // Two issues fail with different codes: the smaller number decides, and
+    // the order the failures happened in says nothing.
+    expect(
+      sweepExitCode([
+        { issue: 42, code: 75 },
+        { issue: 10, code: 20 },
+      ]),
+    ).toBe(20);
+    expect(
+      sweepExitCode([
+        { issue: 10, code: 20 },
+        { issue: 42, code: 75 },
+      ]),
+    ).toBe(20);
+  });
+
+  it("is the code of the one issue that failed", () => {
+    expect(
+      sweepExitCode([
+        { issue: 10, code: 0 },
+        { issue: 42, code: 45 },
+      ]),
+    ).toBe(45);
+  });
+
+  it("is zero when no issue failed", () => {
+    expect(
+      sweepExitCode([
+        { issue: 10, code: 0 },
+        { issue: 42, code: 0 },
+      ]),
+    ).toBe(0);
+  });
+
+  it("keeps the code of the first failure of a sweep that works one issue at a time", () => {
+    // One worker: the issues are worked in the order of their numbers, so the
+    // first failure is the smallest failing one, and the sweep ends with the
+    // code it has always ended with.
+    expect(
+      sweepExitCode([
+        { issue: 10, code: 0 },
+        { issue: 42, code: 75 },
+        { issue: 77, code: 20 },
+      ]),
+    ).toBe(75);
   });
 });
