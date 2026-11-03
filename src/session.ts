@@ -427,6 +427,15 @@ export interface AgentSession {
   /** The session's messages, when it keeps them. */
   readonly messages?: readonly TurnMessage[];
   /**
+   * Write one line of the run's own into the session's log.
+   *
+   * It is the same stream the tool calls and the model's own words go into:
+   * the line reaches the run's journal and the log the reader sees, and the
+   * two cannot disagree about it. A turn that says nothing says nothing —
+   * this is the runner's own line, and it names the turn it belongs to.
+   */
+  note(line: string): void;
+  /**
    * The model the session runs on — `provider/id`.
    *
    * The pool's session knows it, because the pool moves it between models; a

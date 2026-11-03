@@ -231,6 +231,18 @@ export function journalFactory(factory: SessionFactory, path: string): SessionFa
 }
 
 /**
+ * The line that names the turn the lines below it belong to.
+ *
+ * The name is the workflow's own — the state's name, read from the state and
+ * not spelled again here — so the journal and the record speak the same
+ * language. The spelling of the line is here, beside the other lines'
+ * spellings: a line written twice is a line whose two copies drift.
+ */
+export function turnLine(name: string): string {
+  return `[turn] ${name}`;
+}
+
+/**
  * One line about a tool call: the tool, and the command when there is one.
  *
  * It is a line of the run's log, and a log reads one fact per line: the tool's
