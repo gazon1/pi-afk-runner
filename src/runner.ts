@@ -1436,6 +1436,27 @@ const RUNNER_STAMP = ((): string => {
   return sha === null ? version : `${version} ${sha}`;
 })();
 
+/**
+ * The journal's file name: the run's own id and the `.log` extension.
+ *
+ * One place says it. The run writes the file under this name and the record
+ * names the file the run wrote, so the name in the record cannot drift from
+ * the name on the disk.
+ */
+export function journalFileName(runId: string): string {
+  return `${runId}.log`;
+}
+
+/**
+ * The journal's path: the record's own directory, the run's id, the `.log`.
+ *
+ * The journal sits beside the record — the same directory — so a reader who
+ * opens the record finds the journal in the same place.
+ */
+export function journalPath(directory: string, runId: string): string {
+  return join(directory, journalFileName(runId));
+}
+
 /** The record's own text. */
 function renderRecord(options: {
   readonly issue: number;
@@ -1448,6 +1469,8 @@ function renderRecord(options: {
   readonly subject?: string;
   /** What the model pool did during the run. */
   readonly pool?: readonly string[];
+  /** Whether this run wrote a journal beside the record. */
+  readonly hasJournal?: boolean;
 }): string {
   const lines = [
     options.heading ?? `# Run issue-${options.issue}`,
@@ -1456,10 +1479,16 @@ function renderRecord(options: {
     `- run: ${options.runId}`,
     `- runner: ${RUNNER_STAMP}`,
     `- outcome: ${options.outcome}`,
-    "",
-    "## Steps",
-    "",
   ];
+  // The journal is the file beside the record, and the record is the file a
+  // reader is sent to — so the record is where the pointer to the journal
+  // belongs. The name is the one the run wrote the file under.
+  if (options.hasJournal === true) {
+    lines.push(
+      `- journal: ${journalFileName(options.runId)} — the agent's own lines as it worked: the calls it made and what it said`,
+    );
+  }
+  lines.push("", "## Steps", "");
   for (const step of options.steps) {
     const detail = step.detail === "" ? "" : ` — ${step.detail}`;
     lines.push(`- ${step.step} — ${step.outcome}${detail}`);
@@ -1509,6 +1538,8 @@ export async function writeRunRecord(options: {
   readonly subject?: string;
   /** What the model pool did during the run. */
   readonly pool?: readonly string[];
+  /** Whether this run wrote a journal beside the record. */
+  readonly hasJournal?: boolean;
 }): Promise<string> {
   const directory = options.directory ?? recordDirectory(options.root, options.issue);
   await mkdir(directory, { recursive: true });
@@ -1523,6 +1554,7 @@ export async function writeRunRecord(options: {
       ...(options.heading === undefined ? {} : { heading: options.heading }),
       ...(options.subject === undefined ? {} : { subject: options.subject }),
       ...(options.pool === undefined ? {} : { pool: options.pool }),
+      ...(options.hasJournal === undefined ? {} : { hasJournal: options.hasJournal }),
     }),
     "utf8",
   );
@@ -1607,6 +1639,8 @@ export async function runSteps(options: {
   readonly subject?: string;
   /** What the model pool did during the run. */
   readonly pool?: readonly string[];
+  /** Whether this run wrote a journal beside the record. */
+  readonly hasJournal?: boolean;
   /** What a failure releases: the claim, the worktree, the ref. */
   readonly release?: () => Promise<string | void>;
   /** Told about every step, as it finishes. */
@@ -1698,6 +1732,7 @@ export async function runSteps(options: {
       ...(options.heading === undefined ? {} : { heading: options.heading }),
       ...(options.subject === undefined ? {} : { subject: options.subject }),
       ...(options.pool === undefined ? {} : { pool: options.pool }),
+      ...(options.hasJournal === undefined ? {} : { hasJournal: options.hasJournal }),
     });
   } catch (recordError) {
     if (failure === null) {
@@ -2658,13 +2693,13 @@ async function runPlan(
    * start of the run and grows while the work goes on, so a run that dies
    * leaves behind what it was doing when it died.
    */
-  const journalPath = join(
+  const journalFile = journalPath(
     recordDirectory(options.checkout, issue.number),
-    `${runId}.log`,
+    runId,
   );
-  await mkdir(dirname(journalPath), { recursive: true });
-  await writeFile(journalPath, `# run ${runId}, issue ${issue.number}\n`, "utf8");
-  const session = journalFactory(options.session, journalPath);
+  await mkdir(dirname(journalFile), { recursive: true });
+  await writeFile(journalFile, `# run ${runId}, issue ${issue.number}\n`, "utf8");
+  const session = journalFactory(options.session, journalFile);
   /**
    * The gates' whole output goes to a file beside the record.
    *
@@ -3207,6 +3242,9 @@ async function runPlan(
     runId,
     root: options.checkout,
     steps,
+    // The run wrote a journal beside the record, so the record names it: the
+    // record is the file a reader is sent to.
+    hasJournal: true,
     ...(options.poolEvents === undefined ? {} : { pool: options.poolEvents }),
     ...(options.onStep === undefined ? {} : { onStep: options.onStep }),
     ...(options.onStepStart === undefined ? {} : { onStepStart: options.onStepStart }),

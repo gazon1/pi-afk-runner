@@ -123,6 +123,7 @@ import {
   verdictFile,
   prepareWorktree,
   isStale,
+  journalFileName,
   observePullRequest,
   pullRequestsByBranch,
   selectIssue,
@@ -3088,6 +3089,39 @@ describe("the CLI's run", () => {
       expect(await readFile(journal, "utf8")).toContain("the agent is working");
       // The record is written beside the journal, at the end.
       expect(result.record.endsWith(".md")).toBe(true);
+      expect(result.record.replace(/\.md$/, ".log")).toBe(journal);
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("test_the_record_names_the_journal_beside_it", async () => {
+    // The record is the file a reader is sent to, so the record is where the
+    // pointer to the journal belongs. The name it carries is the file's real
+    // name: one place says it, and the record reads it from there.
+    const fixture = await fixtureWithSetupScript();
+    try {
+      const { gh } = stubGh([{ number: 42, title: "an issue" }]);
+      const options = runOptions(fixture, gh);
+      const result = await runOnce(options);
+
+      const record = await readFile(result.record, "utf8");
+      // The record carries the journal's name, and says what the file holds.
+      const journalLine = record
+        .split("\n")
+        .find((line) => line.startsWith("- journal: "));
+      expect(journalLine).toBeDefined();
+      expect(journalLine).toContain(journalFileName(options.runId));
+      expect(journalLine).toContain("lines");
+      // The name in the record is the name of the file that is really there.
+      const journal = join(
+        fixture.repo,
+        "build",
+        "diagnostics",
+        "issue-42",
+        journalFileName(options.runId),
+      );
+      expect(existsSync(journal)).toBe(true);
       expect(result.record.replace(/\.md$/, ".log")).toBe(journal);
     } finally {
       await fixture.dispose();
