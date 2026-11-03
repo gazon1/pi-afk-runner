@@ -10,6 +10,10 @@
  * journal and a rule written twice is a rule whose two copies drift. A
  * pipeline that writes a journal names what the run was about; this module
  * says what the file looks like.
+ *
+ * The run's other files are named here too: the record and the gates' log sit
+ * beside the journal, in the directory this module chose, and their names are
+ * asked for the way the journal's name is.
  */
 
 import { appendFileSync } from "node:fs";
@@ -60,6 +64,28 @@ export function journalHeader(runId: string, subject: JournalSubject): string {
  */
 export function journalFileName(runId: string): string {
   return `${runId}.log`;
+}
+
+/**
+ * The record's file name: the run's own id and the `.md` extension.
+ *
+ * The record is the document a person reads, and it sits beside the journal.
+ * One place says its name, so the writer of the record and the reader of it
+ * are talking about the same file.
+ */
+export function recordFileName(runId: string): string {
+  return `${runId}.md`;
+}
+
+/**
+ * The gates' log file name: the run's own id and the `-gates.log` extension.
+ *
+ * The whole of what the gates printed goes there, beside the record. The work
+ * run and the merge run both open one, and they ask for the name here — two
+ * pipelines spelling the same name are two names that can drift.
+ */
+export function gatesLogFileName(runId: string): string {
+  return `${runId}-gates.log`;
 }
 
 /**

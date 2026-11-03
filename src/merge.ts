@@ -33,6 +33,7 @@ import {
 } from "./gh.js";
 import { GATE_OUTPUT_LIMIT_BYTES, GATE_TIMEOUT_MS, gateFailure, gateInvocation } from "./gates.js";
 import {
+  gatesLogFileName,
   journalDirectory,
   journalFactory,
   journalHeader,
@@ -403,7 +404,7 @@ async function mergeOne(
           options,
           factory,
           worktreePath,
-          join(directory, `${runId}-gates.log`),
+          join(directory, gatesLogFileName(runId)),
           remainingMs,
         );
       },

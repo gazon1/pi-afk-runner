@@ -36,11 +36,13 @@ import { budgetShares } from "./budget.js";
 import { isProtectedPath } from "./guard.js";
 import { GateFailed, runGates } from "./gates.js";
 import {
+  gatesLogFileName,
   journalDirectory,
   journalFactory,
   journalFileName,
   journalHeader,
   journalPath,
+  recordFileName,
   type JournalSubject,
 } from "./journal.js";
 import {
@@ -1531,7 +1533,7 @@ export async function writeRunRecord(options: {
 }): Promise<string> {
   const directory = options.directory ?? recordDirectory(options.root, options.issue);
   await mkdir(directory, { recursive: true });
-  const path = join(directory, `${options.runId}.md`);
+  const path = join(directory, recordFileName(options.runId));
   await writeFile(
     path,
     renderRecord({
@@ -2677,7 +2679,7 @@ async function runPlan(
    */
   const gatesLog = join(
     recordDirectory(options.checkout, issue.number),
-    `${runId}-gates.log`,
+    gatesLogFileName(runId),
   );
   /**
    * The gates run on the tree the agent left, and again on the tree a
