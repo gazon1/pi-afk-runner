@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import { describe, expect, it } from "vitest";
@@ -13,7 +13,7 @@ import {
   openPullRequestsArgs,
   type OpenPullRequest,
 } from "../src/gh.js";
-import { runGit, type CommandRunner } from "../src/git.js";
+import { CommandFailed, runGit, type CommandRunner } from "../src/git.js";
 import {
   issueNumberFromBranch,
   mergeReviewedPullRequests,
@@ -505,6 +505,72 @@ describe("the merge pipeline", () => {
           env: fixture.env,
         }),
       ).toBe("both sides");
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("test_the_merge_runs_gate_log_lands_in_the_merge_runs_own_directory", async () => {
+    // A merge run has its own diagnostics: the work run's directory holds the
+    // work run's files, and a merge that put its gate's log there would write
+    // into a directory that is not its own.
+    const fixture = await createFixtureRepository({
+      files: { "scripts/setup-worktree.sh": SETUP, "shared.txt": "the base\n" },
+    });
+    try {
+      // The branch adds a file and the base changes another, so the merge is
+      // clean but the branch moves — and the gate runs.
+      await pushBranch(fixture, "work.txt", "the work\n");
+      await moveMain(fixture, "the base moved\n");
+
+      const failingGate: CommandRunner = async (spec) => {
+        if (spec.command === "python3") {
+          return JSON.stringify({
+            workflow: "ci.yml",
+            verdict: "ci.yml  run 1  success",
+            exit: 0,
+          });
+        }
+        if (spec.args[0] === "./check.sh") {
+          // The gate says what it has to say, and it says it in the file the
+          // merge's record is about to name.
+          if (spec.outputFile !== undefined) {
+            await writeFile(spec.outputFile, "the gate is red\n", "utf8");
+          }
+          throw new CommandFailed(1, spec.command, [...spec.args], "the gate is red", "");
+        }
+        return "";
+      };
+
+      const { gh } = stubGh([reviewedPullRequest()]);
+      const result = await mergeReviewedPullRequests(
+        options(fixture, gh, { run: failingGate }),
+      );
+
+      // The gate refused the branch, and the merge stopped at it.
+      expect(result.failed[0]?.step).toBe("gates");
+
+      // The log is in the merge run's own directory, under the run's own name.
+      const directory = join(fixture.repo, "build", "diagnostics", "merge", "pr-7");
+      const log = join(directory, "2026-11-02T09-00-00-000Z-abcdef12-gates.log");
+      expect(existsSync(log)).toBe(true);
+
+      // And it is the only gates log there is: the work run's directory is not
+      // the merge's to write in.
+      const logs = (
+        await readdir(join(fixture.repo, "build", "diagnostics"), { recursive: true })
+      ).filter((name) => name.endsWith("-gates.log"));
+      expect(logs).toEqual([
+        join("merge", "pr-7", "2026-11-02T09-00-00-000Z-abcdef12-gates.log"),
+      ]);
+
+      // The record names it, and the file it names is the one that is there.
+      const record = await readFile(
+        join(directory, "2026-11-02T09-00-00-000Z-abcdef12.md"),
+        "utf8",
+      );
+      const named = /the whole output is at (.+?)(?: — |$)/m.exec(record)?.[1];
+      expect(named).toBe(log);
     } finally {
       await fixture.dispose();
     }

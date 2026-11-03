@@ -67,9 +67,9 @@ import { fakeGhApi, fakeWorktree, valueAfter } from "./shared.js";
 import { chmod, cp, mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { execFile, spawn } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import {
   GH_TIMEOUT_MS,
@@ -3756,6 +3756,85 @@ describe("the CLI's run", () => {
 
       // And the record says that what it quotes is a tail.
       expect(record).toContain("only its last 16 KiB are quoted here");
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("test_a_failing_gate_leaves_its_log_beside_the_record_under_the_name_the_record_names", async () => {
+    // The record names the file the whole output is in, and the file has to be
+    // there: under that name, in the record's own directory. A record that
+    // names a file nobody can find sends the reader looking for nothing.
+    const fixture = await fixtureWithSetupScript();
+    try {
+      const { gh } = stubGh([{ number: 42, title: "an issue" }]);
+      const options = runOptions(fixture, gh);
+      const run: CommandRunner = async (spec) => {
+        if (spec.command === "bash" && spec.args[0] === "./check.sh") {
+          // A gate that prints and fails: the output has to reach the file.
+          await writeFile(
+            join(spec.cwd, "check.sh"),
+            "#!/bin/sh\necho 'the build is broken'\nexit 1\n",
+            "utf8",
+          );
+          return runCommand(spec);
+        }
+        return JSON.stringify({ verdict: "ci.yml  run 1  success" });
+      };
+
+      const failure = await runOnce({ ...options, run, gates: GATES }).then(
+        () => null,
+        (error: unknown) => error,
+      );
+
+      expect(failure).toBeInstanceOf(RunFailed);
+      const record = await readFile((failure as RunFailed).record, "utf8");
+
+      // The step line names the file the whole output is in.
+      const named = /the whole output is at (.+?)(?: — |$)/m.exec(record)?.[1];
+      expect(named).toBeTruthy();
+
+      // It is the gates log: the run's own id and the `.log`, in the record's
+      // own directory, beside the record itself.
+      const log = join(recordDirectory(fixture.repo, 42), `${options.runId}-gates.log`);
+      expect(named).toBe(log);
+      expect(dirname(log)).toBe(dirname((failure as RunFailed).record));
+
+      // And the file the record names is the file that is there, with what the
+      // gate printed in it.
+      expect(existsSync(log)).toBe(true);
+      expect(await readFile(log, "utf8")).toContain("the build is broken");
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("test_a_run_whose_gates_pass_leaves_no_gates_log", async () => {
+    // The log of a green build is evidence of nothing, and a diagnostics
+    // directory full of them is a directory nobody reads.
+    const fixture = await fixtureWithSetupScript();
+    try {
+      const { gh } = stubGh([{ number: 42, title: "an issue" }]);
+      const options = runOptions(fixture, gh);
+      const run: CommandRunner = async (spec) => {
+        // A runner that is asked for a file writes the command's output there:
+        // the log is there, and the run is the one that takes it away again.
+        if (spec.outputFile !== undefined) {
+          await writeFile(spec.outputFile, "the gate said this\n", "utf8");
+        }
+        return JSON.stringify({ verdict: "ci.yml  run 1  success" });
+      };
+
+      const result = await runOnce({ ...options, run, gates: GATES });
+
+      // The gates passed, and the run carried on.
+      expect(result.outcome).toBe("completed");
+
+      // The run's own files are there, and the gates left no log beside them.
+      const directory = recordDirectory(fixture.repo, 42);
+      const files = await readdir(directory);
+      expect(result.record).toBe(join(directory, `${options.runId}.md`));
+      expect(files.filter((name) => name.endsWith("-gates.log"))).toEqual([]);
     } finally {
       await fixture.dispose();
     }
