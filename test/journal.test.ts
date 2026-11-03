@@ -16,11 +16,13 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
+  issueSubject,
   journalDirectory,
   journalFactory,
   journalFileName,
   journalHeader,
   journalPath,
+  pullRequestSubject,
   sweepJournalDirectory,
   sweepJournalHeader,
 } from "../src/journal.js";
@@ -29,10 +31,10 @@ import { fakeSession } from "./shared.js";
 describe("the journal file", () => {
   it("names the run and what the run was about", () => {
     // The first line says whose file this is, before a reader reads any of it.
-    expect(journalHeader("run-1", { kind: "issue", number: 42 })).toBe(
+    expect(journalHeader("run-1", issueSubject(42))).toBe(
       "# run run-1, issue 42",
     );
-    expect(journalHeader("run-2", { kind: "pull request", number: 7 })).toBe(
+    expect(journalHeader("run-2", pullRequestSubject(7))).toBe(
       "# run run-2, pull request 7",
     );
     expect(sweepJournalHeader("run-3")).toBe("# run run-3, the merge sweep");
@@ -41,10 +43,10 @@ describe("the journal file", () => {
   it("lives beside the run's record", () => {
     // The work run's diagnostics and the merge run's are different places,
     // and each is spelled the same way whoever asks for it.
-    expect(journalDirectory("/repo", { kind: "issue", number: 42 })).toBe(
+    expect(journalDirectory("/repo", issueSubject(42))).toBe(
       join("/repo", "build", "diagnostics", "issue-42"),
     );
-    expect(journalDirectory("/repo", { kind: "pull request", number: 7 })).toBe(
+    expect(journalDirectory("/repo", pullRequestSubject(7))).toBe(
       join("/repo", "build", "diagnostics", "merge", "pr-7"),
     );
   });

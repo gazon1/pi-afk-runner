@@ -2909,7 +2909,10 @@ describe("the failure path and the record", () => {
       // And it names the issue, the steps and the outcome — enough to
       // reconstruct the run's timeline without the runner's process.
       const record = await readFile(outcome.record, "utf8");
-      expect(record).toContain("issue: 42");
+      // The heading names the run and the subject it was about, and the
+      // subject's own line names the same subject.
+      expect(record.startsWith("# Run issue-42\n")).toBe(true);
+      expect(record).toContain("- issue: 42");
       expect(record).toContain("outcome: completed");
       expect(record).toContain("claim — ok");
       expect(record).toContain("worktree — ok");

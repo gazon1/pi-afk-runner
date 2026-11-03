@@ -21,15 +21,19 @@ import { join } from "node:path";
 import type { SessionFactory } from "./session.js";
 
 /**
- * The words that name what a run was about.
+ * The kinds that name what a run was about.
  *
  * They are written here, once. The subject's kind is one of them, and the
  * constructors below are the only way a caller names a kind — so a pipeline
  * that writes a record cannot spell the subject a third way.
+ *
+ * A kind carries the word the record's own line and the journal's header read,
+ * and what joins the word to the number in a record's heading: an issue's
+ * heading says `issue-42` and a pull request's says `pull request 7`.
  */
-const SUBJECT_WORDS = {
-  issue: "issue",
-  pullRequest: "pull request",
+const SUBJECT_KINDS = {
+  issue: { word: "issue", join: "-" },
+  pullRequest: { word: "pull request", join: " " },
 } as const;
 
 /**
@@ -39,12 +43,12 @@ const SUBJECT_WORDS = {
  * lives, what it is called and how it starts — is decided here, so a third
  * pipeline writes the same shape without spelling it again.
  *
- * Its kinds are the words above, so the wording of the subject is written
+ * Its kinds are the ones above, so the wording of the subject is written
  * once — and the record and the journal both read it from here.
  */
 export type JournalSubject =
-  | { readonly kind: typeof SUBJECT_WORDS.issue; readonly number: number }
-  | { readonly kind: typeof SUBJECT_WORDS.pullRequest; readonly number: number };
+  | { readonly kind: typeof SUBJECT_KINDS.issue; readonly number: number }
+  | { readonly kind: typeof SUBJECT_KINDS.pullRequest; readonly number: number };
 
 /**
  * The subject of a run about an issue.
@@ -53,7 +57,7 @@ export type JournalSubject =
  * both read, and it is spelled in one place.
  */
 export function issueSubject(number: number): JournalSubject {
-  return { kind: SUBJECT_WORDS.issue, number };
+  return { kind: SUBJECT_KINDS.issue, number };
 }
 
 /**
@@ -63,7 +67,7 @@ export function issueSubject(number: number): JournalSubject {
  * journal both read, and it is spelled in one place.
  */
 export function pullRequestSubject(number: number): JournalSubject {
-  return { kind: SUBJECT_WORDS.pullRequest, number };
+  return { kind: SUBJECT_KINDS.pullRequest, number };
 }
 
 /**
@@ -84,7 +88,7 @@ function mergeDirectory(root: string): string {
  * journal sits beside the run's record, in the same directory.
  */
 export function journalDirectory(root: string, subject: JournalSubject): string {
-  return subject.kind === SUBJECT_WORDS.issue
+  return subject.kind === SUBJECT_KINDS.issue
     ? join(root, "build", "diagnostics", `issue-${subject.number}`)
     : join(mergeDirectory(root), `pr-${subject.number}`);
 }
@@ -117,7 +121,7 @@ export function sweepJournalHeader(runId: string): string {
  * knows which run it belongs to before reading a line of it.
  */
 export function journalHeader(runId: string, subject: JournalSubject): string {
-  return `# run ${runId}, ${subject.kind} ${subject.number}`;
+  return `# run ${runId}, ${subject.kind.word} ${subject.number}`;
 }
 
 /**

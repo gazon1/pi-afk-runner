@@ -1494,8 +1494,8 @@ function renderRecord(options: {
   readonly runId: string;
   readonly outcome: "completed" | "failed";
   readonly steps: readonly StepRecord[];
-  /** The record's first line, when it is not an issue's. */
-  readonly heading?: string;
+  /** The name of what the run was — "Run" for a work run, "Merge" for a merge. */
+  readonly runName?: string;
   /** What the run was about — the issue by default, a pull request for a merge. */
   readonly subject?: JournalSubject;
   /** What the model pool did during the run. */
@@ -1508,10 +1508,14 @@ function renderRecord(options: {
   // The subject says what the run was about, and the record reads both the
   // word and the number from it: the word is spelled in one place.
   const subject = options.subject ?? issueSubject(options.issue);
+  // The heading says what the run was and what it was about. The caller says
+  // only what its own run was — "Run" or "Merge" — and the subject's kind
+  // says the rest, so a pipeline cannot spell the subject a second way.
+  const heading = `# ${options.runName ?? "Run"} ${subject.kind.word}${subject.kind.join}${subject.number}`;
   const lines = [
-    options.heading ?? `# Run issue-${options.issue}`,
+    heading,
     "",
-    `- ${subject.kind}: ${subject.number}`,
+    `- ${subject.kind.word}: ${subject.number}`,
     `- run: ${options.runId}`,
     `- runner: ${RUNNER_STAMP}`,
     `- outcome: ${options.outcome}`,
@@ -1583,7 +1587,8 @@ export async function writeRunRecord(options: {
   readonly steps: readonly StepRecord[];
   /** Where the record goes, when it is not under the issue's own directory. */
   readonly directory?: string;
-  readonly heading?: string;
+  /** The name of what the run was — "Run" for a work run, "Merge" for a merge. */
+  readonly runName?: string;
   /** What the run was about — the issue by default, a pull request for a merge. */
   readonly subject?: JournalSubject;
   /** What the model pool did during the run. */
@@ -1603,7 +1608,7 @@ export async function writeRunRecord(options: {
       runId: options.runId,
       outcome: options.outcome,
       steps: options.steps,
-      ...(options.heading === undefined ? {} : { heading: options.heading }),
+      ...(options.runName === undefined ? {} : { runName: options.runName }),
       ...(options.subject === undefined ? {} : { subject: options.subject }),
       ...(options.pool === undefined ? {} : { pool: options.pool }),
       ...(options.packs === undefined ? {} : { packs: options.packs }),
@@ -1667,7 +1672,8 @@ export async function runSteps(options: {
   readonly steps: readonly Step[];
   /** Where the record goes, when it is not under the issue's own directory. */
   readonly directory?: string;
-  readonly heading?: string;
+  /** The name of what the run was — "Run" for a work run, "Merge" for a merge. */
+  readonly runName?: string;
   /** What the run was about — the issue by default, a pull request for a merge. */
   readonly subject?: JournalSubject;
   /** What the model pool did during the run. */
@@ -1769,7 +1775,7 @@ export async function runSteps(options: {
       outcome,
       steps,
       ...(options.directory === undefined ? {} : { directory: options.directory }),
-      ...(options.heading === undefined ? {} : { heading: options.heading }),
+      ...(options.runName === undefined ? {} : { runName: options.runName }),
       ...(options.subject === undefined ? {} : { subject: options.subject }),
       ...(options.pool === undefined ? {} : { pool: options.pool }),
       ...(options.packs === undefined ? {} : { packs: options.packs }),

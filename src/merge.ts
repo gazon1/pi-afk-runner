@@ -557,7 +557,10 @@ async function mergeOne(
       root: options.checkout,
       steps,
       directory,
-      heading: `# Merge pull request ${candidate.number}`,
+      // The merge's record says what the run was — a merge — and the subject
+      // says what it was about. The word that names the subject is the
+      // subject's own.
+      runName: "Merge",
       subject,
       ...(options.poolEvents === undefined ? {} : { pool: options.poolEvents }),
       ...(options.onStep === undefined ? {} : { onStep: options.onStep }),
