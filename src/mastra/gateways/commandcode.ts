@@ -42,7 +42,7 @@ export class CommandCodeGateway extends MastraModelGateway {
     return {
       [COMMANDCODE_PROVIDER]: {
         name: "Command Code",
-        models: ["reflection/beam:free"],
+        models: [],
         apiKeyEnvVar: COMMANDCODE_API_KEY,
         gateway: this.id,
         url: COMMANDCODE_URL,
