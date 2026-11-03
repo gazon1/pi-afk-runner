@@ -49,6 +49,37 @@ function modelOf(turns: unknown[]): MastraModel {
   } as unknown as MastraModel;
 }
 
+/**
+ * A model that keeps what it was asked.
+ *
+ * The prompts are the test's window into the conversation: what the session
+ * said between the steps is in the request that follows it.
+ */
+function recordingModelOf(turns: unknown[]): {
+  readonly model: MastraModel;
+  readonly prompts: unknown[];
+} {
+  const prompts: unknown[] = [];
+  const model = {
+    specificationVersion: "v2",
+    provider: "test",
+    modelId: "test-model",
+    supportedUrls: {},
+    async doGenerate(options: { prompt?: unknown }) {
+      prompts.push(options?.prompt);
+      const turn = turns.shift();
+      if (turn === undefined) {
+        throw new Error("the mock model ran out of turns");
+      }
+      return turn;
+    },
+    async doStream() {
+      throw new Error("the mock model does not stream");
+    },
+  } as unknown as MastraModel;
+  return { model, prompts };
+}
+
 /** A turn the model answers with: text, and why it stopped. */
 function textTurn(text: string): unknown {
   return {
@@ -379,6 +410,53 @@ describe("the session of the Mastra engine", () => {
     try {
       await session.prompt("go");
       expect(usage).toEqual([15]);
+    } finally {
+      session.dispose();
+    }
+  });
+
+  it("tells a turn that read enough to do the work", async () => {
+    // A turn that reads the tree does not stop by itself. The session says,
+    // between the steps, that the reading is over — the model sees it in the
+    // next request, not in the instruction it read at the start.
+    const cwd = await mkdtemp(join(tmpdir(), "afk-worktree-"));
+    const { model, prompts } = recordingModelOf([
+      toolTurn("agent_test", { value: "1" }, "call-1"),
+      toolTurn("agent_test", { value: "2" }, "call-2"),
+      toolTurn("agent_test", { value: "3" }, "call-3"),
+      textTurn("the work is done"),
+    ]);
+    const session = await createMastraSession({
+      model,
+      cwd,
+      systemPromptSections: {},
+      tools: [specOf()],
+      feedback: { afterSteps: 2, text: "you have read enough: make the change" },
+    });
+    try {
+      await session.prompt("work the issue");
+      expect(JSON.stringify(prompts)).toContain("you have read enough: make the change");
+    } finally {
+      session.dispose();
+    }
+  });
+
+  it("says nothing between the steps while the model is still reading", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "afk-worktree-"));
+    const { model, prompts } = recordingModelOf([
+      toolTurn("agent_test", { value: "1" }, "call-1"),
+      textTurn("the work is done"),
+    ]);
+    const session = await createMastraSession({
+      model,
+      cwd,
+      systemPromptSections: {},
+      tools: [specOf()],
+      feedback: { afterSteps: 12, text: "you have read enough: make the change" },
+    });
+    try {
+      await session.prompt("work the issue");
+      expect(JSON.stringify(prompts)).not.toContain("you have read enough");
     } finally {
       session.dispose();
     }

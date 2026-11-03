@@ -47,6 +47,7 @@ import {
 import {
   UNTRUSTED_INPUT_RULE,
   UNTRUSTED_INPUT_SECTION,
+  WORK_FEEDBACK,
   addUsage,
   briefFence,
   cutOffMessage,
@@ -68,6 +69,7 @@ import {
   addDetachedWorktree,
   addWorktree,
   branchesWithWork,
+  changedPaths,
   fetchCommit,
   fetchRef,
   headRef,
@@ -1083,6 +1085,9 @@ async function gateFixWorktree(options: {
   const session = await options.factory({
     cwd: options.cwd,
     systemPromptSections: { [UNTRUSTED_INPUT_SECTION]: UNTRUSTED_INPUT_RULE },
+    // The fix's turn reads the code and then changes it; a model that reads
+    // forever is told, between its steps, that the reading is over.
+    feedback: WORK_FEEDBACK,
   });
   await runPromptArray({
     session,
@@ -1114,6 +1119,9 @@ export async function fixWorktree(options: {
   const session = await options.factory({
     cwd: options.cwd,
     systemPromptSections: { [UNTRUSTED_INPUT_SECTION]: UNTRUSTED_INPUT_RULE },
+    // The fix's turn reads the findings and then changes the code; a model
+    // that reads forever is told, between its steps, that the reading is over.
+    feedback: WORK_FEEDBACK,
   });
   const result = await runPromptArray({
     session,
@@ -2831,6 +2839,7 @@ async function runPlan(
             commits: carried,
           },
           gh: options.gh,
+          git: options.git,
           ...(options.batchRelated === undefined ? {} : { batchRelated: options.batchRelated }),
           // The session does not get the whole budget: the gates run after
           // it, and a session that may spend everything leaves them nothing
@@ -2882,9 +2891,12 @@ async function runPlan(
         // about to be removed — so the runner commits it on the agent's behalf.
         // A clean worktree makes this a no-op.
         await commitAll(options.git, state.worktreePath, "the agent's work");
-        const count = (await options.git(["rev-list", "--count", `${state.base}..HEAD`], { cwd: state.worktreePath })).trim();
-        if (count === "0") {
-          throw new Error("the agent made no commits — no changes to push or open a pull request");
+        // The work is the **paths** that changed, not the commits: a commit
+        // that carries the host's own state is not the work, and a run that
+        // pushed it opened a pull request with nothing in it.
+        const paths = await changedPaths(options.git, state.worktreePath, state.base);
+        if (paths.length === 0) {
+          throw new Error("the agent made no changes — no work to push or open a pull request");
         }
         // The work is committed, and the gates run on it: the tree they judge
         // is the tree that is pushed.
