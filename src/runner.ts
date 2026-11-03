@@ -75,6 +75,7 @@ import {
   headRef,
   issueWorktreePath,
   pushWorkBranch,
+  readClaimBase,
   readRemoteSha,
   removeWorktree,
   runCommand,
@@ -88,6 +89,7 @@ import {
   commentIssue,
   createPullRequest,
   dependencyNumbers,
+  newestReviewVerdict,
   postCommentArgs,
   pullRequestBody,
   readAllOpenPullRequests,
@@ -2620,7 +2622,14 @@ async function runPlan(
   const issue = plan.issue;
   options.onIssue?.(issue);
   const state = {
-    claimed: false,
+    /**
+     * Whether the claim is this run's to release.
+     *
+     * A run that claimed the issue took the claim, and a run that resumes a
+     * dead run's work holds the claim that is already there: both release it
+     * when the run fails.
+     */
+    holdsClaim: false,
     base: "",
     worktreePath: "",
     /** The PATH the repository's own setup asked the gates to run with. */
@@ -2629,7 +2638,8 @@ async function runPlan(
     reviewedSha: "",
     slug: null as string | null,
     // The verdict is null until a review states one: a run that never got one
-    // has no verdict, and the re-count falls back to the pass it always wrote.
+    // has no verdict, and a run that resumes a review reads the verdict the
+    // pull request's own comment states.
     verdict: null as "pass" | "fail" | null,
     /** The tokens and the cost, when the provider reported them. */
     usage: undefined as RunUsage | undefined,
@@ -2781,7 +2791,7 @@ async function runPlan(
         if (!outcome.claimed) {
           throw new Error(outcome.reason);
         }
-        state.claimed = true;
+        state.holdsClaim = true;
         state.base = outcome.base;
         return `claimed from ${outcome.base.slice(0, 8)}`;
       },
@@ -2962,13 +2972,46 @@ async function runPlan(
   } else {
     // The work is already pushed. The worktree is where that work is read —
     // the reviewer needs the code, and the branch is not pushed again.
-    state.worktreePath = issueWorktreePath(options.worktreeRoot, issue.number);
-    await prepareExistingWorktree(options, state.worktreePath, issue.number);
-    // A resume has no claim to record the base, and the size of a fix's diff
-    // is read from the base the pull request is against.
-    state.base = await fetchCommit(options.git, options.checkout, {
-      remote: options.remote,
-      ref: headRef(options.baseBranch),
+    //
+    // It is a **step**, like the working path's: a failure here is a failure
+    // of the run, and a run that fails has to leave a record behind and
+    // release what it held. A preparation that happens outside the steps
+    // leaves neither.
+    steps.push({
+      name: "worktree",
+      run: async () => {
+        // The claim is the dead run's, and this run works the issue under it:
+        // the claim is this run's to release.
+        state.holdsClaim = true;
+        state.worktreePath = issueWorktreePath(options.worktreeRoot, issue.number);
+        await prepareExistingWorktree(options, state.worktreePath, issue.number);
+        // The base of a resumed run is the base the claim was taken from: the
+        // change the branch carries is the diff against that base, and the
+        // claim is what recorded it. The base branch's head is the fallback —
+        // a claim whose ref is gone cannot say what the work was taken from.
+        const claimed = await readClaimBase(options.git, options.checkout, {
+          remote: options.remote,
+          issueNumber: issue.number,
+        });
+        state.base =
+          claimed ??
+          (await fetchCommit(options.git, options.checkout, {
+            remote: options.remote,
+            ref: headRef(options.baseBranch),
+          }));
+        // The head the branch carries, and the change it carries: the re-count
+        // writes the change's verdict file, and it does so even when the run
+        // itself did no work.
+        const head = await headSha(options.git, state.worktreePath);
+        state.slug = await changedChangeSlug(options.git, state.worktreePath, {
+          base: state.base,
+          head,
+        });
+        // The commit a review of this branch judges: the branch's head, which
+        // is what the worktree holds.
+        state.reviewedSha = head;
+        return state.worktreePath;
+      },
     });
   }
 
@@ -3179,11 +3222,25 @@ async function runPlan(
           gh: options.gh,
         });
       }
+      // The verdict the file carries: the review this run made, or — for a run
+      // that resumes after the review landed — the verdict the pull request's
+      // own newest marked comment states. The gate reads that comment the same
+      // way, so the file and the gate cannot disagree.
+      const stated =
+        state.reviewCount > 0
+          ? state.verdict
+          : newestReviewVerdict(plan.pullRequest?.comments ?? []);
       // A run whose deadline left no room for a review has no verdict to
       // write. A pass file without a review is a lie the next reader would
       // believe, so the step says what happened instead.
-      if (state.reviewCount === 0) {
+      if (state.reviewCount === 0 && plan.kind !== "re-count") {
         return "no review to count";
+      }
+      // The review that is on the pull request states no verdict: the gate
+      // decides nothing about it either, and a file that said `pass` would be
+      // a lie the next reader would believe.
+      if (stated === null) {
+        return "the review states no verdict";
       }
       if (state.slug === null) {
         return "no change to count";
@@ -3199,7 +3256,7 @@ async function runPlan(
         join(directory, `${state.slug}.md`),
         verdictFile({
           slug: state.slug,
-          verdict: state.verdict ?? "pass",
+          verdict: stated,
           date: now.toISOString().slice(0, 10),
           pullRequest: state.pullRequest,
           reviewed: state.reviewedSha,
@@ -3236,7 +3293,7 @@ async function runPlan(
     ...(options.onStepStart === undefined ? {} : { onStepStart: options.onStepStart }),
     ...(options.stopped === undefined ? {} : { stopped: options.stopped }),
     release: async () => {
-      if (!state.claimed) {
+      if (!state.holdsClaim) {
         return;
       }
       // A stopped run that already pushed is not a dead run: the claim is what
@@ -3254,9 +3311,11 @@ async function runPlan(
       }
       // The work a failed run did is durable: what the agent left in the
       // worktree is committed to the branch before the worktree goes, so the
-      // next run continues it instead of starting again.
+      // next run continues it instead of starting again. A resumed run's
+      // worktree is a detached copy of what is already pushed: what is in it
+      // is scratch, and a commit there would go with the worktree.
       const kept =
-        state.worktreePath === ""
+        state.worktreePath === "" || !works
           ? null
           : await preserveUnfinishedWork({
               git: options.git,
@@ -3279,7 +3338,7 @@ async function runPlan(
   // A run that closed or split its issue leaves no claim behind: the claim is
   // what points the next run at a pull request, and this issue has none. The
   // release also removes the worktree, which is scratch on every path.
-  if (state.decision !== "work" && state.claimed) {
+  if (state.decision !== "work" && state.holdsClaim) {
     await releaseRun({
       repo: options.repo,
       remote: options.remote,
