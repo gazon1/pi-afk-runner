@@ -235,6 +235,44 @@ describe("the guard on the Mastra engine", () => {
     expect(denyReason({ command: 'grep -rn "unittest discover" .github/workflows/ci.yml' })).toBeNull();
   });
 
+  it("refuses the suite of every runner the policy names, and lets a search through", () => {
+    // The list of the programs that are a suite is the policy's, and the
+    // policy refuses them all: on their own, behind a `cd`, behind a
+    // `timeout`, and behind a shell's own `-c`.
+    const suites: readonly (readonly [string, string])[] = [
+      ["pytest -q", "pytest"],
+      ["py.test tests/", "py.test"],
+      ["python3 -m unittest discover", "unittest"],
+      ["python3 -m pytest", "pytest"],
+      ["vitest run", "vitest"],
+      ["npx jest", "jest"],
+      ["npm test", "npm"],
+      ["gradle test", "gradle"],
+      ["mvn test", "mvn"],
+      ["go test ./...", "go"],
+      ["cargo test", "cargo"],
+      ["rspec", "rspec"],
+    ];
+    for (const [suite, name] of suites) {
+      for (const command of [
+        suite,
+        `cd /work && ${suite}`,
+        `cd /work && timeout 3000 ${suite}`,
+        `bash -c "${suite}"`,
+      ]) {
+        expect(denyReason({ command }) ?? "").toContain("Refused");
+      }
+      // And the word is not the suite: reading how the target gates itself
+      // is the work, and the work is allowed.
+      expect(denyReason({ command: `grep -rn ${name} .github/workflows/ci.yml` })).toBeNull();
+    }
+    // And the argument is what makes the program a suite: `npm run test` is
+    // one, and a build is not.
+    expect(denyReason({ command: "npm run test" }) ?? "").toContain("Refused");
+    expect(denyReason({ command: "cargo build" })).toBeNull();
+    expect(denyReason({ command: "go build ./..." })).toBeNull();
+  });
+
   it("refuses the suite behind a shell", () => {
     // The program a command starts may sit inside a shell's own command: the
     // agent puts it there, and the guard reads it there.
