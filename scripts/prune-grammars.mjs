@@ -13,9 +13,11 @@
  * had before, and a host that loses them has a runner that never asks for one.
  */
 
+import { realpathSync } from "node:fs";
 import { readdir, rm, stat } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const require = createRequire(import.meta.url);
 
@@ -37,24 +39,73 @@ async function sizeOf(directory) {
   return total;
 }
 
-try {
-  const grammars = dirname(require.resolve(`${GRAMMARS}/package.json`));
-  const directory = join(grammars, GRAMMARS_DIRECTORY);
+/**
+ * Drop the grammars out of a package, and report what was dropped.
+ *
+ * This is the seam the install step and its test both call: it takes the
+ * package to prune, takes the grammars out of it, and says how much it
+ * dropped. It leaves the rest of the package alone, and a package that is not
+ * there is reported rather than thrown — the install must never fail over it.
+ *
+ * @param {string} packageDirectory the root of the package to prune
+ * @returns {Promise<{dropped: boolean, bytes: number}>} what was dropped
+ */
+export async function pruneGrammars(packageDirectory) {
+  const directory = join(packageDirectory, GRAMMARS_DIRECTORY);
   const bytes = await sizeOf(directory).catch(() => null);
   if (bytes === null) {
     // The grammars are not there: an install that already dropped them.
-    console.log(`the packer carries no grammars: ${GRAMMARS} has none`);
-  } else {
-    await rm(directory, { recursive: true, force: true });
+    return { dropped: false, bytes: 0 };
+  }
+  await rm(directory, { recursive: true, force: true });
+  return { dropped: true, bytes };
+}
+
+/**
+ * The step the install runs: drop the grammars, and say how much it dropped.
+ *
+ * The package is found from here — this file's own location — so a runner
+ * installed as a dependency finds the grammars that sit beside it.
+ */
+async function prune() {
+  try {
+    const grammars = dirname(require.resolve(`${GRAMMARS}/package.json`));
+    const report = await pruneGrammars(grammars);
+    if (report.dropped) {
+      console.log(
+        `the packer carries no grammars: ${(report.bytes / 1_000_000).toFixed(0)} MB dropped ` +
+          `from ${GRAMMARS}`,
+      );
+    } else {
+      console.log(`the packer carries no grammars: ${GRAMMARS} has none`);
+    }
+  } catch (error) {
+    // The grammars are not there, or they are somewhere this step cannot reach.
+    // Either way the runner works: it never asks for a grammar.
     console.log(
-      `the packer carries no grammars: ${(bytes / 1_000_000).toFixed(0)} MB dropped ` +
-        `from ${GRAMMARS}`,
+      `the packer keeps its grammars: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
-} catch (error) {
-  // The grammars are not there, or they are somewhere this step cannot reach.
-  // Either way the runner works: it never asks for a grammar.
-  console.log(
-    `the packer keeps its grammars: ${error instanceof Error ? error.message : String(error)}`,
-  );
+}
+
+/**
+ * Whether this file is the one node was asked to run.
+ *
+ * The step is imported by its test, and the import must not prune anything:
+ * the effect belongs to the run, not to the load.
+ */
+function isTheEntryPoint() {
+  const entry = process.argv[1];
+  if (!entry) {
+    return false;
+  }
+  try {
+    return realpathSync(resolve(entry)) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (isTheEntryPoint()) {
+  await prune();
 }
