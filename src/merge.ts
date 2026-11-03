@@ -560,6 +560,9 @@ async function mergeOne(
       directory,
       heading: `# Merge pull request ${candidate.number}`,
       subject,
+      // The merge wrote its journal beside the record, so the record names it:
+      // the record is the file a reader is sent to.
+      hasJournal: true,
       ...(options.poolEvents === undefined ? {} : { pool: options.poolEvents }),
       ...(options.onStep === undefined ? {} : { onStep: options.onStep }),
       ...(options.onStepStart === undefined ? {} : { onStepStart: options.onStepStart }),

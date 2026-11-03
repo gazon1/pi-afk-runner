@@ -14,6 +14,7 @@ import {
   type OpenPullRequest,
 } from "../src/gh.js";
 import { runGit, type CommandRunner } from "../src/git.js";
+import { journalFileName } from "../src/journal.js";
 import {
   issueNumberFromBranch,
   mergeReviewedPullRequests,
@@ -634,6 +635,51 @@ describe("the merge pipeline", () => {
       );
       expect(existsSync(journal)).toBe(true);
       expect(await readFile(journal, "utf8")).toContain("the merge agent is working");
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("test_the_merge_record_names_the_journal_beside_it", async () => {
+    // The record is the file a reader is sent to, so the record is where the
+    // pointer to the journal belongs: a reader who opens a merge's record finds
+    // the journal without knowing how journals are named.
+    const fixture = await createFixtureRepository({ files: { "scripts/setup-worktree.sh": SETUP } });
+    try {
+      await pushBranch(fixture);
+      const { gh } = stubGh([reviewedPullRequest()]);
+
+      await mergeReviewedPullRequests(options(fixture, gh));
+
+      const record = await readFile(
+        join(
+          fixture.repo,
+          "build",
+          "diagnostics",
+          "merge",
+          "pr-7",
+          "2026-11-02T09-00-00-000Z-abcdef12.md",
+        ),
+        "utf8",
+      );
+      // The record carries the journal's name, and says what the file holds.
+      const journalLine = record
+        .split("\n")
+        .find((line) => line.startsWith("- journal: "));
+      expect(journalLine).toBeDefined();
+      expect(journalLine).toContain(journalFileName("2026-11-02T09-00-00-000Z-abcdef12"));
+      expect(journalLine).toContain("lines");
+      // The name in the record is the name of the file that is really there,
+      // and it is beside the record.
+      const journal = join(
+        fixture.repo,
+        "build",
+        "diagnostics",
+        "merge",
+        "pr-7",
+        journalFileName("2026-11-02T09-00-00-000Z-abcdef12"),
+      );
+      expect(existsSync(journal)).toBe(true);
     } finally {
       await fixture.dispose();
     }
