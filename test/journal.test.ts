@@ -16,11 +16,13 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
-  journalDirectory,
+  diagnosticsDirectory,
+  gatesLogPath,
   journalFactory,
   journalFileName,
   journalHeader,
   journalPath,
+  recordPath,
   sweepJournalDirectory,
   sweepJournalHeader,
 } from "../src/journal.js";
@@ -41,10 +43,10 @@ describe("the journal file", () => {
   it("lives beside the run's record", () => {
     // The work run's diagnostics and the merge run's are different places,
     // and each is spelled the same way whoever asks for it.
-    expect(journalDirectory("/repo", { kind: "issue", number: 42 })).toBe(
+    expect(diagnosticsDirectory("/repo", { kind: "issue", number: 42 })).toBe(
       join("/repo", "build", "diagnostics", "issue-42"),
     );
-    expect(journalDirectory("/repo", { kind: "pull request", number: 7 })).toBe(
+    expect(diagnosticsDirectory("/repo", { kind: "pull request", number: 7 })).toBe(
       join("/repo", "build", "diagnostics", "merge", "pr-7"),
     );
   });
@@ -61,6 +63,13 @@ describe("the journal file", () => {
     // The name in the record is the name on the disk, so one place says it.
     expect(journalFileName("run-1")).toBe("run-1.log");
     expect(journalPath("/dir", "run-1")).toBe(join("/dir", "run-1.log"));
+  });
+
+  it("names the record and the gates log of the run too", () => {
+    // The three files of a run live in the same directory, and one place says
+    // where each of them is: the journal, the record and the gates log.
+    expect(recordPath("/dir", "run-1")).toBe(join("/dir", "run-1.md"));
+    expect(gatesLogPath("/dir", "run-1")).toBe(join("/dir", "run-1-gates.log"));
   });
 
   it("gives every journal it wraps the same lines", async () => {

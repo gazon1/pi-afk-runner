@@ -35,7 +35,8 @@ import {
 } from "./gh.js";
 import { GATE_OUTPUT_LIMIT_BYTES, GATE_TIMEOUT_MS, gateFailure, gateInvocation } from "./gates.js";
 import {
-  journalDirectory,
+  diagnosticsDirectory,
+  gatesLogPath,
   journalFactory,
   journalHeader,
   journalPath,
@@ -379,7 +380,7 @@ async function mergeOne(
    * that dies leaves behind what it was doing when it died.
    */
   const subject = pullRequestSubject(candidate.number);
-  const directory = journalDirectory(options.checkout, subject);
+  const directory = diagnosticsDirectory(options.checkout, subject);
   const journalFile = journalPath(directory, runId);
   await mkdir(directory, { recursive: true });
   await writeFile(journalFile, `${journalHeader(runId, subject)}\n`, "utf8");
@@ -465,7 +466,7 @@ async function mergeOne(
           options,
           factory,
           worktreePath,
-          join(directory, `${runId}-gates.log`),
+          gatesLogPath(directory, runId),
           remainingMs,
         );
       },

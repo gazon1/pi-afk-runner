@@ -11,6 +11,12 @@
  * pipeline that writes a journal names what the run was about; this module
  * says what the file looks like.
  *
+ * The **directory** a run's files live in is written here as well, and it is
+ * this module that owns it: the directory holds the journal, the record and
+ * the gates log of the run, and the paths of all three are asked for here —
+ * one question, whatever kind of run it is. A caller that assembles a path of
+ * its own is a second copy of the shape, and the two copies drift.
+ *
  * The lines a reader sees are the run's log, and the adapter's log module
  * prints them (`src/mastra/log.ts`).
  */
@@ -35,9 +41,9 @@ const SUBJECT_WORDS = {
 /**
  * What a run was about: the issue's number, or the pull request's.
  *
- * It is the only thing a pipeline names. The journal's own shape — where it
- * lives, what it is called and how it starts — is decided here, so a third
- * pipeline writes the same shape without spelling it again.
+ * It is the only thing a pipeline names. The run's own files — the directory
+ * they live in, what they are called and how the journal starts — are decided
+ * here, so a third pipeline writes the same shape without spelling it again.
  *
  * Its kinds are the words above, so the wording of the subject is written
  * once — and the record and the journal both read it from here.
@@ -77,13 +83,15 @@ function mergeDirectory(root: string): string {
 }
 
 /**
- * Where the journal of a run lives.
+ * Where the files of a run live.
  *
  * `build/diagnostics/issue-<N>/` for a run about an issue, and
  * `build/diagnostics/merge/pr-<N>/` for a run about a pull request. The
- * journal sits beside the run's record, in the same directory.
+ * journal, the record and the gates log of the run sit beside each other, in
+ * the same directory — so this is the directory, and it is asked for the same
+ * way whichever kind of run it is.
  */
-export function journalDirectory(root: string, subject: JournalSubject): string {
+export function diagnosticsDirectory(root: string, subject: JournalSubject): string {
   return subject.kind === SUBJECT_WORDS.issue
     ? join(root, "build", "diagnostics", `issue-${subject.number}`)
     : join(mergeDirectory(root), `pr-${subject.number}`);
@@ -139,6 +147,46 @@ export function journalFileName(runId: string): string {
  */
 export function journalPath(directory: string, runId: string): string {
   return join(directory, journalFileName(runId));
+}
+
+/**
+ * The record's file name: the run's own id and the `.md` extension.
+ *
+ * One place says it, beside the journal's own name: the record is written
+ * under this name, and the name says which run's record it is.
+ */
+function recordFileName(runId: string): string {
+  return `${runId}.md`;
+}
+
+/**
+ * The record's path: the run's own directory, the run's id, the `.md`.
+ *
+ * The record sits beside the journal — the same directory — so a reader who
+ * opens one finds the other in the same place.
+ */
+export function recordPath(directory: string, runId: string): string {
+  return join(directory, recordFileName(runId));
+}
+
+/**
+ * The gates log's file name: the run's own id and the `-gates.log` suffix.
+ *
+ * The name says whose gates it is, and it is the name the record carries
+ * when it points at the whole of what a gate printed.
+ */
+function gatesLogFileName(runId: string): string {
+  return `${runId}-gates.log`;
+}
+
+/**
+ * The gates log's path: the run's own directory, the run's id, the name.
+ *
+ * The log sits beside the record that quotes the end of it, so the two are
+ * read together.
+ */
+export function gatesLogPath(directory: string, runId: string): string {
+  return join(directory, gatesLogFileName(runId));
 }
 
 /**
