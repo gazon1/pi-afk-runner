@@ -15,7 +15,9 @@
  * The record of each pull request lives under
  * `build/diagnostics/merge/pr-<N>/`, beside the work runs' own records, and
  * the journal of the merge — the session's lines, written while it works — is
- * the file beside that record.
+ * the file beside that record. The sweep has a journal of its own, under
+ * `build/diagnostics/merge/` beside those directories: the pull requests it
+ * considered, the ones it left alone and why, and where it stopped.
  */
 
 import { dirname, join } from "node:path";
@@ -37,7 +39,10 @@ import {
   journalFactory,
   journalHeader,
   journalPath,
+  journalWriter,
   pullRequestSubject,
+  sweepJournalDirectory,
+  sweepJournalHeader,
 } from "./journal.js";
 import {
   CommandFailed,
@@ -200,6 +205,32 @@ export async function mergeReviewedPullRequests(
   const startedAt = Date.now();
   const remainingMs = (): number =>
     Math.max(0, options.deadlineMs - (Date.now() - startedAt));
+
+  /**
+   * The journal of the sweep: the lines the sweep writes, beside the
+   * per-pull-request journals.
+   *
+   * Each pull request the sweep starts has a journal of its own, and a sweep
+   * that is killed between two pull requests leaves only those behind: nothing
+   * says which pull requests it considered, which it left alone, or where it
+   * stopped. This file is the sweep's own account, and it is there before the
+   * candidates are read, so a sweep that dies leaves behind what it was doing
+   * when it died.
+   *
+   * The sessions the sweep opens write to it too — the factory is wrapped
+   * once, the way the per-pull-request merge wraps it — so the file has the
+   * shape the other journals have.
+   */
+  const directory = sweepJournalDirectory(options.checkout);
+  const journalFile = journalPath(directory, runId);
+  await mkdir(directory, { recursive: true });
+  await writeFile(journalFile, `${sweepJournalHeader(runId)}\n`, "utf8");
+  const write = journalWriter(journalFile);
+  const sweepOptions: MergeOptions = {
+    ...options,
+    session: journalFactory(options.session, journalFile),
+  };
+
   const candidates = await readOpenPullRequests(
     options.repo,
     options.baseBranch,
@@ -209,14 +240,31 @@ export async function mergeReviewedPullRequests(
   const merged: number[] = [];
   const skipped: { pullRequest: number; reason: string }[] = [];
   const failed: { pullRequest: number; step: string; message: string }[] = [];
+  /**
+   * The pull requests the sweep left alone, counted for the sweep's own
+   * summary.
+   *
+   * A pull request whose branch is not ours is left alone too, and it is not
+   * a candidate the result names — so the count the summary says is the count
+   * of the lines the journal holds, not the length of the result's list.
+   */
+  let leftAlone = 0;
+  const leaveAlone = (pullRequest: number, reason: string): void => {
+    leftAlone += 1;
+    write(`left #${pullRequest} alone — ${reason}`);
+  };
 
   for (const candidate of candidates) {
     if (options.stopped?.() === true) {
+      write("the sweep was stopped");
       break;
     }
     const issueNumber = issueNumberFromBranch(candidate.headRefName);
     if (issueNumber === null) {
-      // Another author's pull request. The pipeline lands only its own.
+      // Another author's pull request. The pipeline lands only its own, and the
+      // journal says so: the sweep read it, and a reader has to see that it was
+      // left alone on purpose.
+      leaveAlone(candidate.number, "its branch is not ours");
       continue;
     }
     if (remainingMs() <= 0) {
@@ -227,30 +275,44 @@ export async function mergeReviewedPullRequests(
         pullRequest: candidate.number,
         reason: "the run's deadline left no budget",
       });
+      leaveAlone(candidate.number, "the run's deadline left no budget");
       continue;
     }
     const reason = await skipReason(options, candidate);
     if (reason !== null) {
       skipped.push({ pullRequest: candidate.number, reason });
+      leaveAlone(candidate.number, reason);
       continue;
     }
 
+    // The line before the work: a sweep that is killed while it works on a
+    // pull request has to say which one it was working on.
+    write(`#${candidate.number} is a candidate — the merge starts`);
     options.onSubject?.({ pullRequest: candidate.number, title: candidate.title });
     try {
-      const outcome = await mergeOne(options, candidate, issueNumber, runId, remainingMs);
+      const outcome = await mergeOne(sweepOptions, candidate, issueNumber, runId, remainingMs);
       if (outcome.merged) {
         merged.push(candidate.number);
+        write(`#${candidate.number} landed`);
       } else {
         skipped.push({ pullRequest: candidate.number, reason: outcome.reason });
+        leaveAlone(candidate.number, outcome.reason);
       }
     } catch (failure) {
+      const step = failure instanceof RunFailed ? failure.step : "merge";
+      const message = errorMessage(failure);
       failed.push({
         pullRequest: candidate.number,
-        step: failure instanceof RunFailed ? failure.step : "merge",
-        message: errorMessage(failure),
+        step,
+        message,
       });
+      write(`#${candidate.number} stopped at the ${step} step — ${message}`);
     }
   }
+
+  write(
+    `the sweep ended — ${merged.length} landed, ${leftAlone} left alone, ${failed.length} stopped`,
+  );
 
   return { merged, skipped, failed };
 }
