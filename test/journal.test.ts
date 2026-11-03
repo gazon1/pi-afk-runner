@@ -19,11 +19,13 @@ import chalk from "chalk";
 import { describe, expect, it } from "vitest";
 
 import {
+  gatesLogFileName,
   journalDirectory,
   journalFactory,
   journalFileName,
   journalHeader,
   journalPath,
+  recordFileName,
 } from "../src/journal.js";
 import { logTurn, refusalLine, type TurnAnswer } from "../src/mastra/log.js";
 import type { AgentSession } from "../src/session.js";
@@ -111,6 +113,14 @@ describe("the journal file", () => {
     // The name in the record is the name on the disk, so one place says it.
     expect(journalFileName("run-1")).toBe("run-1.log");
     expect(journalPath("/dir", "run-1")).toBe(join("/dir", "run-1.log"));
+  });
+
+  it("names the run's other files too", () => {
+    // The record and the gates' log sit beside the journal, and their names
+    // are asked for the same way — the work run and the merge run both write
+    // a gates' log, and two spellings of one name drift.
+    expect(recordFileName("run-1")).toBe("run-1.md");
+    expect(gatesLogFileName("run-1")).toBe("run-1-gates.log");
   });
 
   it("drops a line it cannot write, and keeps the run going", async () => {
