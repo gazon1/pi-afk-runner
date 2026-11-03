@@ -1,5 +1,8 @@
 /**
- * The run's journal, on Mastra.
+ * The run's log, on Mastra.
+ *
+ * The log is the lines a reader sees while the agent works; the file they are
+ * written to is the run's journal (`src/journal.ts`).
  *
  * Mastra answers with the whole turn at once, so the lines are written when
  * the answer comes: the tool calls it made, and what it said.
@@ -20,7 +23,7 @@ import { assistantTextLines, describeToolCall } from "../journal.js";
 export type TurnAnswer = Awaited<ReturnType<Agent["generate"]>>;
 
 /**
- * The line one tool call contributes to the run stream.
+ * The line one tool call contributes to the run's log.
  *
  * The line is spelled once, so the call that is written while it runs and the
  * call that is written when the turn ends read the same.
@@ -44,7 +47,7 @@ export function refusalLine(result: unknown): string | undefined {
 }
 
 /**
- * The lines one turn contributes to the run stream.
+ * The lines one turn contributes to the run's log.
  *
  * The tool calls come first — they are what the turn *did* — and then what it
  * said. A turn that said nothing writes nothing.
