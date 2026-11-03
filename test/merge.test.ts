@@ -676,6 +676,48 @@ describe("the merge pipeline", () => {
     }
   });
 
+  it("test_the_sweep_writes_a_record_beside_its_journal", async () => {
+    // The sweep writes a record of its own: what it landed, what it left alone
+    // and why, and what stopped. It is written when the sweep ends, and it
+    // sits under `build/diagnostics/merge/`, beside the sweep's journal.
+    const fixture = await createFixtureRepository({ files: { "scripts/setup-worktree.sh": SETUP } });
+    try {
+      const { gh } = stubGh([
+        reviewedPullRequest({ number: 7, isDraft: true }),
+        reviewedPullRequest({ number: 8, comments: [`${REVIEW_MARKER}\n\n**Verdict:** fail`] }),
+        reviewedPullRequest({ number: 9, headRefName: "someone/feature" }),
+      ]);
+
+      await mergeReviewedPullRequests(options(fixture, gh));
+
+      const record = join(
+        fixture.repo,
+        "build",
+        "diagnostics",
+        "merge",
+        "2026-11-02T09-00-00-000Z-abcdef12.md",
+      );
+      expect(existsSync(record)).toBe(true);
+      const lines = await readFile(record, "utf8");
+      // The record says what the run was about, and the sweep has no number
+      // of its own: it works on the pull requests, it is not one of them.
+      expect(lines).toContain("- the merge sweep");
+      // It holds what the sweep did: the ones it left alone, and why.
+      expect(lines).toContain("## Left alone");
+      expect(lines).toContain("- #7 — it is a draft");
+      expect(lines).toContain("- #8 — its newest review said fail");
+      expect(lines).toContain("- #9 — its branch is not ours");
+      // The ones it landed and the ones that stopped are sections of their
+      // own, so a reader sees at a glance that there were none.
+      expect(lines).toContain("## Landed");
+      expect(lines).toContain("## Stopped");
+      // The journal is the file beside the record, and the record names it.
+      expect(lines).toContain("2026-11-02T09-00-00-000Z-abcdef12.log");
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
   it("test_a_sweep_that_dies_before_it_reads_the_candidates_leaves_its_journal", async () => {
     const fixture = await createFixtureRepository({ files: { "scripts/setup-worktree.sh": SETUP } });
     try {
@@ -695,6 +737,16 @@ describe("the merge pipeline", () => {
         "2026-11-02T09-00-00-000Z-abcdef12.log",
       );
       expect(existsSync(journal)).toBe(true);
+      // The record is written when the sweep ends, and it did not: a sweep
+      // that dies leaves the journal and no record.
+      const record = join(
+        fixture.repo,
+        "build",
+        "diagnostics",
+        "merge",
+        "2026-11-02T09-00-00-000Z-abcdef12.md",
+      );
+      expect(existsSync(record)).toBe(false);
     } finally {
       await fixture.dispose();
     }

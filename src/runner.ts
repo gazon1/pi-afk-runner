@@ -36,6 +36,7 @@ import { budgetShares } from "./budget.js";
 import { isProtectedPath } from "./guard.js";
 import { GateFailed, runGates } from "./gates.js";
 import {
+  describeSubject,
   diagnosticsDirectory,
   gatesLogPath,
   issueSubject,
@@ -44,6 +45,7 @@ import {
   journalHeader,
   journalPath,
   recordPath,
+  subjectNumber,
   type JournalSubject,
 } from "./journal.js";
 import {
@@ -1479,16 +1481,29 @@ const RUNNER_STAMP = ((): string => {
   return sha === null ? version : `${version} ${sha}`;
 })();
 
+/**
+ * A section of a record: its heading and the lines under it.
+ *
+ * A run whose body is not a list of steps — the sweep, which works on pull
+ * requests rather than on steps — says what it did in sections like these.
+ */
+export interface RecordSection {
+  readonly title: string;
+  readonly lines: readonly string[];
+}
+
 /** The record's own text. */
 function renderRecord(options: {
-  readonly issue: number;
+  readonly issue?: number;
   readonly runId: string;
   readonly outcome: "completed" | "failed";
-  readonly steps: readonly StepRecord[];
+  readonly steps?: readonly StepRecord[];
   /** The record's first line, when it is not an issue's. */
   readonly heading?: string;
   /** What the run was about — the issue by default, a pull request for a merge. */
   readonly subject: JournalSubject;
+  /** The sections of a run that has no steps to list. */
+  readonly sections?: readonly RecordSection[];
   /** What the model pool did during the run. */
   readonly pool?: readonly string[];
   /** The packs the run made, when it made any. */
@@ -1496,13 +1511,18 @@ function renderRecord(options: {
   /** Whether this run wrote a journal beside the record. */
   readonly hasJournal?: boolean;
 }): string {
-  // The subject says what the run was about, and the record reads both the
-  // word and the number from it: the word is spelled in one place.
+  // The subject says what the run was about, and the record reads it from
+  // here: the word is spelled in one place, and the number is left out when
+  // the run has none — the sweep is not about one thing.
   const subject = options.subject;
+  const number = subjectNumber(subject);
   const lines = [
-    options.heading ?? `# Run issue-${options.issue}`,
+    options.heading ??
+      (options.issue === undefined
+        ? `# Run ${describeSubject(subject)}`
+        : `# Run issue-${options.issue}`),
     "",
-    `- ${subject.kind}: ${subject.number}`,
+    number === undefined ? `- ${subject.kind}` : `- ${subject.kind}: ${number}`,
     `- run: ${options.runId}`,
     `- runner: ${RUNNER_STAMP}`,
     `- outcome: ${options.outcome}`,
@@ -1515,25 +1535,42 @@ function renderRecord(options: {
       `- journal: ${journalFileName(options.runId)} — the agent's own lines as it worked: the calls it made and what it said`,
     );
   }
-  lines.push("", "## Steps", "");
-  for (const step of options.steps) {
-    const detail = step.detail === "" ? "" : ` — ${step.detail}`;
-    lines.push(`- ${step.step} — ${step.outcome}${detail}`);
-    // Where the whole output went, when it went somewhere: the record quotes
-    // the tail of it, and the file is where the rest of it is.
-    if (step.outputFile !== undefined) {
-      const quoted =
-        step.outputTruncated === true
-          ? ` — only its last ${RECORD_OUTPUT_LIMIT_BYTES / 1024} KiB are quoted here`
-          : "";
-      lines.push(`  the whole output is at ${step.outputFile}${quoted}`);
-    }
-    // What the command printed, indented under the step it belongs to.
-    for (const line of (step.output ?? "").split("\n")) {
-      if (line.trim() === "") {
+  // A run that worked on pull requests has no steps to list: it has what it
+  // landed, what it left alone and what stopped, and those are its sections.
+  if (options.sections !== undefined) {
+    for (const section of options.sections) {
+      lines.push("", `## ${section.title}`, "");
+      // A section with nothing under it says so — an empty heading reads as a
+      // record that forgot to write.
+      if (section.lines.length === 0) {
+        lines.push("- none");
         continue;
       }
-      lines.push(`  ${line}`);
+      for (const line of section.lines) {
+        lines.push(line);
+      }
+    }
+  } else {
+    lines.push("", "## Steps", "");
+    for (const step of options.steps ?? []) {
+      const detail = step.detail === "" ? "" : ` — ${step.detail}`;
+      lines.push(`- ${step.step} — ${step.outcome}${detail}`);
+      // Where the whole output went, when it went somewhere: the record quotes
+      // the tail of it, and the file is where the rest of it is.
+      if (step.outputFile !== undefined) {
+        const quoted =
+          step.outputTruncated === true
+            ? ` — only its last ${RECORD_OUTPUT_LIMIT_BYTES / 1024} KiB are quoted here`
+            : "";
+        lines.push(`  the whole output is at ${step.outputFile}${quoted}`);
+      }
+      // What the command printed, indented under the step it belongs to.
+      for (const line of (step.output ?? "").split("\n")) {
+        if (line.trim() === "") {
+          continue;
+        }
+        lines.push(`  ${line}`);
+      }
     }
   }
   lines.push("");
@@ -1568,15 +1605,18 @@ function renderRecord(options: {
  */
 export async function writeRunRecord(options: {
   readonly root: string;
-  readonly issue: number;
+  /** The issue the run was about, when it was about an issue. */
+  readonly issue?: number;
   readonly runId: string;
   readonly outcome: "completed" | "failed";
-  readonly steps: readonly StepRecord[];
-  /** Where the record goes, when it is not under the issue's own directory. */
+  readonly steps?: readonly StepRecord[];
+  /** Where the record goes, when it is not under the run's own directory. */
   readonly directory?: string;
   readonly heading?: string;
-  /** What the run was about — the issue by default, a pull request for a merge. */
-  readonly subject?: JournalSubject;
+  /** What the run was about — an issue, a pull request or the sweep. */
+  readonly subject: JournalSubject;
+  /** The sections of a run that has no steps to list. */
+  readonly sections?: readonly RecordSection[];
   /** What the model pool did during the run. */
   readonly pool?: readonly string[];
   /** The packs the run made, when it made any. */
@@ -1585,20 +1625,22 @@ export async function writeRunRecord(options: {
   readonly hasJournal?: boolean;
 }): Promise<string> {
   // The subject says what the run was about, and the directory of the run's
-  // files follows from it: an issue's own directory, or a pull request's.
-  const subject = options.subject ?? issueSubject(options.issue);
+  // files follows from it: an issue's own directory, a pull request's, or the
+  // merge directory the sweep's own files sit in.
+  const subject = options.subject;
   const directory = options.directory ?? diagnosticsDirectory(options.root, subject);
   await mkdir(directory, { recursive: true });
   const path = recordPath(directory, options.runId);
   await writeFile(
     path,
     renderRecord({
-      issue: options.issue,
+      ...(options.issue === undefined ? {} : { issue: options.issue }),
       runId: options.runId,
       outcome: options.outcome,
-      steps: options.steps,
+      ...(options.steps === undefined ? {} : { steps: options.steps }),
       ...(options.heading === undefined ? {} : { heading: options.heading }),
       subject,
+      ...(options.sections === undefined ? {} : { sections: options.sections }),
       ...(options.pool === undefined ? {} : { pool: options.pool }),
       ...(options.packs === undefined ? {} : { packs: options.packs }),
       ...(options.hasJournal === undefined ? {} : { hasJournal: options.hasJournal }),
@@ -1764,7 +1806,7 @@ export async function runSteps(options: {
       steps,
       ...(options.directory === undefined ? {} : { directory: options.directory }),
       ...(options.heading === undefined ? {} : { heading: options.heading }),
-      ...(options.subject === undefined ? {} : { subject: options.subject }),
+      subject: options.subject ?? issueSubject(options.issue),
       ...(options.pool === undefined ? {} : { pool: options.pool }),
       ...(options.packs === undefined ? {} : { packs: options.packs }),
       ...(options.hasJournal === undefined ? {} : { hasJournal: options.hasJournal }),

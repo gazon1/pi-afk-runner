@@ -349,7 +349,10 @@ Each pull request's record goes under `build/diagnostics/merge/pr-<N>/`, and the
 the journal behind, and it says what the merge was doing when it died. The sweep writes a journal of
 its own, under `build/diagnostics/merge/` beside those directories: it holds the pull requests the
 sweep considered, the ones it left alone and why, and the pull request it was working on when it
-stopped, and a sweep that is killed leaves it behind. A failed step is reported
+stopped, and a sweep that is killed leaves it behind. The sweep writes a **record** of its own
+beside that journal — what it landed, what it left alone and why, and what stopped and at which
+step — and it is written when the sweep ends, so a sweep that is killed leaves the journal and no
+record. A failed step is reported
 with its name and the pull request stays open; a skipped pull request is not a failure. A merge takes
 its own lock — `merge.lock` — and not the work lock, so a merge and the work runs do not wait for each
 other.

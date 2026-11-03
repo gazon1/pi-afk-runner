@@ -36,10 +36,11 @@ import type { SessionFactory } from "./session.js";
 const SUBJECT_WORDS = {
   issue: "issue",
   pullRequest: "pull request",
+  sweep: "the merge sweep",
 } as const;
 
 /**
- * What a run was about: the issue's number, or the pull request's.
+ * What a run was about: the issue's number, the pull request's, or the sweep.
  *
  * It is the only thing a pipeline names. The run's own files — the directory
  * they live in, what they are called and how the journal starts — are decided
@@ -47,10 +48,15 @@ const SUBJECT_WORDS = {
  *
  * Its kinds are the words above, so the wording of the subject is written
  * once — and the record and the journal both read it from here.
+ *
+ * The sweep is the one kind without a number: it is the run that works on the
+ * pull requests, not one of them, and a subject that names a run by its number
+ * has nothing to name it by.
  */
 export type JournalSubject =
   | { readonly kind: typeof SUBJECT_WORDS.issue; readonly number: number }
-  | { readonly kind: typeof SUBJECT_WORDS.pullRequest; readonly number: number };
+  | { readonly kind: typeof SUBJECT_WORDS.pullRequest; readonly number: number }
+  | { readonly kind: typeof SUBJECT_WORDS.sweep };
 
 /**
  * The subject of a run about an issue.
@@ -73,6 +79,41 @@ export function pullRequestSubject(number: number): JournalSubject {
 }
 
 /**
+ * The subject of a run about the merge sweep.
+ *
+ * The sweep has no number: it is the run that works on the pull requests, not
+ * one of them. It is a subject all the same, so the record and the journal
+ * read what the run was about from here, like every other run's.
+ */
+export function sweepSubject(): JournalSubject {
+  return { kind: SUBJECT_WORDS.sweep };
+}
+
+/**
+ * What a run was about, in words: the kind, and the number when there is one.
+ *
+ * The sweep has no number, so its subject reads as the kind alone. The record
+ * and the journal both say what the run was about through this, so the wording
+ * is written once.
+ */
+export function describeSubject(subject: JournalSubject): string {
+  return subject.kind === SUBJECT_WORDS.sweep
+    ? subject.kind
+    : `${subject.kind} ${subject.number}`;
+}
+
+/**
+ * The number of a subject, when it has one.
+ *
+ * The sweep has none: it is the run that works on the pull requests, not one
+ * of them. A record that names its subject says the number when there is one,
+ * and leaves it out when there is none.
+ */
+export function subjectNumber(subject: JournalSubject): number | undefined {
+  return subject.kind === SUBJECT_WORDS.sweep ? undefined : subject.number;
+}
+
+/**
  * The directory the merge pipeline's own files live in.
  *
  * The per-pull-request directories are in it, and the sweep's journal is the
@@ -85,27 +126,34 @@ function mergeDirectory(root: string): string {
 /**
  * Where the files of a run live.
  *
- * `build/diagnostics/issue-<N>/` for a run about an issue, and
- * `build/diagnostics/merge/pr-<N>/` for a run about a pull request. The
- * journal, the record and the gates log of the run sit beside each other, in
- * the same directory — so this is the directory, and it is asked for the same
- * way whichever kind of run it is.
+ * `build/diagnostics/issue-<N>/` for a run about an issue,
+ * `build/diagnostics/merge/pr-<N>/` for a run about a pull request, and
+ * `build/diagnostics/merge/` for the sweep itself. The journal, the record and
+ * the gates log of the run sit beside each other, in the same directory — so
+ * this is the directory, and it is asked for the same way whichever kind of run
+ * it is.
  */
 export function diagnosticsDirectory(root: string, subject: JournalSubject): string {
-  return subject.kind === SUBJECT_WORDS.issue
-    ? join(root, "build", "diagnostics", `issue-${subject.number}`)
-    : join(mergeDirectory(root), `pr-${subject.number}`);
+  if (subject.kind === SUBJECT_WORDS.issue) {
+    return join(root, "build", "diagnostics", `issue-${subject.number}`);
+  }
+  if (subject.kind === SUBJECT_WORDS.pullRequest) {
+    return join(mergeDirectory(root), `pr-${subject.number}`);
+  }
+  // The sweep's own files sit in the merge directory itself, beside the
+  // per-pull-request directories: the sweep works on those pull requests, it
+  // is not one of them.
+  return mergeDirectory(root);
 }
 
 /**
  * Where the sweep's journal lives.
  *
- * The sweep is not a subject: a subject names a run by its number, and the
- * sweep has none — it is the run that works on the pull requests. Its journal
- * is the file beside the directories their own journals are in.
+ * The sweep is the run that works on the pull requests, so its journal is the
+ * file beside the directories their own journals are in.
  */
 export function sweepJournalDirectory(root: string): string {
-  return mergeDirectory(root);
+  return diagnosticsDirectory(root, sweepSubject());
 }
 
 /**
@@ -115,7 +163,7 @@ export function sweepJournalDirectory(root: string): string {
  * journals' first line does.
  */
 export function sweepJournalHeader(runId: string): string {
-  return `# run ${runId}, the merge sweep`;
+  return journalHeader(runId, sweepSubject());
 }
 
 /**
@@ -125,7 +173,7 @@ export function sweepJournalHeader(runId: string): string {
  * knows which run it belongs to before reading a line of it.
  */
 export function journalHeader(runId: string, subject: JournalSubject): string {
-  return `# run ${runId}, ${subject.kind} ${subject.number}`;
+  return `# run ${runId}, ${describeSubject(subject)}`;
 }
 
 /**
