@@ -97,6 +97,48 @@ describe("the git the runner runs", () => {
       // The run stopped waiting at the bound. The child is still alive; the
       // run does not wait for it.
       expect(Date.now() - started).toBeLessThan(2_000);
+
+      // The failure says which of the two endings it was: the child ignored
+      // the request to stop and was left behind.
+      const timedOut = failure as CommandTimedOut;
+      expect(timedOut.ending).toBe("ignored");
+      expect(timedOut.message).toContain("ignored the request to stop");
+      expect(timedOut.message).toContain("left behind");
+      // The child printed nothing, and the failure says so rather than
+      // leaving an empty record to be read as a lost one.
+      expect(timedOut.stdout).toBe("");
+      expect(timedOut.message).toContain("it printed nothing");
+    } finally {
+      process.env["PATH"] = path;
+    }
+  });
+
+  it("carries what a git that ignored the kill signal printed", async () => {
+    const directory = await scratch();
+    // A git that prints, and that ignores the signal it is given, and that
+    // is still there when the bound is spent.
+    const stubborn = join(directory, "git");
+    await writeFile(
+      stubborn,
+      "#!/bin/sh\ntrap '' INT\necho 'the git is thinking'\nsleep 2\nexit 0\n",
+      "utf8",
+    );
+    await chmod(stubborn, 0o755);
+
+    const path = process.env["PATH"] ?? "";
+    process.env["PATH"] = `${directory}:${path}`;
+    try {
+      const failure = await runGitWithTimeout(["version"], { cwd: directory }, 200, 100).catch(
+        (error: unknown) => error,
+      );
+
+      expect(failure).toBeInstanceOf(CommandTimedOut);
+      // What the child printed before it was left behind is the only evidence
+      // there is, and the failure carries it.
+      const timedOut = failure as CommandTimedOut;
+      expect(timedOut.ending).toBe("ignored");
+      expect(timedOut.stdout).toContain("the git is thinking");
+      expect(timedOut.message).toContain("the git is thinking");
     } finally {
       process.env["PATH"] = path;
     }
@@ -194,6 +236,8 @@ describe("the failure a git call raises", () => {
 
     expect(failure).toBeInstanceOf(CommandTimedOut);
     expect((failure as CommandTimedOut).timeoutMs).toBe(100);
+    // The child stopped when it was asked, so that is what the failure says.
+    expect((failure as CommandTimedOut).ending).toBe("stopped");
   });
 
   it("is the error itself for a git that never ran", () => {

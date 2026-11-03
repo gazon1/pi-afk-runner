@@ -15,6 +15,7 @@ for the rule that the copies follow.
 
 | Decision | What it settles |
 |---|---|
+| `2026-11-12-the-killed-git-carries-what-the-child-printed.md` | the failure of a killed `git` says what the child printed — or plainly that it printed nothing — and which of the two endings it was: the child that was stopped, or the child that ignored the request and was left behind |
 | `2026-11-09-the-runs-record-names-the-pack.md` | the run's record names the pack: the path that was packed, the files it holds and the tokens it cost — and what a real run showed, that a pack is good for an area of the repository and not for the repository |
 | `2026-11-11-the-engine-tells-the-model-when-a-turn-has-read-enough.md` | the engine tells the model, between its steps, that the reading is over: the work session's feedback points at the turn's own instruction, the turn that implements a change is checked against the tree and given one more chance, and the work is the paths that changed — not the commits |
 | `2026-11-11-the-queue-is-read-oldest-first.md` | the queue is read oldest first: `sort:created-asc` in the search form, so the backlog drains in the order it was filed and a run does not work the leftovers it just filed |
