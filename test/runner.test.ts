@@ -63,6 +63,7 @@ import {
   type CommandRunner,
 } from "../src/git.js";
 import { createFixtureRepository, gitOutput } from "./git-sandbox.js";
+import { fakeGhApi, fakeWorktree, valueAfter } from "./shared.js";
 import { chmod, cp, mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { execFile, spawn } from "node:child_process";
@@ -71,14 +72,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import {
-  GH_DEFAULT_PAGE_SIZE,
   GH_TIMEOUT_MS,
   GhCommandTimedOut,
   QUEUE_LABEL,
   CLAIM_LABEL,
   RECOUNT_LABEL,
   REVIEW_MARKER,
-  claimedArgs,
   addPullRequestLabelArgs,
   closeIssueArgs,
   commentIssueArgs,
@@ -88,12 +87,9 @@ import {
   mergedPullRequestArgs,
   postCommentArgs,
   reviewCommentBody,
-  parseIssues,
   pullRequestBody,
-  parsePullRequest,
   parsePullRequests,
   queueArgs,
-  readClaimed,
   readIssue,
   readQueue,
   readPullRequest,
@@ -161,36 +157,6 @@ function namedStates(count: number): StateName[] {
     name: `state-${index + 1}`,
     phase: "Test",
   }));
-}
-
-/**
- * The worktree facts a work session is given, for the tests that do not care
- * which branch it is on. The tests that do care build their own.
- */
-function testWorktree(issueNumber: number) {
-  return {
-    branch: workBranch(issueNumber),
-    baseBranch: "main",
-    baseSha: "0".repeat(40),
-    commits: [] as readonly string[],
-  };
-}
-
-/** The issue the work session reads: a brief, and nothing else. */
-function testGh(): GhRunner {
-  return async (args: readonly string[]): Promise<string> => {
-    if (args[0] === "issue" && args[1] === "view") {
-      return JSON.stringify({
-        body: "## Agent Brief\n\ndo the thing",
-        comments: [],
-        title: "an issue",
-        labels: [],
-        updatedAt: "",
-        state: "OPEN",
-      });
-    }
-    return "";
-  };
 }
 
 /**
@@ -382,19 +348,6 @@ describe("the reason an issue could not be worked", () => {
     expect(result.blockedBy).toEqual([2]);
   });
 });
-
-/** The value that follows a flag, or a failure that says which flag is missing. */
-function valueAfter(args: readonly string[], flag: string): string {
-  const index = args.indexOf(flag);
-  if (index < 0) {
-    throw new Error(`\`${flag}\` is not in the arguments`);
-  }
-  const value = args[index + 1];
-  if (value === undefined) {
-    throw new Error(`\`${flag}\` is the last argument and has no value`);
-  }
-  return value;
-}
 
 /**
  * Whether the session is the reviewer's.
@@ -640,7 +593,10 @@ describe("the cost of a run", () => {
   });
 });
 
-describe("the queue", () => {
+describe("the selection from the queue", () => {
+  // The queue's own tests — the query, the parse, the read — are in
+  // `test/gh.test.ts`. What is here is the choice the runner makes out of
+  // what the bridge hands it.
   it("test_selection_excludes_claimed_issues", async () => {
     const args = queueArgs("gazon1/sing");
 
@@ -677,84 +633,6 @@ describe("the queue", () => {
     expect(selectIssue([claimed, free])?.number).toBe(2);
     expect(selectIssue([claimed])).toBeUndefined();
     expect(selectIssue([])).toBeUndefined();
-  });
-
-  it("test_selection_uses_the_minus_search_form", () => {
-    const args = queueArgs("gazon1/sing");
-
-    // The exclusion is a *search*, and it is the minus form.
-    const search = valueAfter(args, "--search");
-    expect(search).toBe(`-label:${CLAIM_LABEL} sort:created-asc`);
-    expect(search.startsWith("-")).toBe(true);
-    expect(search.startsWith("no:")).toBe(false);
-
-    // `gh`'s default page size is 30 and the queue is larger than that, so the
-    // limit is not optional: without it the runner sees the first thirty
-    // issues and believes it has seen them all.
-    const limit = Number(valueAfter(args, "--limit"));
-    expect(limit).toBeGreaterThan(GH_DEFAULT_PAGE_SIZE);
-    expect(args).toContain("--limit");
-  });
-
-  it("reads the queue oldest first", () => {
-    // The backlog drains in the order it was filed: the issue the runner
-    // filed last is worked last, not first.
-    const search = valueAfter(queueArgs("gazon1/sing"), "--search");
-    expect(search).toContain("sort:created-asc");
-    expect(search).not.toContain("sort:created-desc");
-  });
-
-  it("reads the claimed issues with a query of its own", () => {
-    // The queue excludes the claimed issues by construction, so a claim left
-    // behind by a run that died would be invisible to every later run. The
-    // claimed set is read separately — with both labels, which means both.
-    const args = claimedArgs("gazon1/sing");
-    const labels = args.filter((_, index) => args[index - 1] === "--label");
-    expect(labels).toEqual([QUEUE_LABEL, CLAIM_LABEL]);
-    expect(args).not.toContain("--search");
-  });
-
-  it("parses what gh returns", () => {
-    const issues = parseIssues(
-      JSON.stringify([
-        { number: 7, title: "an issue", updatedAt: "2026-10-30T09:00:00Z", labels: [{ name: QUEUE_LABEL }] },
-      ]),
-    );
-    expect(issues).toEqual([
-      {
-        number: 7,
-        title: "an issue",
-        updatedAt: "2026-10-30T09:00:00Z",
-        labels: [QUEUE_LABEL],
-      },
-    ]);
-
-    const pullRequest = parsePullRequest(
-      JSON.stringify({
-        number: 3,
-        headRefName: "agent/issue-7",
-        labels: [{ name: RECOUNT_LABEL }],
-        comments: [{ body: `<!-- agent-review -->\n\n**Verdict:** pass` }],
-      }),
-    );
-    expect(pullRequest?.headRefName).toBe("agent/issue-7");
-    expect(pullRequest?.labels).toEqual([RECOUNT_LABEL]);
-    expect(pullRequest?.comments).toHaveLength(1);
-  });
-
-  it("reads the queue and the claimed set through the gh it is given", async () => {
-    const seen: string[][] = [];
-    const gh = async (args: readonly string[]): Promise<string> => {
-      seen.push([...args]);
-      return "[]";
-    };
-
-    await readQueue("gazon1/sing", gh);
-    await readClaimed("gazon1/sing", gh);
-
-    expect(seen).toHaveLength(2);
-    expect(seen[0]).toEqual(queueArgs("gazon1/sing"));
-    expect(seen[1]).toEqual(claimedArgs("gazon1/sing"));
   });
 });
 
@@ -1433,7 +1311,7 @@ describe("the agent's session", () => {
           cwd: empty,
           repo: "gazon1/sing",
           issueNumber: 42,
-          worktree: testWorktree(42),
+          worktree: fakeWorktree(42),
           gh: async () => "[]",
           promptsDirectory: empty,
           deadlineMs: 60_000,
@@ -3158,7 +3036,7 @@ describe("the brief", () => {
       cwd: "/tmp/does-not-matter",
       repo: "gazon1/sing",
       issueNumber: 42,
-      worktree: testWorktree(42),
+      worktree: fakeWorktree(42),
       gh,
       deadlineMs: 60_000,
     });
@@ -3184,7 +3062,7 @@ describe("the brief", () => {
         cwd: "/tmp/does-not-matter",
         repo: "gazon1/sing",
         issueNumber: 42,
-        worktree: testWorktree(42),
+        worktree: fakeWorktree(42),
         gh,
         deadlineMs: 60_000,
       }),
@@ -7035,7 +6913,7 @@ describe("the leftovers a run files", () => {
       cwd: process.cwd(),
       repo: "gazon1/sing",
       issueNumber: 42,
-      worktree: testWorktree(42),
+      worktree: fakeWorktree(42),
       gh: fakeTarget().gh,
       deadlineMs: 60_000,
     });
@@ -7344,7 +7222,7 @@ describe("the work session's decisions", () => {
       cwd: "/tmp/does-not-matter",
       repo: "gazon1/sing",
       issueNumber: 42,
-      worktree: testWorktree(42),
+      worktree: fakeWorktree(42),
       gh,
       deadlineMs: 60_000,
     });
@@ -7372,8 +7250,8 @@ describe("the work session's decisions", () => {
       cwd: "/tmp/does-not-matter",
       repo: "gazon1/sing",
       issueNumber: 42,
-      worktree: testWorktree(42),
-      gh: testGh(),
+      worktree: fakeWorktree(42),
+      gh: fakeGhApi(),
       deadlineMs: 60_000,
     });
 
@@ -7400,8 +7278,8 @@ describe("the work session's decisions", () => {
       cwd: "/tmp/does-not-matter",
       repo: "gazon1/sing",
       issueNumber: 42,
-      worktree: testWorktree(42),
-      gh: testGh(),
+      worktree: fakeWorktree(42),
+      gh: fakeGhApi(),
       git: async () => "",
       deadlineMs: 60_000,
     }).catch((error: unknown) => error);
@@ -7426,8 +7304,8 @@ describe("the work session's decisions", () => {
       cwd: "/tmp/does-not-matter",
       repo: "gazon1/sing",
       issueNumber: 42,
-      worktree: testWorktree(42),
-      gh: testGh(),
+      worktree: fakeWorktree(42),
+      gh: fakeGhApi(),
       git: async (args) => (args[0] === "diff" ? "src/runner.ts" : ""),
       deadlineMs: 60_000,
     });
@@ -7499,7 +7377,7 @@ describe("the work session's decisions", () => {
       cwd: "/tmp/does-not-matter",
       repo: "gazon1/sing",
       issueNumber: 42,
-      worktree: testWorktree(42),
+      worktree: fakeWorktree(42),
       gh,
       deadlineMs: 60_000,
     });
@@ -7571,7 +7449,7 @@ describe("the work session's decisions", () => {
       cwd: "/tmp/does-not-matter",
       repo: "gazon1/sing",
       issueNumber: 42,
-      worktree: testWorktree(42),
+      worktree: fakeWorktree(42),
       gh,
       deadlineMs: 60_000,
     });
