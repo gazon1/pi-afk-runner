@@ -93,10 +93,12 @@ export function createMastraAgent(options: MastraAgentOptions): Agent {
     tools: toMastraTools(options.tools),
     workspace,
     skills: [...options.skills],
-    inputProcessors: [
-      new TokenLimiter(options.tokenLimit ?? DEFAULT_TOKEN_LIMIT),
-      new ToolCallFilter({ filterAfterToolSteps: 2 }),
-    ],
+    // The conversation is trimmed by **tokens** only. There is no tool-call
+    // filter: a filter that keeps the last two tool results drops what the
+    // agent read before that, and the agent answers a question it can no
+    // longer see by reading the same file again — a run that reads the tree
+    // forever and never changes it.
+    inputProcessors: [new TokenLimiter(options.tokenLimit ?? DEFAULT_TOKEN_LIMIT)],
     // The memory is what carries a turn into the next one: the work session is
     // one conversation, and each prompt sees what the prompts before it said.
     memory: options.memory ?? new Memory({ storage: new InMemoryStore() }),
