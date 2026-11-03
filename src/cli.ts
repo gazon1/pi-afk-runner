@@ -92,8 +92,8 @@ export const EXIT_NO_LOCK = 76;
 /**
  * The exit code for each step — the code says which step the run reached.
  *
- * The numbers are spaced so that a reader can tell them apart at a glance in
- * a journal, and so that a step can be added without renumbering the rest.
+ * The numbers are spaced so that a reader can tell them apart at a glance, and
+ * so that a step can be added without renumbering the rest.
  */
 export const STEP_EXIT_CODES: Readonly<Record<string, number>> = {
   select: 10,
@@ -214,7 +214,7 @@ const issueContext = new AsyncLocalStorage<number>();
  * The line as the reader sees it: it names the issue it belongs to.
  *
  * A sweep with one worker names nothing — the lines were never mixed, and the
- * journal looks the way it always has.
+ * log looks the way it always has.
  */
 function tagged(text: string): string {
   const issue = issueContext.getStore();
@@ -748,9 +748,9 @@ export function formatCost(cost: number): string {
 /**
  * The lines that say what a run did.
  *
- * **One fact per line.** A journal reads lines, and a table wraps: a summary
- * a terminal folds is a summary a pipe cannot be read out of. So there is no
- * table here — the lines are the facts, and a pipe gets the same lines a
+ * **One fact per line.** A summary is read line by line, and a table wraps: a
+ * summary a terminal folds is a summary a pipe cannot be read out of. So there
+ * is no table here — the lines are the facts, and a pipe gets the same lines a
  * terminal does.
  *
  * The tokens and the cost are **absent** when the provider reported none: a
@@ -782,9 +782,9 @@ export function runSummary(result: RunResult): string[] {
 /**
  * The one line a sweep says about an issue.
  *
- * A sweep is a journal: one line per issue, in the order the issues were
- * worked. The facts are the run's own, separated so that a reader — or a
- * pipe — can take them one at a time.
+ * A sweep is a listing of its issues: one line per issue, in the order the
+ * issues were worked. The facts are the run's own, separated so that a
+ * reader — or a pipe — can take them one at a time.
  */
 export function sweepIssueLine(result: RunResult): string {
   const parts: string[] = [`issue ${result.issue}`];
@@ -1182,7 +1182,7 @@ async function sweep(
         return;
       }
       if (outcome.result !== undefined) {
-        // One line per issue: a sweep is a journal.
+        // One line per issue: the sweep is a listing of its issues.
         results.push(outcome.result);
         process.stdout.write(`${sweepIssueLine(outcome.result)}\n`);
       }

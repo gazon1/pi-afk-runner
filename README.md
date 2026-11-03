@@ -204,8 +204,8 @@ A sweep that works several issues at once ends with the code of the **failure of
 the smallest number**: the order the failures happen in says nothing about the sweep, and the same
 sweep says the same thing every time.
 
-A finished run ends with a **summary** — the facts a reader wants, one per line, because a journal
-reads lines and a table wraps:
+A finished run ends with a **summary** — the facts a reader wants, one per line, because a summary
+is read line by line and a table wraps:
 
 ```
 issue 42 — Fix the thing
