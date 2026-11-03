@@ -8,7 +8,7 @@
  * against a git that ignores the kill signal.
  */
 
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -16,12 +16,14 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   CommandFailed,
   CommandTimedOut,
+  changedPaths,
   claimMessage,
   claimTagObject,
   gitFailure,
   runGitWithTimeout,
+  type GitRunner,
 } from "../src/git.js";
-import { createFixtureRepository } from "./git-sandbox.js";
+import { createFixtureRepository, git, gitOutput } from "./git-sandbox.js";
 
 /** The directories the tests made. */
 const made: string[] = [];
@@ -198,5 +200,70 @@ describe("the failure a git call raises", () => {
     const cause = new Error("spawn git ENOENT");
 
     expect(gitFailure(cause, { exitCode: null, stdOut: [], stdErr: [] }, context)).toBe(cause);
+  });
+});
+
+describe("the work in the tree", () => {
+  it("counts the paths that changed, and not the host's own files", async () => {
+    // The work is what the tree holds, and the runner's guard reads it before
+    // the push: a run that pushed a commit carrying nothing but the host's
+    // own state opened a pull request with no implementation in it.
+    const fixture = await createFixtureRepository();
+    try {
+      const runner: GitRunner = async (args, options) =>
+        git(args, { cwd: options.cwd, env: fixture.env });
+      const base = await gitOutput(["rev-parse", "HEAD"], {
+        cwd: fixture.repo,
+        env: fixture.env,
+      });
+
+      expect(await changedPaths(runner, fixture.repo, base)).toEqual([]);
+
+      // The change the agent made, in the tree and not committed.
+      await writeFile(join(fixture.repo, "README.md"), "# changed\n", "utf8");
+      expect(await changedPaths(runner, fixture.repo, base)).toEqual(["README.md"]);
+
+      // A new file is work too.
+      await writeFile(join(fixture.repo, "new.ts"), "export const a = 1;\n", "utf8");
+      expect(await changedPaths(runner, fixture.repo, base)).toEqual([
+        "README.md",
+        "new.ts",
+      ]);
+
+      // The host's own state is the host's business: git ignores it, and the
+      // runner does not count it. The ignore file itself is work — it is a
+      // file the agent added to the tree.
+      await writeFile(join(fixture.repo, ".gitignore"), ".local/\n", "utf8");
+      await mkdir(join(fixture.repo, ".local", "state"), { recursive: true });
+      await writeFile(join(fixture.repo, ".local", "state", "device-id"), "abc\n", "utf8");
+      const paths = await changedPaths(runner, fixture.repo, base);
+      expect(paths).toEqual(["README.md", ".gitignore", "new.ts"]);
+      expect(paths.some((path) => path.startsWith(".local/"))).toBe(false);
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("counts the branch's own commits, and not the base's own changes", async () => {
+    // The branch may have started from a base older than the one the run
+    // claimed: a diff against the base would read the base's own changes as
+    // the branch's work.
+    const fixture = await createFixtureRepository();
+    try {
+      const runner: GitRunner = async (args, options) =>
+        git(args, { cwd: options.cwd, env: fixture.env });
+      const base = await gitOutput(["rev-parse", "HEAD"], {
+        cwd: fixture.repo,
+        env: fixture.env,
+      });
+
+      await writeFile(join(fixture.repo, "src.ts"), "export const a = 1;\n", "utf8");
+      await git(["add", "-A"], { cwd: fixture.repo, env: fixture.env });
+      await git(["commit", "-q", "-m", "the work"], { cwd: fixture.repo, env: fixture.env });
+
+      expect(await changedPaths(runner, fixture.repo, base)).toEqual(["src.ts"]);
+    } finally {
+      await fixture.dispose();
+    }
   });
 });

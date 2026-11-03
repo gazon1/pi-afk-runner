@@ -14,7 +14,7 @@ import type { Agent } from "@mastra/core/agent";
 import { InMemoryStore } from "@mastra/core/storage";
 import { Memory } from "@mastra/memory";
 
-import type { AgentSession, RunUsage, SessionFactory, TurnMessage } from "../session.js";
+import type { AgentSession, RunUsage, SessionFactory, TurnFeedback, TurnMessage } from "../session.js";
 import type { ToolSpec } from "../tools.js";
 import { createMastraAgent, systemPrompt } from "./agent.js";
 import { logTurn, refusalLine, toolCallLine } from "./log.js";
@@ -76,8 +76,9 @@ function usageOf(answer: {
 /**
  * The two listeners, as one.
  *
- * The factory's listener is the run's own — the command's `say`. The session's
- * listener is the run's **journal**. A line goes to both.
+ * The factory's listener is the run's own — the command's `say`: the run's
+ * **log**. The session's listener writes the run's **journal**, the file beside
+ * the record. A line goes to both.
  */
 function mergedEvents(
   factory: ((line: string) => void) | undefined,
@@ -116,8 +117,8 @@ export function mastraSessionFactory(options: {
     const model = await resolveMastraModel(
       sessionOptions.model ?? options.model ?? DEFAULT_MASTRA_MODEL,
     );
-    // The run's own listener and the session's — the journal — both hear
-    // every line.
+    // The run's own listener and the session's — the journal's writer — both
+    // hear every line.
     const onEvent = mergedEvents(options.onEvent, sessionOptions.onEvent);
     return createMastraSession({
       ...options,
@@ -159,6 +160,8 @@ export async function createMastraSession(options: {
   readonly tools?: readonly ToolSpec[];
   /** The tool the turn must end on — the verdict tool, for a review. */
   readonly finalTool?: string;
+  /** What the model is told between the steps, when it has read enough. */
+  readonly feedback?: TurnFeedback;
   /** Told what a turn cost, when the provider reported it. */
   readonly onUsage?: (usage: RunUsage) => void;
   /** Told what the agent is doing, as it does it. */
@@ -242,25 +245,41 @@ export async function createMastraSession(options: {
           // turn ends with a tool. Without this the turn is cut off by the
           // step limit, and a review that read everything and decided nothing
           // is a review without a verdict.
-          ...(options.finalTool === undefined
+          //
+          // A turn that ends on no tool at all — the work session's turn that
+          // makes the change — is told the session's own words instead: see
+          // `WORK_FEEDBACK` in `../session.js`.
+          ...(options.finalTool === undefined && options.feedback === undefined
             ? {}
             : {
                 onIterationComplete: (context: {
                   iteration: number;
                   toolCalls: { readonly name: string }[];
                 }) => {
-                  if (context.toolCalls.some((call) => call.name === options.finalTool)) {
+                  const final = options.finalTool;
+                  if (
+                    final !== undefined &&
+                    context.toolCalls.some((call) => call.name === final)
+                  ) {
                     finalToolCalled = true;
                     return undefined;
                   }
-                  if (finalToolCalled || context.iteration < FINAL_TOOL_AFTER_STEPS) {
+                  if (finalToolCalled) {
                     return undefined;
                   }
-                  return {
-                    feedback:
-                      `You have read enough. Stop exploring and call the ${options.finalTool} ` +
-                      "tool now, with the verdict you reached and the findings you found.",
-                  };
+                  // What the model is told, and the step it is told it at: the
+                  // verdict tool's own words, or the session's feedback.
+                  const text =
+                    final !== undefined
+                      ? `You have read enough. Stop exploring and call the ${final} ` +
+                        "tool now, with the verdict you reached and the findings you found."
+                      : options.feedback?.text;
+                  const afterSteps =
+                    final !== undefined ? FINAL_TOOL_AFTER_STEPS : options.feedback?.afterSteps;
+                  if (text === undefined || afterSteps === undefined) {
+                    return undefined;
+                  }
+                  return context.iteration >= afterSteps ? { feedback: text } : undefined;
                 },
               }),
         });

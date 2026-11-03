@@ -99,7 +99,8 @@ same list, earlier; the ids are what says which line has already been written.
 
 - `src/mastra/session.ts` — the `onChunk` that writes the call, and the calls it has written.
 - `src/mastra/log.ts` — `toolCallLine`, and the turn that writes what is left.
-- `src/runner.ts` — `journalFactory`, the wrapped factory that writes the journal file.
-- `src/journal.ts` — how a call is spelled.
+- `src/journal.ts` — `journalFactory`, the wrapped factory that writes the journal file, and how a
+  call is spelled.
+- `src/runner.ts` — the work run that opens the journal.
 - `2026-11-05-a-run-gates-nothing-and-builds-nothing.md` — the run that gates nothing, and the
   guard that refuses a suite.

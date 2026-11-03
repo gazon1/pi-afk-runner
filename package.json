@@ -26,6 +26,7 @@
   "files": [
     "dist",
     "skills",
+    "scripts/prune-grammars.mjs",
     "README.md"
   ],
   "engines": {
@@ -37,6 +38,7 @@
     "lint": "oxlint --deny-warnings src test",
     "test": "vitest run",
     "check": "npm run typecheck && npm run lint && npm run test && npm run build",
+    "postinstall": "node scripts/prune-grammars.mjs",
     "prepublishOnly": "npm run check"
   },
   "dependencies": {

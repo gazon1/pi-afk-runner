@@ -26,7 +26,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { appendFileSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
@@ -36,8 +36,18 @@ import { budgetShares } from "./budget.js";
 import { isProtectedPath } from "./guard.js";
 import { GateFailed, runGates } from "./gates.js";
 import {
+  issueSubject,
+  journalDirectory,
+  journalFactory,
+  journalFileName,
+  journalHeader,
+  journalPath,
+  type JournalSubject,
+} from "./journal.js";
+import {
   UNTRUSTED_INPUT_RULE,
   UNTRUSTED_INPUT_SECTION,
+  WORK_FEEDBACK,
   addUsage,
   briefFence,
   cutOffMessage,
@@ -59,11 +69,13 @@ import {
   addDetachedWorktree,
   addWorktree,
   branchesWithWork,
+  changedPaths,
   fetchCommit,
   fetchRef,
   headRef,
   issueWorktreePath,
   pushWorkBranch,
+  readClaimBase,
   readRemoteSha,
   removeWorktree,
   runCommand,
@@ -77,6 +89,7 @@ import {
   commentIssue,
   createPullRequest,
   dependencyNumbers,
+  newestReviewVerdict,
   postCommentArgs,
   pullRequestBody,
   readAllOpenPullRequests,
@@ -1088,6 +1101,9 @@ async function gateFixWorktree(options: {
   const session = await options.factory({
     cwd: options.cwd,
     systemPromptSections: { [UNTRUSTED_INPUT_SECTION]: UNTRUSTED_INPUT_RULE },
+    // The fix's turn reads the code and then changes it; a model that reads
+    // forever is told, between its steps, that the reading is over.
+    feedback: WORK_FEEDBACK,
   });
   await runPromptArray({
     session,
@@ -1119,6 +1135,9 @@ export async function fixWorktree(options: {
   const session = await options.factory({
     cwd: options.cwd,
     systemPromptSections: { [UNTRUSTED_INPUT_SECTION]: UNTRUSTED_INPUT_RULE },
+    // The fix's turn reads the findings and then changes the code; a model
+    // that reads forever is told, between its steps, that the reading is over.
+    feedback: WORK_FEEDBACK,
   });
   const result = await runPromptArray({
     session,
@@ -1438,10 +1457,11 @@ function tail(text: string, limit: number): { readonly text: string; readonly tr
  * Where the record of a run lives.
  *
  * `build/diagnostics/issue-<N>/` — the repository's own convention for "here is
- * what happened", with the issue's number in the directory's name.
+ * what happened", with the issue's number in the directory's name. The record
+ * sits beside the journal, so it lives where the journal lives.
  */
 export function recordDirectory(root: string, issue: number): string {
-  return join(root, "build", "diagnostics", `issue-${issue}`);
+  return journalDirectory(root, issueSubject(issue));
 }
 
 /**
@@ -1468,27 +1488,6 @@ const RUNNER_STAMP = ((): string => {
   return sha === null ? version : `${version} ${sha}`;
 })();
 
-/**
- * The journal's file name: the run's own id and the `.log` extension.
- *
- * One place says it. The run writes the file under this name and the record
- * names the file the run wrote, so the name in the record cannot drift from
- * the name on the disk.
- */
-export function journalFileName(runId: string): string {
-  return `${runId}.log`;
-}
-
-/**
- * The journal's path: the record's own directory, the run's id, the `.log`.
- *
- * The journal sits beside the record — the same directory — so a reader who
- * opens the record finds the journal in the same place.
- */
-export function journalPath(directory: string, runId: string): string {
-  return join(directory, journalFileName(runId));
-}
-
 /** The record's own text. */
 function renderRecord(options: {
   readonly issue: number;
@@ -1497,8 +1496,8 @@ function renderRecord(options: {
   readonly steps: readonly StepRecord[];
   /** The record's first line, when it is not an issue's. */
   readonly heading?: string;
-  /** What the number names — `issue` by default, `pull request` for a merge. */
-  readonly subject?: string;
+  /** What the run was about — the issue by default, a pull request for a merge. */
+  readonly subject?: JournalSubject;
   /** What the model pool did during the run. */
   readonly pool?: readonly string[];
   /** The packs the run made, when it made any. */
@@ -1506,10 +1505,13 @@ function renderRecord(options: {
   /** Whether this run wrote a journal beside the record. */
   readonly hasJournal?: boolean;
 }): string {
+  // The subject says what the run was about, and the record reads both the
+  // word and the number from it: the word is spelled in one place.
+  const subject = options.subject ?? issueSubject(options.issue);
   const lines = [
     options.heading ?? `# Run issue-${options.issue}`,
     "",
-    `- ${options.subject ?? "issue"}: ${options.issue}`,
+    `- ${subject.kind}: ${subject.number}`,
     `- run: ${options.runId}`,
     `- runner: ${RUNNER_STAMP}`,
     `- outcome: ${options.outcome}`,
@@ -1582,7 +1584,8 @@ export async function writeRunRecord(options: {
   /** Where the record goes, when it is not under the issue's own directory. */
   readonly directory?: string;
   readonly heading?: string;
-  readonly subject?: string;
+  /** What the run was about — the issue by default, a pull request for a merge. */
+  readonly subject?: JournalSubject;
   /** What the model pool did during the run. */
   readonly pool?: readonly string[];
   /** The packs the run made, when it made any. */
@@ -1609,27 +1612,6 @@ export async function writeRunRecord(options: {
     "utf8",
   );
   return path;
-}
-
-/**
- * The journal of a run: the session's lines, written while the run works.
- *
- * The factory is wrapped, so every session the run opens — the work session,
- * the review, the fixes — writes to the same file. The lines are appended as
- * they come, and a line that cannot be written is dropped: a journal that
- * cannot be written is not a reason to stop the run.
- */
-export function journalFactory(factory: SessionFactory, path: string): SessionFactory {
-  return async (sessionOptions) => {
-    const write = (line: string): void => {
-      try {
-        appendFileSync(path, `${line}\n`, "utf8");
-      } catch {
-        // The journal is a witness, not a gate: the run goes on without it.
-      }
-    };
-    return factory({ ...sessionOptions, onEvent: write });
-  };
 }
 
 /**
@@ -1686,7 +1668,8 @@ export async function runSteps(options: {
   /** Where the record goes, when it is not under the issue's own directory. */
   readonly directory?: string;
   readonly heading?: string;
-  readonly subject?: string;
+  /** What the run was about — the issue by default, a pull request for a merge. */
+  readonly subject?: JournalSubject;
   /** What the model pool did during the run. */
   readonly pool?: readonly string[];
   /**
@@ -2697,7 +2680,14 @@ async function runPlan(
   const issue = plan.issue;
   options.onIssue?.(issue);
   const state = {
-    claimed: false,
+    /**
+     * Whether the claim is this run's to release.
+     *
+     * A run that claimed the issue took the claim, and a run that resumes a
+     * dead run's work holds the claim that is already there: both release it
+     * when the run fails.
+     */
+    holdsClaim: false,
     base: "",
     worktreePath: "",
     /** The PATH the repository's own setup asked the gates to run with. */
@@ -2706,7 +2696,8 @@ async function runPlan(
     reviewedSha: "",
     slug: null as string | null,
     // The verdict is null until a review states one: a run that never got one
-    // has no verdict, and the re-count falls back to the pass it always wrote.
+    // has no verdict, and a run that resumes a review reads the verdict the
+    // pull request's own comment states.
     verdict: null as "pass" | "fail" | null,
     /** The tokens and the cost, when the provider reported them. */
     usage: undefined as RunUsage | undefined,
@@ -2751,12 +2742,13 @@ async function runPlan(
    * start of the run and grows while the work goes on, so a run that dies
    * leaves behind what it was doing when it died.
    */
+  const journalSubject = issueSubject(issue.number);
   const journalFile = journalPath(
     recordDirectory(options.checkout, issue.number),
     runId,
   );
   await mkdir(dirname(journalFile), { recursive: true });
-  await writeFile(journalFile, `# run ${runId}, issue ${issue.number}\n`, "utf8");
+  await writeFile(journalFile, `${journalHeader(runId, journalSubject)}\n`, "utf8");
   const session = journalFactory(options.session, journalFile);
   /**
    * The gates' whole output goes to a file beside the record.
@@ -2860,7 +2852,7 @@ async function runPlan(
         if (!outcome.claimed) {
           throw new Error(outcome.reason);
         }
-        state.claimed = true;
+        state.holdsClaim = true;
         state.base = outcome.base;
         return `claimed from ${outcome.base.slice(0, 8)}`;
       },
@@ -2918,6 +2910,7 @@ async function runPlan(
             commits: carried,
           },
           gh: options.gh,
+          git: options.git,
           ...(options.batchRelated === undefined ? {} : { batchRelated: options.batchRelated }),
           // The session does not get the whole budget: the gates run after
           // it, and a session that may spend everything leaves them nothing
@@ -2977,9 +2970,12 @@ async function runPlan(
         // about to be removed — so the runner commits it on the agent's behalf.
         // A clean worktree makes this a no-op.
         await commitAll(options.git, state.worktreePath, "the agent's work");
-        const count = (await options.git(["rev-list", "--count", `${state.base}..HEAD`], { cwd: state.worktreePath })).trim();
-        if (count === "0") {
-          throw new Error("the agent made no commits — no changes to push or open a pull request");
+        // The work is the **paths** that changed, not the commits: a commit
+        // that carries the host's own state is not the work, and a run that
+        // pushed it opened a pull request with nothing in it.
+        const paths = await changedPaths(options.git, state.worktreePath, state.base);
+        if (paths.length === 0) {
+          throw new Error("the agent made no changes — no work to push or open a pull request");
         }
         // The work is committed, and the gates run on it: the tree they judge
         // is the tree that is pushed.
@@ -3045,13 +3041,46 @@ async function runPlan(
   } else {
     // The work is already pushed. The worktree is where that work is read —
     // the reviewer needs the code, and the branch is not pushed again.
-    state.worktreePath = issueWorktreePath(options.worktreeRoot, issue.number);
-    await prepareExistingWorktree(options, state.worktreePath, issue.number);
-    // A resume has no claim to record the base, and the size of a fix's diff
-    // is read from the base the pull request is against.
-    state.base = await fetchCommit(options.git, options.checkout, {
-      remote: options.remote,
-      ref: headRef(options.baseBranch),
+    //
+    // It is a **step**, like the working path's: a failure here is a failure
+    // of the run, and a run that fails has to leave a record behind and
+    // release what it held. A preparation that happens outside the steps
+    // leaves neither.
+    steps.push({
+      name: "worktree",
+      run: async () => {
+        // The claim is the dead run's, and this run works the issue under it:
+        // the claim is this run's to release.
+        state.holdsClaim = true;
+        state.worktreePath = issueWorktreePath(options.worktreeRoot, issue.number);
+        await prepareExistingWorktree(options, state.worktreePath, issue.number);
+        // The base of a resumed run is the base the claim was taken from: the
+        // change the branch carries is the diff against that base, and the
+        // claim is what recorded it. The base branch's head is the fallback —
+        // a claim whose ref is gone cannot say what the work was taken from.
+        const claimed = await readClaimBase(options.git, options.checkout, {
+          remote: options.remote,
+          issueNumber: issue.number,
+        });
+        state.base =
+          claimed ??
+          (await fetchCommit(options.git, options.checkout, {
+            remote: options.remote,
+            ref: headRef(options.baseBranch),
+          }));
+        // The head the branch carries, and the change it carries: the re-count
+        // writes the change's verdict file, and it does so even when the run
+        // itself did no work.
+        const head = await headSha(options.git, state.worktreePath);
+        state.slug = await changedChangeSlug(options.git, state.worktreePath, {
+          base: state.base,
+          head,
+        });
+        // The commit a review of this branch judges: the branch's head, which
+        // is what the worktree holds.
+        state.reviewedSha = head;
+        return state.worktreePath;
+      },
     });
   }
 
@@ -3270,11 +3299,25 @@ async function runPlan(
           gh: options.gh,
         });
       }
+      // The verdict the file carries: the review this run made, or — for a run
+      // that resumes after the review landed — the verdict the pull request's
+      // own newest marked comment states. The gate reads that comment the same
+      // way, so the file and the gate cannot disagree.
+      const stated =
+        state.reviewCount > 0
+          ? state.verdict
+          : newestReviewVerdict(plan.pullRequest?.comments ?? []);
       // A run whose deadline left no room for a review has no verdict to
       // write. A pass file without a review is a lie the next reader would
       // believe, so the step says what happened instead.
-      if (state.reviewCount === 0) {
+      if (state.reviewCount === 0 && plan.kind !== "re-count") {
         return "no review to count";
+      }
+      // The review that is on the pull request states no verdict: the gate
+      // decides nothing about it either, and a file that said `pass` would be
+      // a lie the next reader would believe.
+      if (stated === null) {
+        return "the review states no verdict";
       }
       if (state.slug === null) {
         return "no change to count";
@@ -3290,7 +3333,7 @@ async function runPlan(
         join(directory, `${state.slug}.md`),
         verdictFile({
           slug: state.slug,
-          verdict: state.verdict ?? "pass",
+          verdict: stated,
           date: now.toISOString().slice(0, 10),
           pullRequest: state.pullRequest,
           reviewed: state.reviewedSha,
@@ -3329,7 +3372,7 @@ async function runPlan(
     ...(options.onStepStart === undefined ? {} : { onStepStart: options.onStepStart }),
     ...(options.stopped === undefined ? {} : { stopped: options.stopped }),
     release: async () => {
-      if (!state.claimed) {
+      if (!state.holdsClaim) {
         return;
       }
       // A stopped run that already pushed is not a dead run: the claim is what
@@ -3347,9 +3390,11 @@ async function runPlan(
       }
       // The work a failed run did is durable: what the agent left in the
       // worktree is committed to the branch before the worktree goes, so the
-      // next run continues it instead of starting again.
+      // next run continues it instead of starting again. A resumed run's
+      // worktree is a detached copy of what is already pushed: what is in it
+      // is scratch, and a commit there would go with the worktree.
       const kept =
-        state.worktreePath === ""
+        state.worktreePath === "" || !works
           ? null
           : await preserveUnfinishedWork({
               git: options.git,
@@ -3372,7 +3417,7 @@ async function runPlan(
   // A run that closed or split its issue leaves no claim behind: the claim is
   // what points the next run at a pull request, and this issue has none. The
   // release also removes the worktree, which is scratch on every path.
-  if (state.decision !== "work" && state.claimed) {
+  if (state.decision !== "work" && state.holdsClaim) {
     await releaseRun({
       repo: options.repo,
       remote: options.remote,

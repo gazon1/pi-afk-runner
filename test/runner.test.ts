@@ -27,7 +27,7 @@ import {
   SCOPE_DECISION_TOOL_NAME,
   VERDICT_TOOL_NAME,
 } from "../src/decisions/index.js";
-import { assistantTextLines } from "../src/journal.js";
+import { assistantTextLines, journalFileName } from "../src/journal.js";
 import {
   DEFAULT_DEADLINE_MS,
   formatCost,
@@ -52,8 +52,10 @@ import {
   pushWorkBranch,
   claimRef,
   claimRefName,
+  createClaimObject,
   issueWorktreePath,
   readClaimBase,
+  readClaimObject,
   removeWorktree,
   runCommand,
   runGit,
@@ -106,6 +108,7 @@ import {
   computeDocumentsDigest,
   deriveState,
   fixPrompt,
+  fixWorktree,
   isSmallChange,
   verifyPush,
   ensureRegistryEntry,
@@ -123,7 +126,6 @@ import {
   verdictFile,
   prepareWorktree,
   isStale,
-  journalFileName,
   observePullRequest,
   pullRequestsByBranch,
   selectIssue,
@@ -171,6 +173,23 @@ function testWorktree(issueNumber: number) {
     baseBranch: "main",
     baseSha: "0".repeat(40),
     commits: [] as readonly string[],
+  };
+}
+
+/** The issue the work session reads: a brief, and nothing else. */
+function testGh(): GhRunner {
+  return async (args: readonly string[]): Promise<string> => {
+    if (args[0] === "issue" && args[1] === "view") {
+      return JSON.stringify({
+        body: "## Agent Brief\n\ndo the thing",
+        comments: [],
+        title: "an issue",
+        labels: [],
+        updatedAt: "",
+        state: "OPEN",
+      });
+    }
+    return "";
   };
 }
 
@@ -627,7 +646,7 @@ describe("the queue", () => {
 
     // The exclusion is in the query itself: the claimed issues are never
     // fetched, so they cannot be worked by accident.
-    expect(args).toContain("-label:agent-in-progress");
+    expect(args.join(" ")).toContain(`-label:${CLAIM_LABEL}`);
     // And it is the minus form. The `no:label:` form returns nothing at all,
     // because there is no such thing as an issue with no labels — measured
     // against this repository, not assumed.
@@ -665,7 +684,7 @@ describe("the queue", () => {
 
     // The exclusion is a *search*, and it is the minus form.
     const search = valueAfter(args, "--search");
-    expect(search).toBe(`-label:${CLAIM_LABEL}`);
+    expect(search).toBe(`-label:${CLAIM_LABEL} sort:created-asc`);
     expect(search.startsWith("-")).toBe(true);
     expect(search.startsWith("no:")).toBe(false);
 
@@ -675,6 +694,14 @@ describe("the queue", () => {
     const limit = Number(valueAfter(args, "--limit"));
     expect(limit).toBeGreaterThan(GH_DEFAULT_PAGE_SIZE);
     expect(args).toContain("--limit");
+  });
+
+  it("reads the queue oldest first", () => {
+    // The backlog drains in the order it was filed: the issue the runner
+    // filed last is worked last, not first.
+    const search = valueAfter(queueArgs("gazon1/sing"), "--search");
+    expect(search).toContain("sort:created-asc");
+    expect(search).not.toContain("sort:created-desc");
   });
 
   it("reads the claimed issues with a query of its own", () => {
@@ -870,11 +897,14 @@ describe("the claim", () => {
       });
       expect(second.claimed).toBe(false);
 
-      // And it does not leave a claim behind: the label it added comes off.
-      expect(labels).toContain("removed");
-      expect(labels[labels.length - 1]).toBe("removed");
+      // And the loser does not take the label off: the label is the claim's,
+      // and the claim is the first runner's. An issue without the label is
+      // offered to the next runner while somebody is working on it — and the
+      // next runner cannot claim it, because the ref is taken.
+      expect(labels).not.toContain("removed");
 
-      // The claim records the base it was taken from.
+      // The winner's claim is untouched: the ref is still there, and it still
+      // records the base it was taken from.
       const base = await readClaimBase(
         (args, options) => runGit(args, options),
         fixture.repo,
@@ -887,6 +917,227 @@ describe("the claim", () => {
       expect(base).toBe(remoteBase);
       expect(claimRefName(42)).toBe("afk-claim-issue-42");
       expect(workBranch(42)).toBe("agent/issue-42");
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("a claim that failed for another reason takes the label off", async () => {
+    // The push failed, and it was not a race: the network is gone. No ref
+    // lands on the remote, so nobody holds the claim, and the label this
+    // runner added must come off — a claim nobody is working is an issue
+    // nobody can take.
+    const fixture = await createFixtureRepository();
+    try {
+      const labels: string[] = [];
+      const gh = async (args: readonly string[]): Promise<string> => {
+        if (args.includes("--add-label")) {
+          labels.push("added");
+        }
+        if (args.includes("--remove-label")) {
+          labels.push("removed");
+        }
+        return "";
+      };
+      const git = async (
+        args: readonly string[],
+        options: { readonly cwd: string; readonly input?: string },
+      ): Promise<string> => {
+        if (args[0] === "push") {
+          throw new CommandFailed(
+            128,
+            "git",
+            args,
+            "",
+            "fatal: unable to access the remote: Network is unreachable",
+          );
+        }
+        return runGit(args, options);
+      };
+
+      const outcome = await claimIssue({
+        issue: { number: 42, title: "an issue", updatedAt: "", labels: [] },
+        repo: "gazon1/sing",
+        remote: fixture.remote,
+        baseBranch: "main",
+        cwd: fixture.repo,
+        git,
+        gh,
+        nonce: "a-nonce",
+        now: new Date("2026-10-30T09:00:00Z"),
+      });
+
+      expect(outcome.claimed).toBe(false);
+      expect(labels).toContain("added");
+      expect(labels).toContain("removed");
+      expect(labels[labels.length - 1]).toBe("removed");
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("a claim that landed keeps the label, even when the push says it failed", async () => {
+    // The push landed and the remote hung up afterwards: git reports a
+    // failure, and the claim is on the remote all the same. The ref holds this
+    // runner's own claim object, so the claim is its own — and the label
+    // stays.
+    const fixture = await createFixtureRepository();
+    try {
+      const labels: string[] = [];
+      const gh = async (args: readonly string[]): Promise<string> => {
+        if (args.includes("--add-label")) {
+          labels.push("added");
+        }
+        if (args.includes("--remove-label")) {
+          labels.push("removed");
+        }
+        return "";
+      };
+      const git = async (
+        args: readonly string[],
+        options: { readonly cwd: string; readonly input?: string },
+      ): Promise<string> => {
+        const output = await runGit(args, options);
+        if (args[0] === "push") {
+          throw new CommandFailed(
+            128,
+            "git",
+            args,
+            output,
+            "fatal: the remote end hung up unexpectedly",
+          );
+        }
+        return output;
+      };
+
+      const outcome = await claimIssue({
+        issue: { number: 42, title: "an issue", updatedAt: "", labels: [] },
+        repo: "gazon1/sing",
+        remote: fixture.remote,
+        baseBranch: "main",
+        cwd: fixture.repo,
+        git,
+        gh,
+        nonce: "a-nonce",
+        now: new Date("2026-10-30T09:00:00Z"),
+      });
+
+      expect(outcome.claimed).toBe(false);
+      expect(labels).toContain("added");
+      expect(labels).not.toContain("removed");
+
+      // And the claim on the remote is this runner's own object: the same
+      // base, the same nonce and the same timestamp make the same claim.
+      const base = await gitOutput(["rev-parse", "main"], {
+        cwd: fixture.repo,
+        env: fixture.env,
+      });
+      const own = await createClaimObject(
+        (callArgs, callOptions) => runGit(callArgs, callOptions),
+        fixture.repo,
+        {
+          baseSha: base,
+          issueNumber: 42,
+          nonce: "a-nonce",
+          timestampSeconds: Math.floor(new Date("2026-10-30T09:00:00Z").getTime() / 1000),
+        },
+      );
+      const held = await readClaimObject(
+        (callArgs, callOptions) => runGit(callArgs, callOptions),
+        fixture.repo,
+        { remote: fixture.remote, issueNumber: 42 },
+      );
+      expect(held).toBe(own);
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("a reclaim that loses the race leaves the label alone", async () => {
+    // The reclaim takes the stale ref away and claims again — and another
+    // runner claims the issue in between. The reclaim's push is rejected, and
+    // the label is the claim's: the runner that won the race holds it, and
+    // taking it off would offer their issue to the next runner while they are
+    // working on it.
+    const fixture = await createFixtureRepository();
+    try {
+      const labels: string[] = [];
+      const gh = async (args: readonly string[]): Promise<string> => {
+        if (args.includes("--add-label")) {
+          labels.push("added");
+        }
+        if (args.includes("--remove-label")) {
+          labels.push("removed");
+        }
+        return "";
+      };
+
+      // A claim to take over: a dead run's claim, on the remote.
+      const first = await claimIssue({
+        issue: { number: 42, title: "an issue", updatedAt: "", labels: [] },
+        repo: "gazon1/sing",
+        remote: fixture.remote,
+        baseBranch: "main",
+        cwd: fixture.repo,
+        git: (args, options) => runGit(args, options),
+        gh,
+        nonce: "the-dead-run",
+        now: new Date("2026-10-30T09:00:00Z"),
+      });
+      expect(first.claimed).toBe(true);
+
+      let winner = "";
+      const git = async (
+        args: readonly string[],
+        options: { readonly cwd: string; readonly input?: string },
+      ): Promise<string> => {
+        const output = await runGit(args, options);
+        // The reclaim's ref is gone — and another runner claims the issue
+        // before the reclaim's own push reaches the remote.
+        if (args[0] === "push" && args.includes("--delete") && args.includes(claimRefName(42))) {
+          const base = await gitOutput(["rev-parse", "main"], {
+            cwd: fixture.repo,
+            env: fixture.env,
+          });
+          winner = await createClaimObject((callArgs, callOptions) => runGit(callArgs, callOptions), fixture.repo, {
+            baseSha: base,
+            issueNumber: 42,
+            nonce: "the-winner",
+            timestampSeconds: Math.floor(new Date("2026-10-30T09:00:05Z").getTime() / 1000),
+          });
+          await runGit(
+            ["push", "--no-verify", fixture.remote, `${winner}:${claimRef(42)}`],
+            { cwd: fixture.repo },
+          );
+        }
+        return output;
+      };
+
+      const outcome = await reclaimClaim({
+        issue: { number: 42, title: "an issue", updatedAt: "", labels: [] },
+        repo: "gazon1/sing",
+        remote: fixture.remote,
+        baseBranch: "main",
+        cwd: fixture.repo,
+        git,
+        gh,
+        nonce: "the-reclaim",
+        now: new Date("2026-10-30T09:00:10Z"),
+      });
+
+      expect(outcome.claimed).toBe(false);
+
+      // The label stayed on: the winner's claim is on the issue.
+      expect(labels).toContain("added");
+      expect(labels).not.toContain("removed");
+
+      // And the claim on the remote is the winner's, not the reclaim's.
+      const held = await readClaimObject(
+        (callArgs, callOptions) => runGit(callArgs, callOptions),
+        fixture.repo,
+        { remote: fixture.remote, issueNumber: 42 },
+      );
+      expect(held).toBe(winner);
     } finally {
       await fixture.dispose();
     }
@@ -3044,7 +3295,7 @@ describe("the CLI's run", () => {
     fixture: Awaited<ReturnType<typeof createFixtureRepository>>,
     gh: (args: readonly string[]) => Promise<string>,
     sections: Record<string, string>[] = [],
-  ): RunOptions {
+  ): RunOptions & { readonly runId: string } {
     let turn = 0;
     return {
       repo: "gazon1/sing",
@@ -7059,6 +7310,156 @@ describe("closing and commenting on an issue", () => {
 });
 
 describe("the work session's decisions", () => {
+  it("tells the model, between its steps, that the reading is over", async () => {
+    // The turn that implements a change ends on nothing: no verdict tool, no
+    // decision. A model that reads finds one more file every time, and the
+    // turn ends with the model reporting and the tree as it was — so the
+    // session says, between the steps, that the reading is over. It is the
+    // instrument the review ends on.
+    let feedback: { readonly afterSteps: number; readonly text: string } | undefined;
+    const factory: SessionFactory = async (options) => {
+      feedback = options.feedback;
+      return {
+        async prompt() {},
+        async abort() {},
+        dispose() {},
+      };
+    };
+    const gh = async (args: readonly string[]): Promise<string> => {
+      if (args[0] === "issue" && args[1] === "view") {
+        return JSON.stringify({
+          body: "## Agent Brief\n\ndo the thing",
+          comments: [],
+          title: "an issue",
+          labels: [],
+          updatedAt: "",
+          state: "OPEN",
+        });
+      }
+      return "";
+    };
+
+    await startAgent({
+      factory,
+      cwd: "/tmp/does-not-matter",
+      repo: "gazon1/sing",
+      issueNumber: 42,
+      worktree: testWorktree(42),
+      gh,
+      deadlineMs: 60_000,
+    });
+
+    expect(feedback?.afterSteps).toBeGreaterThan(0);
+    expect(feedback?.text).toContain("read enough");
+  });
+
+  it("points the model at the turn's own instruction, not at a job of its own", async () => {
+    // The work session's turns are not alike: the brief's turn must change
+    // nothing, the implement's turn must change the tree. A nudge that named
+    // the wrong one pushes the wrong turn into editing.
+    let feedback: { readonly afterSteps: number; readonly text: string } | undefined;
+    const factory: SessionFactory = async (options) => {
+      feedback = options.feedback;
+      return {
+        async prompt() {},
+        async abort() {},
+        dispose() {},
+      };
+    };
+
+    await startAgent({
+      factory,
+      cwd: "/tmp/does-not-matter",
+      repo: "gazon1/sing",
+      issueNumber: 42,
+      worktree: testWorktree(42),
+      gh: testGh(),
+      deadlineMs: 60_000,
+    });
+
+    expect(feedback?.text).toContain("this turn's instruction");
+  });
+
+  it("gives the implement turn a second chance when the tree is unchanged", async () => {
+    // The turn that makes the change can end with the model saying what it
+    // did, and the change is not in the tree. The turn is given one more
+    // chance, in the same session — and a turn that still changes nothing
+    // fails the run: a run that pushed that tree opened a pull request with
+    // nothing in it.
+    const prompts: string[] = [];
+    const factory: SessionFactory = async () => ({
+      async prompt(text: string) {
+        prompts.push(text);
+      },
+      async abort() {},
+      dispose() {},
+    });
+
+    const failure = await startAgent({
+      factory,
+      cwd: "/tmp/does-not-matter",
+      repo: "gazon1/sing",
+      issueNumber: 42,
+      worktree: testWorktree(42),
+      gh: testGh(),
+      git: async () => "",
+      deadlineMs: 60_000,
+    }).catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toContain("tree is unchanged");
+    expect(prompts.some((text) => text.includes("tree is unchanged"))).toBe(true);
+  });
+
+  it("leaves the implement turn alone when the tree holds the work", async () => {
+    const prompts: string[] = [];
+    const factory: SessionFactory = async () => ({
+      async prompt(text: string) {
+        prompts.push(text);
+      },
+      async abort() {},
+      dispose() {},
+    });
+
+    await startAgent({
+      factory,
+      cwd: "/tmp/does-not-matter",
+      repo: "gazon1/sing",
+      issueNumber: 42,
+      worktree: testWorktree(42),
+      gh: testGh(),
+      git: async (args) => (args[0] === "diff" ? "src/runner.ts" : ""),
+      deadlineMs: 60_000,
+    });
+
+    expect(prompts.some((text) => text.includes("tree is unchanged"))).toBe(false);
+  });
+
+  it("tells the fix's turn, between its steps, that the reading is over", async () => {
+    // The fix's turn has one job — change the code — and the findings name
+    // the files to look at. A model that reads forever ends the turn with the
+    // code as it was, and the same diff is reviewed again.
+    let feedback: { readonly afterSteps: number; readonly text: string } | undefined;
+    const factory: SessionFactory = async (options) => {
+      feedback = options.feedback;
+      return {
+        async prompt() {},
+        async abort() {},
+        dispose() {},
+      };
+    };
+
+    await fixWorktree({
+      cwd: "/tmp/does-not-matter",
+      factory,
+      findings: ["the record carries no journal pointer"],
+      deadlineMs: 60_000,
+    });
+
+    expect(feedback?.afterSteps).toBeGreaterThan(0);
+    expect(feedback?.text).toContain("read enough");
+  });
+
   it("closes the issue when the triage says skip", async () => {
     const calls: string[] = [];
     const gh = async (args: readonly string[]): Promise<string> => {

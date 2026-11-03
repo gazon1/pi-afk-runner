@@ -21,6 +21,9 @@
  * - **The exclusion is the minus form.** `--search '-label:agent-in-progress'`
  *   excludes; `--search 'no:label:agent-in-progress'` returns nothing at all,
  *   because there is no such thing as an issue with no labels.
+ * - **The queue is read oldest first.** `--search 'sort:created-asc'` sorts the
+ *   issues by when they were created, so the backlog drains in the order it was
+ *   filed and the runner does not keep picking up the issue it filed last.
  */
 
 import { execFile } from "node:child_process";
@@ -99,7 +102,7 @@ export function queueArgs(repo: string): string[] {
     "--label",
     QUEUE_LABEL,
     "--search",
-    `-label:${CLAIM_LABEL}`,
+    `-label:${CLAIM_LABEL} sort:created-asc`,
     "--limit",
     String(ISSUE_PAGE_SIZE),
     "--json",

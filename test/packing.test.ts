@@ -250,6 +250,36 @@ describe("the real packer", () => {
     expect(text).toContain(".env.example");
   });
 
+  it("packs a Kotlin file as it is", async () => {
+    // Repomix can strip the comments and reduce a file to its structure with
+    // a tree-sitter pass. The runner asks for neither: the target repository
+    // is written in Kotlin, and repomix has no grammar for it, so the pack
+    // holds the file as it is.
+    const source = [
+      "package com.example",
+      "",
+      "/**",
+      " * Greets somebody by name.",
+      " */",
+      "class Greeter(private val name: String) {",
+      "    // A line comment.",
+      "    fun greet(): String = \"Hello, $name\"",
+      "}",
+      "",
+    ].join("\n");
+    const root = await mkdtemp(join(tmpdir(), "afk-pack-test-"));
+    worktrees.push(root);
+    await writeFile(join(root, "Main.kt"), source);
+    const tool = createPackTool({ cwd: root });
+
+    const result = await tool.execute("call-1", { path: "." });
+
+    expect(result.isError).toBeUndefined();
+    const text = result.content[0]?.text ?? "";
+    // The whole file is in the pack: the comments, the class and the body.
+    expect(text).toContain(source);
+  });
+
   it("refuses a path that is not in the worktree, and fetches nothing", async () => {
     const tool = createPackTool({ cwd: await worktree() });
 

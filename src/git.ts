@@ -678,6 +678,37 @@ export async function hasUnmergedEntries(git: GitRunner, cwd: string): Promise<b
 }
 
 /**
+ * The paths that hold the work, against the base.
+ *
+ * The branch's own commits, measured from the **merge base**: the base's own
+ * changes are not the branch's work, and a branch that started from an older
+ * base would otherwise read as a change of its own. On top of them, the tree's
+ * own changes: the files that are modified and the files that are new.
+ *
+ * Git's own rules decide what counts. An ignored file is the host's business,
+ * not the work.
+ */
+export async function changedPaths(
+  git: GitRunner,
+  cwd: string,
+  base: string,
+): Promise<readonly string[]> {
+  const committed = await git(["diff", "--name-only", `${base}...HEAD`], { cwd });
+  const modified = await git(["diff", "--name-only", "HEAD"], { cwd });
+  const untracked = await git(["ls-files", "--others", "--exclude-standard"], { cwd });
+  const paths = new Set<string>();
+  for (const output of [committed, modified, untracked]) {
+    for (const raw of output.split("\n")) {
+      const path = raw.trim();
+      if (path !== "") {
+        paths.add(path);
+      }
+    }
+  }
+  return [...paths];
+}
+
+/**
  * The full ref of a branch.
  *
  * `git ls-remote` matches the **tail** of a ref, so `main` would also match
@@ -721,6 +752,29 @@ export async function readClaimBase(
     const match = /^[0-9a-f]+\s+refs\/tags\/.*\^\{\}$/.exec(line.trim());
     if (match !== null) {
       return line.trim().split(/\s+/)[0] ?? null;
+    }
+  }
+  return null;
+}
+
+/**
+ * The claim object the remote holds for an issue, or null when it holds none.
+ *
+ * The claim is an annotated tag, so the remote lists it twice: the tag object,
+ * and the commit it peels to. The **tag object** is the claim — it carries the
+ * nonce — and it is what tells two claims apart: two runners that took the same
+ * issue from the same base agree on the commit and differ on the object.
+ */
+export async function readClaimObject(
+  git: GitRunner,
+  cwd: string,
+  options: { readonly remote: string; readonly issueNumber: number },
+): Promise<string | null> {
+  const output = await git(["ls-remote", options.remote, claimRef(options.issueNumber)], { cwd });
+  for (const line of output.trim().split("\n")) {
+    const [sha, ref] = line.trim().split(/\s+/);
+    if (ref === claimRef(options.issueNumber)) {
+      return sha ?? null;
     }
   }
   return null;
