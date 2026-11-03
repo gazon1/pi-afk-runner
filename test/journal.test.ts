@@ -12,6 +12,7 @@
  * one pipeline's file knows it from the other's.
  */
 
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -24,6 +25,8 @@ import {
   journalFileName,
   journalHeader,
   journalPath,
+  sweepJournalDirectory,
+  sweepJournalHeader,
 } from "../src/journal.js";
 import { logTurn, refusalLine, type TurnAnswer } from "../src/mastra/log.js";
 import type { AgentSession } from "../src/session.js";
@@ -94,6 +97,7 @@ describe("the journal file", () => {
     expect(journalHeader("run-2", { kind: "pull request", number: 7 })).toBe(
       "# run run-2, pull request 7",
     );
+    expect(sweepJournalHeader("run-3")).toBe("# run run-3, the merge sweep");
   });
 
   it("lives beside the run's record", () => {
@@ -107,10 +111,48 @@ describe("the journal file", () => {
     );
   });
 
+  it("puts the sweep's journal beside the pull requests' own", () => {
+    // The sweep's journal is in the directory the per-pull-request
+    // directories are in, not in one of them.
+    expect(sweepJournalDirectory("/repo")).toBe(
+      join("/repo", "build", "diagnostics", "merge"),
+    );
+  });
+
   it("is the run's own file", () => {
     // The name in the record is the name on the disk, so one place says it.
     expect(journalFileName("run-1")).toBe("run-1.log");
     expect(journalPath("/dir", "run-1")).toBe(join("/dir", "run-1.log"));
+  });
+
+  it("gives every journal it wraps the same lines", async () => {
+    // The sweep's journal and the pull request's own journal are two files
+    // around one session: the lines go to both, and neither loses the other.
+    const directory = await mkdtemp(join(tmpdir(), "afk-journal-"));
+    try {
+      const sweepFile = join(directory, "sweep.log");
+      const pullRequestFile = join(directory, "pull-request.log");
+      const session: AgentSession = {
+        prompt: async () => {},
+        abort: async () => {},
+        dispose: () => {},
+      };
+      const factory = journalFactory(
+        async (sessionOptions) => {
+          sessionOptions.onEvent?.("the agent's own line");
+          return session;
+        },
+        sweepFile,
+      );
+      const wrapped = journalFactory(factory, pullRequestFile);
+
+      await wrapped({ cwd: directory, systemPromptSections: {} });
+
+      expect(await readFile(sweepFile, "utf8")).toBe("the agent's own line\n");
+      expect(await readFile(pullRequestFile, "utf8")).toBe("the agent's own line\n");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it("drops a line it cannot write, and keeps the run going", async () => {

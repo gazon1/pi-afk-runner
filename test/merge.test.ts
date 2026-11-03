@@ -639,6 +639,67 @@ describe("the merge pipeline", () => {
     }
   });
 
+  it("test_the_sweep_writes_a_journal_beside_the_pull_request_journals", async () => {
+    // Each pull request the sweep starts has a journal of its own. The sweep has
+    // one too: a sweep killed between two pull requests leaves only those
+    // behind, and nothing says what the sweep was doing.
+    const fixture = await createFixtureRepository({ files: { "scripts/setup-worktree.sh": SETUP } });
+    try {
+      const { gh } = stubGh([
+        reviewedPullRequest({ number: 7, isDraft: true }),
+        reviewedPullRequest({ number: 8, comments: [`${REVIEW_MARKER}\n\n**Verdict:** fail`] }),
+        reviewedPullRequest({ number: 9, headRefName: "someone/feature" }),
+      ]);
+
+      await mergeReviewedPullRequests(options(fixture, gh));
+
+      // The file sits under `build/diagnostics/merge/`, beside the per-pull-request
+      // directories, and it is one file per run.
+      const journal = join(
+        fixture.repo,
+        "build",
+        "diagnostics",
+        "merge",
+        "2026-11-02T09-00-00-000Z-abcdef12.log",
+      );
+      expect(existsSync(journal)).toBe(true);
+      const lines = await readFile(journal, "utf8");
+      expect(lines).toContain("left #7 alone — it is a draft");
+      expect(lines).toContain("left #8 alone — its newest review said fail");
+      expect(lines).toContain("left #9 alone — its branch is not ours");
+      // The summary counts the pull requests the sweep left alone — the one
+      // whose branch is not ours is one of them, and the result does not name
+      // it.
+      expect(lines).toContain("the sweep ended — 0 landed, 3 left alone, 0 stopped");
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("test_a_sweep_that_dies_before_it_reads_the_candidates_leaves_its_journal", async () => {
+    const fixture = await createFixtureRepository({ files: { "scripts/setup-worktree.sh": SETUP } });
+    try {
+      const gh = async (): Promise<string> => {
+        throw new Error("gh is down");
+      };
+
+      await expect(mergeReviewedPullRequests(options(fixture, gh))).rejects.toThrow("gh is down");
+
+      // The journal is there before the candidates are read, so a sweep that
+      // dies leaves the file behind.
+      const journal = join(
+        fixture.repo,
+        "build",
+        "diagnostics",
+        "merge",
+        "2026-11-02T09-00-00-000Z-abcdef12.log",
+      );
+      expect(existsSync(journal)).toBe(true);
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
   it("test_the_record_says_the_deadline_cut_the_merge_session", async () => {
     const fixture = await createFixtureRepository({
       files: { "scripts/setup-worktree.sh": SETUP, "shared.txt": "the base\n" },

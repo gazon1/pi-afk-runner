@@ -15,6 +15,7 @@ for the rule that the copies follow.
 
 | Decision | What it settles |
 |---|---|
+| `2026-11-10-the-sweep-writes-a-journal-of-its-own.md` | the merge sweep writes a journal of its own: the file is in `build/diagnostics/merge/` beside the per-pull-request directories, it is there before the candidates are read, and it holds the sweep's own lines and the session's |
 | `2026-11-09-the-pack-drops-the-grammars-it-cannot-use.md` | the pack drops the grammars it cannot use: the install removes repomix's tree-sitter grammars, the compression stays off because repomix has no Kotlin grammar, and the pack holds the files as they are |
 | `2026-11-08-the-suite-list-is-the-policy.md` | the suites are the policy's list: one entry per runner, and the rule that reads it names none of them — the list of the suites **extended** from `2026-11-05-a-run-gates-nothing-and-builds-nothing.md` |
 | `2026-11-08-the-issue-travels-with-the-turn.md` | the issue's data travels with the first turn, above its instruction: no intake turn, no intake sub-workflow, and the data read once — **the intake clause replaced** in `2026-11-06-the-graph-runs-on-the-mastra-workflow-engine.md` |

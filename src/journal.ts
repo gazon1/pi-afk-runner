@@ -6,7 +6,7 @@
  * and hands them here, so a line is spelled the same way whoever reads it.
  *
  * The file's shape is written here too — its directory, its name, its header
- * line and the factory that appends to it — because two pipelines write a
+ * line and the factory that appends to it — because several pipelines write a
  * journal and a rule written twice is a rule whose two copies drift. A
  * pipeline that writes a journal names what the run was about; this module
  * says what the file looks like.
@@ -23,7 +23,7 @@ import type { SessionFactory } from "./session.js";
 /**
  * The words that name what a run was about.
  *
- * They are written here, once. The subject's kind is one of them, and the two
+ * They are written here, once. The subject's kind is one of them, and the
  * constructors below are the only way a caller names a kind — so a pipeline
  * that writes a record cannot spell the subject a third way.
  */
@@ -67,6 +67,16 @@ export function pullRequestSubject(number: number): JournalSubject {
 }
 
 /**
+ * The directory the merge pipeline's own files live in.
+ *
+ * The per-pull-request directories are in it, and the sweep's journal is the
+ * file beside them.
+ */
+function mergeDirectory(root: string): string {
+  return join(root, "build", "diagnostics", "merge");
+}
+
+/**
  * Where the journal of a run lives.
  *
  * `build/diagnostics/issue-<N>/` for a run about an issue, and
@@ -76,7 +86,28 @@ export function pullRequestSubject(number: number): JournalSubject {
 export function journalDirectory(root: string, subject: JournalSubject): string {
   return subject.kind === SUBJECT_WORDS.issue
     ? join(root, "build", "diagnostics", `issue-${subject.number}`)
-    : join(root, "build", "diagnostics", "merge", `pr-${subject.number}`);
+    : join(mergeDirectory(root), `pr-${subject.number}`);
+}
+
+/**
+ * Where the sweep's journal lives.
+ *
+ * The sweep is not a subject: a subject names a run by its number, and the
+ * sweep has none — it is the run that works on the pull requests. Its journal
+ * is the file beside the directories their own journals are in.
+ */
+export function sweepJournalDirectory(root: string): string {
+  return mergeDirectory(root);
+}
+
+/**
+ * The line the sweep's journal starts with.
+ *
+ * It names the run and what the run was about, the same way the other
+ * journals' first line does.
+ */
+export function sweepJournalHeader(runId: string): string {
+  return `# run ${runId}, the merge sweep`;
 }
 
 /**
@@ -111,23 +142,43 @@ export function journalPath(directory: string, runId: string): string {
 }
 
 /**
+ * The journal's writer: a line at a time, appended as the line comes.
+ *
+ * A line that cannot be written is dropped: a journal that cannot be written
+ * is not a reason to stop the run.
+ */
+export function journalWriter(path: string): (line: string) => void {
+  return (line: string): void => {
+    try {
+      appendFileSync(path, `${line}\n`, "utf8");
+    } catch {
+      // The journal is a witness, not a gate: the run goes on without it.
+    }
+  };
+}
+
+/**
  * The journal file of a run: the session's lines, written while the run works.
  *
  * The factory is wrapped, so every session the run opens — the work session,
  * the review, the fixes — writes to the same file. The lines are appended as
  * they come, and a line that cannot be written is dropped: a journal that
  * cannot be written is not a reason to stop the run.
+ *
+ * A journal that is already wrapped keeps its own listener: the lines go to
+ * both files, so the merge sweep's journal and the pull request's own journal
+ * each hold the lines of the session they share.
  */
 export function journalFactory(factory: SessionFactory, path: string): SessionFactory {
+  const write = journalWriter(path);
   return async (sessionOptions) => {
-    const write = (line: string): void => {
-      try {
-        appendFileSync(path, `${line}\n`, "utf8");
-      } catch {
-        // The journal is a witness, not a gate: the run goes on without it.
-      }
-    };
-    return factory({ ...sessionOptions, onEvent: write });
+    return factory({
+      ...sessionOptions,
+      onEvent: (line: string) => {
+        write(line);
+        sessionOptions.onEvent?.(line);
+      },
+    });
   };
 }
 

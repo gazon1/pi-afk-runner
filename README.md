@@ -342,7 +342,10 @@ next one, once CI has judged the new commit. A merge never lands a commit CI has
 
 Each pull request's record goes under `build/diagnostics/merge/pr-<N>/`, and the journal of the merge
 — the session's lines, written while it works — is the file beside it: a merge that is killed leaves
-the journal behind, and it says what the merge was doing when it died. A failed step is reported
+the journal behind, and it says what the merge was doing when it died. The sweep writes a journal of
+its own, under `build/diagnostics/merge/` beside those directories: it holds the pull requests the
+sweep considered, the ones it left alone and why, and the pull request it was working on when it
+stopped, and a sweep that is killed leaves it behind. A failed step is reported
 with its name and the pull request stays open; a skipped pull request is not a failure. A merge takes
 its own lock — `merge.lock` — and not the work lock, so a merge and the work runs do not wait for each
 other.
