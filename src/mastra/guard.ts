@@ -16,13 +16,13 @@
 
 import type { Workspace } from "@mastra/core/workspace";
 
-import { GUARD_POLICY, policyVerdict, type PolicyRule } from "../guard.js";
-
-/** The policy's rules for the paths, in the order they are written. */
-const PATH_RULES = GUARD_POLICY.path as Readonly<Record<string, PolicyRule>>;
-
-/** The policy's rules for the shell commands, in the order they are written. */
-const BASH_RULES = GUARD_POLICY.bash as Readonly<Record<string, PolicyRule>>;
+import {
+  GUARD_POLICY,
+  policyVerdict,
+  runsATestSuite,
+  runsTooLong,
+  timeoutAboveCeiling,
+} from "../guard.js";
 
 /** A string field of the call's input, when the call carries one. */
 function stringField(input: unknown, name: string): string | undefined {
@@ -31,6 +31,15 @@ function stringField(input: unknown, name: string): string | undefined {
   }
   const value = (input as Record<string, unknown>)[name];
   return typeof value === "string" ? value : undefined;
+}
+
+/** A number field of the call's input, when the call carries one. */
+function numberField(input: unknown, name: string): number | undefined {
+  if (typeof input !== "object" || input === null || !(name in input)) {
+    return undefined;
+  }
+  const value = (input as Record<string, unknown>)[name];
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
 /**
@@ -43,14 +52,37 @@ function stringField(input: unknown, name: string): string | undefined {
 export function denyReason(input: unknown): string | null {
   const path = stringField(input, "path");
   if (path !== undefined) {
-    const verdict = policyVerdict(PATH_RULES, path);
+    const verdict = policyVerdict(GUARD_POLICY.path, path);
     if (verdict.denied) {
       return `Refused: ${path} is not a file the agent may read or write.`;
     }
   }
   const command = stringField(input, "command");
   if (command !== undefined) {
-    const verdict = policyVerdict(BASH_RULES, command);
+    // A test suite is a gate, and this run does not gate the tree. The suite
+    // is refused by the program it starts, so the searches that read how the
+    // target gates itself still go through.
+    if (runsATestSuite(command)) {
+      return `Refused: ${command}. ${GUARD_POLICY.program.reason}`;
+    }
+    // A command may not ask to run for longer than the ceiling, however it
+    // asks: through the tool's own timeout or through the shell's `timeout`.
+    // A run that waits is a run that does nothing else.
+    const ceiling = GUARD_POLICY.duration.ceilingSeconds;
+    const seconds = numberField(input, "timeout");
+    if (seconds !== undefined && timeoutAboveCeiling(seconds)) {
+      return (
+        `Refused: ${command} asks for ${seconds}s, and this run allows ` +
+        `${ceiling}s at most. ${GUARD_POLICY.duration.reason}`
+      );
+    }
+    if (runsTooLong(command)) {
+      return (
+        `Refused: ${command} asks to run longer than this run allows ` +
+        `(${ceiling}s at most). ${GUARD_POLICY.duration.reason}`
+      );
+    }
+    const verdict = policyVerdict(GUARD_POLICY.bash, command);
     if (verdict.denied) {
       return verdict.reason === ""
         ? `Refused: ${command} is not a command the agent may run.`
