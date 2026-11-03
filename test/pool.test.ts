@@ -32,7 +32,7 @@ import {
 } from "../src/pool.js";
 import { PoolSession, poolEventChannel, type PoolHost } from "../src/pool-session.js";
 import { useProxy } from "../src/proxy.js";
-import { journalFactory } from "../src/journal.js";
+import { journalFactory, assistantTextLines } from "../src/journal.js";
 import type { TurnMessage } from "../src/session.js";
 
 /** The pool the tests pick from: the best model, one behind a proxy, and a spare. */
@@ -550,25 +550,29 @@ describe("a session in the pool", () => {
             session: sessionOptions,
           }),
         });
-        // The session's own line, between the pool's two.
-        sessionOptions.onEvent?.("the agent is working");
+        // The session's own line, between the pool's two — spelled the way the
+        // engine spells it, so the journal says who said what.
+        for (const line of assistantTextLines("the agent is working")) {
+          sessionOptions.onEvent?.(line);
+        }
         return session;
       }, journal);
       const session = await factory({ cwd: directory, systemPromptSections: {} });
       await session.prompt("do the work");
       session.dispose();
 
-      // The pool said what it did, on its own channel...
+      // The pool said what it did, on its own channel, in its own words...
       expect(said).toContain("the model is now fake/beam");
       // ...and the journal holds it, among the session's own lines, in the
-      // order it happened.
+      // order it happened. The pool's lines are marked: the file says which
+      // lines are the run's own.
       const lines = (await readFile(journal, "utf8"))
         .split("\n")
         .filter((line) => line.trim() !== "");
       expect(lines).toEqual([
-        "the model is now fake/beam",
-        "the agent is working",
-        "fake/beam has run out of its limit — the model is now fake/spare",
+        "◆ the model is now fake/beam",
+        "· the agent is working",
+        "◆ fake/beam has run out of its limit — the model is now fake/spare",
       ]);
     } finally {
       await rm(directory, { recursive: true, force: true });

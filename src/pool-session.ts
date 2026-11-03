@@ -11,6 +11,7 @@
  * dead model again on the next issue.
  */
 
+import { poolLine } from "./journal.js";
 import {
   NoModelAvailable,
   type ModelCatalogue,
@@ -375,6 +376,10 @@ export class PoolSession implements AgentSession {
  * reach the **journal** — the file the run writes while it works — through the
  * session's own channel. A reader of that one file then sees the session's
  * calls and the model they were made against, in the order they happened.
+ *
+ * The journal's line is marked: the pool's words are the run's own doings, and
+ * the file says so. The command line and the record keep the words as they
+ * are — the marker belongs to the file alone.
  */
 export function poolEventChannel(options: {
   /** The pool's own channel — the command line and the record. */
@@ -391,6 +396,6 @@ export function poolEventChannel(options: {
 }): (line: string) => void {
   return (line) => {
     options.pool(line);
-    options.session?.onEvent?.(line);
+    options.session?.onEvent?.(poolLine(line));
   };
 }

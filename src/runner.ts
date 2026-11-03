@@ -1474,10 +1474,11 @@ function renderRecord(options: {
   ];
   // The journal is the file beside the record, and the record is the file a
   // reader is sent to — so the record is where the pointer to the journal
-  // belongs. The name is the one the run wrote the file under.
+  // belongs. The name is the one the run wrote the file under. The pointer
+  // says what the file holds: the run's own lines, each marked as its own.
   if (options.hasJournal === true) {
     lines.push(
-      `- journal: ${journalFileName(options.runId)} — the agent's own lines as it worked: the calls it made and what it said`,
+      `- journal: ${journalFileName(options.runId)} — the run's lines as it worked, each marked as its own: the agent's calls and what it said, and the pool's`,
     );
   }
   lines.push("", "## Steps", "");

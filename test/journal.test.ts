@@ -12,6 +12,7 @@
  * one pipeline's file knows it from the other's.
  */
 
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -19,13 +20,17 @@ import chalk from "chalk";
 import { describe, expect, it } from "vitest";
 
 import {
+  POOL_MARKER,
+  assistantTextLines,
   journalDirectory,
   journalFactory,
   journalFileName,
   journalHeader,
   journalPath,
+  poolLine,
 } from "../src/journal.js";
 import { logTurn, refusalLine, type TurnAnswer } from "../src/mastra/log.js";
+import { poolEventChannel } from "../src/pool-session.js";
 import type { AgentSession } from "../src/session.js";
 
 /** A turn the agent answered with: one tool call and one spoken line. */
@@ -111,6 +116,57 @@ describe("the journal file", () => {
     // The name in the record is the name on the disk, so one place says it.
     expect(journalFileName("run-1")).toBe("run-1.log");
     expect(journalPath("/dir", "run-1")).toBe(join("/dir", "run-1.log"));
+  });
+
+  it("marks the pool's lines, and no agent line carries that mark", () => {
+    // The pool's lines are the run's own doings, and the file says so. The
+    // marker is the runner's own, and the agent's lines keep theirs.
+    expect(poolLine("the model is now fake/beam")).toBe("◆ the model is now fake/beam");
+    const agentLines: string[] = [];
+    logTurn(answerWith({ command: "npm run check" }, "the agent is working"), (line) =>
+      agentLines.push(line),
+    );
+    const refusal = refusalLine("Refused: pytest -q");
+    if (refusal !== undefined) {
+      agentLines.push(refusal);
+    }
+    for (const line of agentLines) {
+      expect(line.startsWith(POOL_MARKER)).toBe(false);
+    }
+  });
+
+  it("holds the pool's lines and the agent's, each marked as its own", async () => {
+    // One file, two voices: a reader of the journal has to see which line is
+    // the agent's and which is the run's own.
+    const directory = await mkdtemp(join(tmpdir(), "afk-journal-voices-"));
+    const journal = join(directory, "run.log");
+    try {
+      const session: AgentSession = {
+        prompt: async () => {},
+        abort: async () => {},
+        dispose: () => {},
+      };
+      const factory = journalFactory(async (sessionOptions) => {
+        // The agent's line, spelled the way the engine spells it.
+        for (const line of assistantTextLines("the agent is working")) {
+          sessionOptions.onEvent?.(line);
+        }
+        // The pool's line, through the pool's own channel.
+        poolEventChannel({ pool: () => {}, session: sessionOptions })(
+          "the model is now fake/beam",
+        );
+        return session;
+      }, journal);
+
+      await factory({ cwd: directory, systemPromptSections: {} });
+
+      const lines = (await readFile(journal, "utf8"))
+        .split("\n")
+        .filter((line) => line.trim() !== "");
+      expect(lines).toEqual(["· the agent is working", "◆ the model is now fake/beam"]);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it("drops a line it cannot write, and keeps the run going", async () => {

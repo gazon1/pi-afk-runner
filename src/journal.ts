@@ -170,3 +170,24 @@ export function assistantTextLines(text: string): string[] {
   }
   return lines;
 }
+
+/**
+ * The marker a pool's line carries in the journal.
+ *
+ * The journal holds the session's lines and the pool's, and a reader has to
+ * tell the two apart: the agent's speech, its calls and its refusals carry
+ * markers of their own, and the pool's lines carry this one. It is the
+ * runner's own vocabulary, and no agent line carries it.
+ */
+export const POOL_MARKER = "◆";
+
+/**
+ * The line a pool's words make in the journal.
+ *
+ * The words stay as they are — the marker says where the line came from, and
+ * says nothing else. The command line and the record keep the pool's own
+ * words, unmarked: the marker belongs to the file alone.
+ */
+export function poolLine(line: string): string {
+  return `${POOL_MARKER} ${line}`;
+}
