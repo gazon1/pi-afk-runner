@@ -552,12 +552,12 @@ async function mergeOne(
   let record = "";
   try {
     const outcome = await runSteps({
-      issue: candidate.number,
       runId,
       root: options.checkout,
       steps,
-      directory,
-      heading: `# Merge pull request ${candidate.number}`,
+      // The heading names the pull request the subject names: the number is
+      // the subject's, not a second one spelled here.
+      heading: `# Merge ${subject.kind} ${subject.number}`,
       subject,
       ...(options.poolEvents === undefined ? {} : { pool: options.poolEvents }),
       ...(options.onStep === undefined ? {} : { onStep: options.onStep }),

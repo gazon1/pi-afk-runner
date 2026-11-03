@@ -42,6 +42,7 @@ import {
   journalFileName,
   journalHeader,
   journalPath,
+  recordHeading,
   type JournalSubject,
 } from "./journal.js";
 import {
@@ -1456,12 +1457,13 @@ function tail(text: string, limit: number): { readonly text: string; readonly tr
 /**
  * Where the record of a run lives.
  *
- * `build/diagnostics/issue-<N>/` — the repository's own convention for "here is
- * what happened", with the issue's number in the directory's name. The record
- * sits beside the journal, so it lives where the journal lives.
+ * `build/diagnostics/issue-<N>/` for a run about an issue, and
+ * `build/diagnostics/merge/pr-<N>/` for a run about a pull request: the
+ * subject's own directory, so the record and the journal beside it always
+ * name the same run.
  */
-export function recordDirectory(root: string, issue: number): string {
-  return journalDirectory(root, issueSubject(issue));
+export function recordDirectory(root: string, subject: JournalSubject): string {
+  return journalDirectory(root, subject);
 }
 
 /**
@@ -1490,14 +1492,12 @@ const RUNNER_STAMP = ((): string => {
 
 /** The record's own text. */
 function renderRecord(options: {
-  readonly issue: number;
+  readonly subject: JournalSubject;
   readonly runId: string;
   readonly outcome: "completed" | "failed";
   readonly steps: readonly StepRecord[];
-  /** The record's first line, when it is not an issue's. */
+  /** The record's first line, when the run has one of its own. */
   readonly heading?: string;
-  /** What the run was about — the issue by default, a pull request for a merge. */
-  readonly subject?: JournalSubject;
   /** What the model pool did during the run. */
   readonly pool?: readonly string[];
   /** The packs the run made, when it made any. */
@@ -1505,13 +1505,13 @@ function renderRecord(options: {
   /** Whether this run wrote a journal beside the record. */
   readonly hasJournal?: boolean;
 }): string {
-  // The subject says what the run was about, and the record reads both the
-  // word and the number from it: the word is spelled in one place.
-  const subject = options.subject ?? issueSubject(options.issue);
+  // The subject says what the run was about, and the record reads the word
+  // and the number from it — the heading and the line that names it both come
+  // from here, so a record cannot disagree with itself.
   const lines = [
-    options.heading ?? `# Run issue-${options.issue}`,
+    options.heading ?? recordHeading(options.subject),
     "",
-    `- ${subject.kind}: ${subject.number}`,
+    `- ${options.subject.kind}: ${options.subject.number}`,
     `- run: ${options.runId}`,
     `- runner: ${RUNNER_STAMP}`,
     `- outcome: ${options.outcome}`,
@@ -1574,18 +1574,18 @@ function renderRecord(options: {
  *
  * The record names the issue, the steps the run took and what came of each, so
  * a reader can reconstruct the run's timeline without the runner's process.
+ *
+ * The subject is what the run was about: the heading, the line that names it
+ * and the directory it goes in are all read from it, so the record carries
+ * one number and cannot disagree with itself.
  */
 export async function writeRunRecord(options: {
   readonly root: string;
-  readonly issue: number;
+  readonly subject: JournalSubject;
   readonly runId: string;
   readonly outcome: "completed" | "failed";
   readonly steps: readonly StepRecord[];
-  /** Where the record goes, when it is not under the issue's own directory. */
-  readonly directory?: string;
   readonly heading?: string;
-  /** What the run was about — the issue by default, a pull request for a merge. */
-  readonly subject?: JournalSubject;
   /** What the model pool did during the run. */
   readonly pool?: readonly string[];
   /** The packs the run made, when it made any. */
@@ -1593,18 +1593,17 @@ export async function writeRunRecord(options: {
   /** Whether this run wrote a journal beside the record. */
   readonly hasJournal?: boolean;
 }): Promise<string> {
-  const directory = options.directory ?? recordDirectory(options.root, options.issue);
+  const directory = recordDirectory(options.root, options.subject);
   await mkdir(directory, { recursive: true });
   const path = join(directory, `${options.runId}.md`);
   await writeFile(
     path,
     renderRecord({
-      issue: options.issue,
+      subject: options.subject,
       runId: options.runId,
       outcome: options.outcome,
       steps: options.steps,
       ...(options.heading === undefined ? {} : { heading: options.heading }),
-      ...(options.subject === undefined ? {} : { subject: options.subject }),
       ...(options.pool === undefined ? {} : { pool: options.pool }),
       ...(options.packs === undefined ? {} : { packs: options.packs }),
       ...(options.hasJournal === undefined ? {} : { hasJournal: options.hasJournal }),
@@ -1660,16 +1659,12 @@ export async function releaseRun(options: {
  * selecting nothing" is the one outcome this runner must never have.
  */
 export async function runSteps(options: {
-  readonly issue: number;
+  readonly subject: JournalSubject;
   readonly runId: string;
   /** The checkout the record goes under. */
   readonly root: string;
   readonly steps: readonly Step[];
-  /** Where the record goes, when it is not under the issue's own directory. */
-  readonly directory?: string;
   readonly heading?: string;
-  /** What the run was about — the issue by default, a pull request for a merge. */
-  readonly subject?: JournalSubject;
   /** What the model pool did during the run. */
   readonly pool?: readonly string[];
   /**
@@ -1764,13 +1759,11 @@ export async function runSteps(options: {
   try {
     record = await writeRunRecord({
       root: options.root,
-      issue: options.issue,
+      subject: options.subject,
       runId: options.runId,
       outcome,
       steps,
-      ...(options.directory === undefined ? {} : { directory: options.directory }),
       ...(options.heading === undefined ? {} : { heading: options.heading }),
-      ...(options.subject === undefined ? {} : { subject: options.subject }),
       ...(options.pool === undefined ? {} : { pool: options.pool }),
       ...(options.packs === undefined ? {} : { packs: options.packs }),
       ...(options.hasJournal === undefined ? {} : { hasJournal: options.hasJournal }),
@@ -1788,7 +1781,7 @@ export async function runSteps(options: {
 
   if (failure === null) {
     return {
-      issue: options.issue,
+      issue: options.subject.number,
       runId: options.runId,
       outcome,
       steps,
@@ -2744,7 +2737,7 @@ async function runPlan(
    */
   const journalSubject = issueSubject(issue.number);
   const journalFile = journalPath(
-    recordDirectory(options.checkout, issue.number),
+    recordDirectory(options.checkout, journalSubject),
     runId,
   );
   await mkdir(dirname(journalFile), { recursive: true });
@@ -2758,7 +2751,7 @@ async function runPlan(
    * and a document that carries a whole build log is not read.
    */
   const gatesLog = join(
-    recordDirectory(options.checkout, issue.number),
+    recordDirectory(options.checkout, journalSubject),
     `${runId}-gates.log`,
   );
   /**
@@ -3358,7 +3351,7 @@ async function runPlan(
   });
 
   const runOutcome = await runSteps({
-    issue: issue.number,
+    subject: journalSubject,
     runId,
     root: options.checkout,
     steps,

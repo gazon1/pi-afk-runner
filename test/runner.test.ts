@@ -27,7 +27,7 @@ import {
   SCOPE_DECISION_TOOL_NAME,
   VERDICT_TOOL_NAME,
 } from "../src/decisions/index.js";
-import { assistantTextLines, journalFileName } from "../src/journal.js";
+import { assistantTextLines, issueSubject, journalFileName } from "../src/journal.js";
 import {
   DEFAULT_DEADLINE_MS,
   formatCost,
@@ -2801,7 +2801,7 @@ describe("the failure path and the record", () => {
       ];
 
       const failure = await runSteps({
-        issue: 42,
+        subject: issueSubject(42),
         runId: "2026-10-30T09-00-00-000Z-abcdef12",
         root: fixture.root,
         steps,
@@ -2865,7 +2865,7 @@ describe("the failure path and the record", () => {
     const seen: string[] = [];
     try {
       await runSteps({
-        issue: 42,
+        subject: issueSubject(42),
         runId: "2026-10-30T09-00-00-000Z-abcdef12",
         root,
         steps: [
@@ -2893,7 +2893,7 @@ describe("the failure path and the record", () => {
     const root = await mkdtemp(join(tmpdir(), "afk-record-"));
     try {
       const outcome = await runSteps({
-        issue: 42,
+        subject: issueSubject(42),
         runId: "2026-10-30T09-00-00-000Z-abcdef12",
         root,
         steps: [
@@ -2922,6 +2922,26 @@ describe("the failure path and the record", () => {
     }
   });
 
+  it("test_the_record_names_the_issue_in_its_heading", async () => {
+    const root = await mkdtemp(join(tmpdir(), "afk-record-heading-"));
+    try {
+      const outcome = await runSteps({
+        subject: issueSubject(42),
+        runId: "2026-10-30T09-00-00-000Z-abcdef12",
+        root,
+        steps: [{ name: "claim", run: async () => "claimed" }],
+      });
+
+      // The heading and the line under it name the same run: the number comes
+      // from the subject, so the two cannot drift apart.
+      const record = await readFile(outcome.record, "utf8");
+      expect(record).toContain("# Run issue-42");
+      expect(record).toContain("- issue: 42");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("test_the_record_names_the_pack_the_run_made", async () => {
     const root = await mkdtemp(join(tmpdir(), "afk-pack-record-"));
     try {
@@ -2929,7 +2949,7 @@ describe("the failure path and the record", () => {
       // steps fill the list as they run, the way the runner's own do.
       const packs: PackReport[] = [];
       const outcome = await runSteps({
-        issue: 42,
+        subject: issueSubject(42),
         runId: "2026-11-09T09-00-00-000Z-abcdef12",
         root,
         steps: [
@@ -3748,7 +3768,7 @@ describe("the CLI's run", () => {
       // removes.
       const named = /the whole output is at (.+?)(?: — |$)/m.exec(record)?.[1];
       expect(named).toBeTruthy();
-      expect(named?.startsWith(recordDirectory(fixture.repo, 42))).toBe(true);
+      expect(named?.startsWith(recordDirectory(fixture.repo, issueSubject(42)))).toBe(true);
       expect(existsSync(named ?? "")).toBe(true);
       const whole = await readFile(named ?? "", "utf8");
       expect(whole).toContain("line 1\n");

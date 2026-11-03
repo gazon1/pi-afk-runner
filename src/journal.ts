@@ -67,6 +67,19 @@ export function pullRequestSubject(number: number): JournalSubject {
 }
 
 /**
+ * The heading a record of a run about this subject carries.
+ *
+ * The subject says what the run was about, and the heading reads both the
+ * word and the number from it — so a record's heading cannot name a
+ * different run than the line under it does.
+ */
+export function recordHeading(subject: JournalSubject): string {
+  return subject.kind === SUBJECT_WORDS.issue
+    ? `# Run ${SUBJECT_WORDS.issue}-${subject.number}`
+    : `# Run ${SUBJECT_WORDS.pullRequest} ${subject.number}`;
+}
+
+/**
  * The directory the merge pipeline's own files live in.
  *
  * The per-pull-request directories are in it, and the sweep's journal is the
