@@ -130,7 +130,7 @@ export async function createMastraSession(options: {
   // The memory belongs to the session, not to the agent: a session that moves
   // onto another model builds a new agent and keeps this one, so the
   // conversation the session has is not lost by the move.
-  const memory = new Memory({ storage: new InMemoryStore() });
+  const memory = new Memory({ storage: new InMemoryStore(), options: { lastMessages: 40 } });
   const build = (on: MastraModel): Agent =>
     createMastraAgent({
       cwd,

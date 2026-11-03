@@ -10,6 +10,7 @@ import { Agent } from "@mastra/core/agent";
 import { InMemoryStore } from "@mastra/core/storage";
 import { LocalFilesystem, LocalSandbox, Workspace } from "@mastra/core/workspace";
 import { Memory } from "@mastra/memory";
+import { TokenLimiter, ToolCallFilter } from "@mastra/core/processors";
 
 import type { AnyToolSpec } from "../tools.js";
 import { guardWorkspace } from "./guard.js";
@@ -50,6 +51,8 @@ export interface MastraAgentOptions {
    * agent and keeps this one, so the conversation is not lost by the move.
    */
   readonly memory?: Memory;
+  /** The token budget the conversation is kept inside. Defaults to 50000. */
+  readonly tokenLimit?: number;
 }
 
 /**
@@ -79,6 +82,7 @@ export function createMastraAgent(options: MastraAgentOptions): Agent {
     tools: toMastraTools(options.tools),
     workspace,
     skills: [...options.skills],
+    inputProcessors: [new TokenLimiter(options.tokenLimit ?? 50000), new ToolCallFilter({ filterAfterToolSteps: 2 })],
     // The memory is what carries a turn into the next one: the work session is
     // one conversation, and each prompt sees what the prompts before it said.
     memory: options.memory ?? new Memory({ storage: new InMemoryStore() }),
