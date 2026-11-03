@@ -16,6 +16,7 @@
  */
 
 import { appendFileSync } from "node:fs";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import type { SessionFactory } from "./session.js";
@@ -180,6 +181,31 @@ export function journalFactory(factory: SessionFactory, path: string): SessionFa
       },
     });
   };
+}
+
+/**
+ * Opens the journal of a run: the file the run's lines go to.
+ *
+ * One place opens a journal. The directory is made, the file is written with
+ * its header line, and the session factory that writes the lines is returned —
+ * so a pipeline that writes a journal names what the run was about and stops
+ * there. The file's shape is this module's: the directory, the name and the
+ * header line are read from here, and the run's own id says which file it is.
+ *
+ * The file is there before the session opens, so a run that is killed leaves
+ * behind what it was doing when it died.
+ */
+export async function openJournal(
+  root: string,
+  runId: string,
+  subject: JournalSubject,
+  factory: SessionFactory,
+): Promise<SessionFactory> {
+  const directory = journalDirectory(root, subject);
+  const path = journalPath(directory, runId);
+  await mkdir(directory, { recursive: true });
+  await writeFile(path, `${journalHeader(runId, subject)}\n`, "utf8");
+  return journalFactory(factory, path);
 }
 
 /**

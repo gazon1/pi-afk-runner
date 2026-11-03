@@ -37,9 +37,9 @@ import { GATE_OUTPUT_LIMIT_BYTES, GATE_TIMEOUT_MS, gateFailure, gateInvocation }
 import {
   journalDirectory,
   journalFactory,
-  journalHeader,
   journalPath,
   journalWriter,
+  openJournal,
   pullRequestSubject,
   sweepJournalDirectory,
   sweepJournalHeader,
@@ -379,11 +379,17 @@ async function mergeOne(
    * that dies leaves behind what it was doing when it died.
    */
   const subject = pullRequestSubject(candidate.number);
+  /**
+   * Where the merge's files live: the journal sits in it, and so do the
+   * record and the gates' output.
+   */
   const directory = journalDirectory(options.checkout, subject);
-  const journalFile = journalPath(directory, runId);
-  await mkdir(directory, { recursive: true });
-  await writeFile(journalFile, `${journalHeader(runId, subject)}\n`, "utf8");
-  const factory = journalFactory(options.session, journalFile);
+  const factory = await openJournal(
+    options.checkout,
+    runId,
+    subject,
+    options.session,
+  );
 
   const steps: Step[] = [
     {
