@@ -52,8 +52,10 @@ import {
   pushWorkBranch,
   claimRef,
   claimRefName,
+  createClaimObject,
   issueWorktreePath,
   readClaimBase,
+  readClaimObject,
   removeWorktree,
   runCommand,
   runGit,
@@ -894,11 +896,14 @@ describe("the claim", () => {
       });
       expect(second.claimed).toBe(false);
 
-      // And it does not leave a claim behind: the label it added comes off.
-      expect(labels).toContain("removed");
-      expect(labels[labels.length - 1]).toBe("removed");
+      // And the loser does not take the label off: the label is the claim's,
+      // and the claim is the first runner's. An issue without the label is
+      // offered to the next runner while somebody is working on it — and the
+      // next runner cannot claim it, because the ref is taken.
+      expect(labels).not.toContain("removed");
 
-      // The claim records the base it was taken from.
+      // The winner's claim is untouched: the ref is still there, and it still
+      // records the base it was taken from.
       const base = await readClaimBase(
         (args, options) => runGit(args, options),
         fixture.repo,
@@ -911,6 +916,227 @@ describe("the claim", () => {
       expect(base).toBe(remoteBase);
       expect(claimRefName(42)).toBe("afk-claim-issue-42");
       expect(workBranch(42)).toBe("agent/issue-42");
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("a claim that failed for another reason takes the label off", async () => {
+    // The push failed, and it was not a race: the network is gone. No ref
+    // lands on the remote, so nobody holds the claim, and the label this
+    // runner added must come off — a claim nobody is working is an issue
+    // nobody can take.
+    const fixture = await createFixtureRepository();
+    try {
+      const labels: string[] = [];
+      const gh = async (args: readonly string[]): Promise<string> => {
+        if (args.includes("--add-label")) {
+          labels.push("added");
+        }
+        if (args.includes("--remove-label")) {
+          labels.push("removed");
+        }
+        return "";
+      };
+      const git = async (
+        args: readonly string[],
+        options: { readonly cwd: string; readonly input?: string },
+      ): Promise<string> => {
+        if (args[0] === "push") {
+          throw new CommandFailed(
+            128,
+            "git",
+            args,
+            "",
+            "fatal: unable to access the remote: Network is unreachable",
+          );
+        }
+        return runGit(args, options);
+      };
+
+      const outcome = await claimIssue({
+        issue: { number: 42, title: "an issue", updatedAt: "", labels: [] },
+        repo: "gazon1/sing",
+        remote: fixture.remote,
+        baseBranch: "main",
+        cwd: fixture.repo,
+        git,
+        gh,
+        nonce: "a-nonce",
+        now: new Date("2026-10-30T09:00:00Z"),
+      });
+
+      expect(outcome.claimed).toBe(false);
+      expect(labels).toContain("added");
+      expect(labels).toContain("removed");
+      expect(labels[labels.length - 1]).toBe("removed");
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("a claim that landed keeps the label, even when the push says it failed", async () => {
+    // The push landed and the remote hung up afterwards: git reports a
+    // failure, and the claim is on the remote all the same. The ref holds this
+    // runner's own claim object, so the claim is its own — and the label
+    // stays.
+    const fixture = await createFixtureRepository();
+    try {
+      const labels: string[] = [];
+      const gh = async (args: readonly string[]): Promise<string> => {
+        if (args.includes("--add-label")) {
+          labels.push("added");
+        }
+        if (args.includes("--remove-label")) {
+          labels.push("removed");
+        }
+        return "";
+      };
+      const git = async (
+        args: readonly string[],
+        options: { readonly cwd: string; readonly input?: string },
+      ): Promise<string> => {
+        const output = await runGit(args, options);
+        if (args[0] === "push") {
+          throw new CommandFailed(
+            128,
+            "git",
+            args,
+            output,
+            "fatal: the remote end hung up unexpectedly",
+          );
+        }
+        return output;
+      };
+
+      const outcome = await claimIssue({
+        issue: { number: 42, title: "an issue", updatedAt: "", labels: [] },
+        repo: "gazon1/sing",
+        remote: fixture.remote,
+        baseBranch: "main",
+        cwd: fixture.repo,
+        git,
+        gh,
+        nonce: "a-nonce",
+        now: new Date("2026-10-30T09:00:00Z"),
+      });
+
+      expect(outcome.claimed).toBe(false);
+      expect(labels).toContain("added");
+      expect(labels).not.toContain("removed");
+
+      // And the claim on the remote is this runner's own object: the same
+      // base, the same nonce and the same timestamp make the same claim.
+      const base = await gitOutput(["rev-parse", "main"], {
+        cwd: fixture.repo,
+        env: fixture.env,
+      });
+      const own = await createClaimObject(
+        (callArgs, callOptions) => runGit(callArgs, callOptions),
+        fixture.repo,
+        {
+          baseSha: base,
+          issueNumber: 42,
+          nonce: "a-nonce",
+          timestampSeconds: Math.floor(new Date("2026-10-30T09:00:00Z").getTime() / 1000),
+        },
+      );
+      const held = await readClaimObject(
+        (callArgs, callOptions) => runGit(callArgs, callOptions),
+        fixture.repo,
+        { remote: fixture.remote, issueNumber: 42 },
+      );
+      expect(held).toBe(own);
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("a reclaim that loses the race leaves the label alone", async () => {
+    // The reclaim takes the stale ref away and claims again — and another
+    // runner claims the issue in between. The reclaim's push is rejected, and
+    // the label is the claim's: the runner that won the race holds it, and
+    // taking it off would offer their issue to the next runner while they are
+    // working on it.
+    const fixture = await createFixtureRepository();
+    try {
+      const labels: string[] = [];
+      const gh = async (args: readonly string[]): Promise<string> => {
+        if (args.includes("--add-label")) {
+          labels.push("added");
+        }
+        if (args.includes("--remove-label")) {
+          labels.push("removed");
+        }
+        return "";
+      };
+
+      // A claim to take over: a dead run's claim, on the remote.
+      const first = await claimIssue({
+        issue: { number: 42, title: "an issue", updatedAt: "", labels: [] },
+        repo: "gazon1/sing",
+        remote: fixture.remote,
+        baseBranch: "main",
+        cwd: fixture.repo,
+        git: (args, options) => runGit(args, options),
+        gh,
+        nonce: "the-dead-run",
+        now: new Date("2026-10-30T09:00:00Z"),
+      });
+      expect(first.claimed).toBe(true);
+
+      let winner = "";
+      const git = async (
+        args: readonly string[],
+        options: { readonly cwd: string; readonly input?: string },
+      ): Promise<string> => {
+        const output = await runGit(args, options);
+        // The reclaim's ref is gone — and another runner claims the issue
+        // before the reclaim's own push reaches the remote.
+        if (args[0] === "push" && args.includes("--delete") && args.includes(claimRefName(42))) {
+          const base = await gitOutput(["rev-parse", "main"], {
+            cwd: fixture.repo,
+            env: fixture.env,
+          });
+          winner = await createClaimObject((callArgs, callOptions) => runGit(callArgs, callOptions), fixture.repo, {
+            baseSha: base,
+            issueNumber: 42,
+            nonce: "the-winner",
+            timestampSeconds: Math.floor(new Date("2026-10-30T09:00:05Z").getTime() / 1000),
+          });
+          await runGit(
+            ["push", "--no-verify", fixture.remote, `${winner}:${claimRef(42)}`],
+            { cwd: fixture.repo },
+          );
+        }
+        return output;
+      };
+
+      const outcome = await reclaimClaim({
+        issue: { number: 42, title: "an issue", updatedAt: "", labels: [] },
+        repo: "gazon1/sing",
+        remote: fixture.remote,
+        baseBranch: "main",
+        cwd: fixture.repo,
+        git,
+        gh,
+        nonce: "the-reclaim",
+        now: new Date("2026-10-30T09:00:10Z"),
+      });
+
+      expect(outcome.claimed).toBe(false);
+
+      // The label stayed on: the winner's claim is on the issue.
+      expect(labels).toContain("added");
+      expect(labels).not.toContain("removed");
+
+      // And the claim on the remote is the winner's, not the reclaim's.
+      const held = await readClaimObject(
+        (callArgs, callOptions) => runGit(callArgs, callOptions),
+        fixture.repo,
+        { remote: fixture.remote, issueNumber: 42 },
+      );
+      expect(held).toBe(winner);
     } finally {
       await fixture.dispose();
     }
