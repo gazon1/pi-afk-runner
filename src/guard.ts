@@ -25,21 +25,34 @@ const CHECK_REASON =
 export type PolicyRule = "allow" | "deny" | { readonly action: "deny"; readonly reason: string };
 
 /**
+ * A way a command runs a test suite.
+ *
+ * A program that is a suite on its own (`pytest`), a program that is a suite
+ * when it carries an argument (`npm test`), and a module a Python runner runs
+ * (`python -m unittest`) are all one entry in the policy's list.
+ */
+export type SuiteEntry =
+  | { readonly kind: "program"; readonly program: string; readonly argument?: string }
+  | { readonly kind: "module"; readonly module: string };
+
+/**
  * The programs that run a test suite, and the reason they are refused.
  *
  * They are refused by the **program** a command starts, not by the words the
  * command carries: a search for `unittest` is a search, and a suite is a
  * gate this run does not run.
+ *
+ * The list of them is the policy's, and it is the only place they are
+ * written: a runner is one more entry, and the rule that reads the policy
+ * knows no runner by name.
  */
 export interface ProgramPolicy {
   /** Why a test suite is refused. */
   readonly reason: string;
-  /** The programs that are a test suite on their own. */
-  readonly runners: readonly string[];
+  /** The ways a command runs a test suite. */
+  readonly suites: readonly SuiteEntry[];
   /** The Python that runs a module. */
   readonly python: RegExp;
-  /** The modules that are a test suite. */
-  readonly modules: readonly string[];
 }
 
 /**
@@ -104,6 +117,12 @@ export interface GuardPolicy {
  * would refuse the searches that read how the target gates itself. The
  * program is found behind the wrappers — behind a `cd`, behind a `timeout`,
  * behind a shell's `-c` — because that is where the agent puts it.
+ *
+ * The list of the programs that are a suite is the policy's, and it holds
+ * every runner: `pytest`, `vitest`, `jest`, `rspec`, `npm test`, `gradle
+ * test`, `mvn test`, `go test` and `cargo test` among them. The list grows
+ * without the rule changing — a runner is one more entry — and the rule
+ * knows no runner by name.
  *
  * And a command may not ask to run for longer than the ceiling, however it
  * asks: through the tool's own timeout or through the shell's `timeout`.
@@ -170,12 +189,23 @@ export const GUARD_POLICY: GuardPolicy = {
   },
   program: {
     reason: CHECK_REASON,
-    /** The programs that are a test suite on their own. */
-    runners: ["pytest", "py.test"],
+    /** The ways a command runs a test suite. */
+    suites: [
+      { kind: "program", program: "pytest" },
+      { kind: "program", program: "py.test" },
+      { kind: "program", program: "vitest" },
+      { kind: "program", program: "jest" },
+      { kind: "program", program: "rspec" },
+      { kind: "program", program: "npm", argument: "test" },
+      { kind: "program", program: "gradle", argument: "test" },
+      { kind: "program", program: "mvn", argument: "test" },
+      { kind: "program", program: "go", argument: "test" },
+      { kind: "program", program: "cargo", argument: "test" },
+      { kind: "module", module: "unittest" },
+      { kind: "module", module: "pytest" },
+    ],
     /** The Python that runs a module. */
     python: /^python\d*(\.\d+)?$/,
-    /** The modules that are a test suite. */
-    modules: ["unittest", "pytest"],
   },
   duration: {
     reason:
@@ -251,9 +281,10 @@ export function isProtectedPath(path: string): boolean {
  *
  * They are not the program: `cd /work && pytest` runs pytest, and
  * `timeout 3000 python3 -m unittest` runs unittest. What is skipped is the
- * wrapper, and what is read is the program behind it.
+ * wrapper, and what is read is the program behind it. `npx` is one of them
+ * too — `npx vitest run` runs vitest.
  */
-const WRAPPERS = new Set(["cd", "env", "exec", "nohup", "sudo", "time", "timeout"]);
+const WRAPPERS = new Set(["cd", "env", "exec", "nohup", "npx", "sudo", "time", "timeout"]);
 
 /** The shells whose `-c` argument carries a command of its own. */
 const SHELLS = new Set(["sh", "bash", "zsh", "ksh", "dash"]);
@@ -473,30 +504,48 @@ function runsOf(command: string): CommandRun[] {
 }
 
 /**
+ * The module a Python command runs — `python3 -m unittest` runs `unittest`.
+ */
+function moduleOf(run: CommandRun, policy: ProgramPolicy): string | undefined {
+  if (!policy.python.test(run.program)) {
+    return undefined;
+  }
+  const flag = run.words.indexOf("-m");
+  return flag === -1 ? undefined : run.words[flag + 1];
+}
+
+/**
+ * Whether one program of a command is a suite, by the policy's list.
+ *
+ * A program that is a suite on its own is a suite; a program that is a suite
+ * when it carries an argument is one when the argument is among its words.
+ */
+function isSuite(run: CommandRun, entry: SuiteEntry, policy: ProgramPolicy): boolean {
+  if (entry.kind === "module") {
+    return moduleOf(run, policy) === entry.module;
+  }
+  if (entry.program !== run.program) {
+    return false;
+  }
+  return entry.argument === undefined || run.words.includes(entry.argument);
+}
+
+/**
  * Whether a command runs a test suite.
  *
  * A run gates nothing, and a suite is a gate: it spends the session's minutes
  * on a tree nobody asked this run to judge. The suite is found by the
- * **program** it starts — `pytest`, and `python -m unittest` — and not by the
- * word it carries, so the searches that read how the target gates itself are
- * still allowed.
+ * **program** it starts, and the list of the programs that are a suite is the
+ * policy's — so the rule names no runner of its own, and a new runner is one
+ * more entry in that list. The suite is not found by the word the command
+ * carries, so the searches that read how the target gates itself are still
+ * allowed.
  */
 export function runsATestSuite(command: string): boolean {
   const policy = GUARD_POLICY.program;
-  for (const run of runsOf(command)) {
-    if (policy.runners.includes(run.program)) {
-      return true;
-    }
-    if (!policy.python.test(run.program)) {
-      continue;
-    }
-    const flag = run.words.indexOf("-m");
-    const module = flag === -1 ? undefined : run.words[flag + 1];
-    if (module !== undefined && policy.modules.includes(module)) {
-      return true;
-    }
-  }
-  return false;
+  return runsOf(command).some((run) =>
+    policy.suites.some((entry) => isSuite(run, entry, policy)),
+  );
 }
 
 /**

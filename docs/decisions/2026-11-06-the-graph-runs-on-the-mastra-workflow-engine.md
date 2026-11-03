@@ -60,12 +60,13 @@ one idea per file:
 
 `src/workflow/index.ts` is the module's face, and the runner imports that.
 
-**The work session is a composition of sub-workflows.** The intake, the two decisions and
-what each decision leads to are workflows of their own: `work-session-intake`,
-`work-session-close-skip`, `work-session-split`, `work-session-work` and
-`work-session-scope`. The branch is what puts them together — the triage's answer picks
-the closing workflow or the working one, the scope's answer picks the splitting workflow
-or the work turns.
+**The work session is a composition of sub-workflows.** The two decisions and what each
+decision leads to are workflows of their own: `work-session-close-skip`,
+`work-session-split`, `work-session-work` and `work-session-scope`. The branch is what
+puts them together — the triage's answer picks the closing workflow or the working one,
+the scope's answer picks the splitting workflow or the work turns. The intake that used
+to be a sub-workflow of its own is gone: the issue's data travels with the turn that
+reads it — **replaced** by `2026-11-08-the-issue-travels-with-the-turn.md`.
 
 **The seam does not change.** `WORKFLOW_STATES`, `WORKFLOW_ACTIONS`, `WorkflowState`,
 `StateOutcome`, `TurnRunner`, `StatesResult`, `runStates`, `runWorkSession`,

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import type { IssueDetail } from "../src/gh.js";
 import {
   cutOffMessage,
   PROMPT_FILES,
@@ -38,6 +39,19 @@ function recordingSession(turns: string[]): AgentSession {
     },
     async abort() {},
     dispose() {},
+  };
+}
+
+/** The issue the session works on. */
+function anIssue(overrides: Partial<IssueDetail> = {}): IssueDetail {
+  return {
+    title: "the issue",
+    body: "the issue's body",
+    comments: [],
+    labels: ["ready-for-agent"],
+    updatedAt: "2026-11-01T00:00:00Z",
+    state: "OPEN",
+    ...overrides,
   };
 }
 
@@ -239,17 +253,13 @@ describe("the session's workflow", () => {
       session: recordingSession(turns),
       prompts,
       states: WORKFLOW_STATES.map((state) => ({ name: state.name, phase: state.phase })),
-      issueBody: "the issue",
       deadlineMs: 60_000,
     });
 
-    // The data goes first, in a turn of its own, and is not counted; the
-    // prompts run after it, one turn each.
+    // One turn per prompt, and nothing else: the issue's data is not a turn.
     expect(result.completed).toBe(prompts.length);
     expect(result.total).toBe(prompts.length);
-    expect(turns).toHaveLength(prompts.length + 1);
-    expect(turns[0]).toContain('trust="untrusted"');
-    expect(turns.slice(1)).toEqual(prompts);
+    expect(turns).toEqual(prompts);
   });
 
   it("refuses two states with one name", async () => {
@@ -327,7 +337,7 @@ describe("the optional related-issues turn", () => {
   it("is absent by default", () => {
     const nodes = workSessionNodes({
       prompts: new Map(WORKFLOW_STATES.map((s) => [s.name, s.name])),
-      issueBody: "body",
+      issue: anIssue(),
     });
     expect(nodes.map((n) => n.name)).not.toContain("related");
   });
@@ -335,13 +345,55 @@ describe("the optional related-issues turn", () => {
   it("runs before triage when enabled", () => {
     const nodes = workSessionNodes({
       prompts: new Map(WORKFLOW_STATES.map((s) => [s.name, s.name])),
-      issueBody: "body",
+      issue: anIssue(),
       includeRelated: true,
       relatedPrompt: "related prompt",
     });
     const names = nodes.map((n) => n.name);
     expect(names).toContain("related");
     expect(names.indexOf("related")).toBeLessThan(names.indexOf("triage"));
+  });
+});
+
+describe("the issue's data", () => {
+  it("is not a turn of its own", () => {
+    // The issue's body and its comments are data: a turn that carries nothing
+    // but the issue is a turn the model spends on reading it.
+    const nodes = workSessionNodes({
+      prompts: new Map(WORKFLOW_STATES.map((s) => [s.name, s.name])),
+      issue: anIssue({ body: "the body", comments: ["the comment"] }),
+    });
+    const names = nodes.map((n) => n.name);
+    expect(names).not.toContain("issue-body");
+    expect(names).not.toContain("issue-comments");
+    expect(nodes.filter((n) => n.counts)).toHaveLength(WORKFLOW_STATES.length);
+  });
+
+  it("travels with the first turn, above its instruction", () => {
+    const nodes = workSessionNodes({
+      prompts: new Map(WORKFLOW_STATES.map((s) => [s.name, s.name])),
+      issue: anIssue({ body: "the body", comments: ["the comment"] }),
+    });
+    const first = nodes.find((n) => n.kind === "turn");
+    expect(first?.text).toContain('trust="untrusted"');
+    expect(first?.text).toContain("the body");
+    expect(first?.text).toContain("the comment");
+    // The instruction is the last thing the model reads.
+    expect(first?.text.indexOf("the body")).toBeLessThan(first?.text.indexOf("triage") ?? -1);
+  });
+
+  it("travels with the related turn when that turn runs", () => {
+    // The related turn reads the issue too, so the data rides with it.
+    const nodes = workSessionNodes({
+      prompts: new Map(WORKFLOW_STATES.map((s) => [s.name, s.name])),
+      issue: anIssue({ body: "the body" }),
+      includeRelated: true,
+      relatedPrompt: "related prompt",
+    });
+    const related = nodes.find((n) => n.name === "related");
+    const triage = nodes.find((n) => n.name === "triage");
+    expect(related?.text).toContain("the body");
+    expect(triage?.text).not.toContain("the body");
   });
 });
 
@@ -419,18 +471,11 @@ describe("the work session's branch", () => {
     expect(result.completed).toHaveLength(6);
   });
 
-  it("runs the intake before the triage", async () => {
+  it("runs the related turn before the triage", async () => {
     const ran: string[] = [];
     await runWorkSession({
       nodes: [
-        { name: "issue-body", phase: "Intake", text: "body", counts: false, kind: "turn" },
-        {
-          name: "issue-comments",
-          phase: "Intake",
-          text: "comments",
-          counts: false,
-          kind: "turn",
-        },
+        { name: "related", phase: "Related", text: "related", counts: true, kind: "turn" },
         ...workNodes(),
       ],
       run: async (state) => {
@@ -439,7 +484,7 @@ describe("the work session's branch", () => {
       },
     });
 
-    expect(ran.slice(0, 2)).toEqual(["issue-body", "issue-comments"]);
+    expect(ran.slice(0, 2)).toEqual(["related", "triage"]);
   });
 
   it("comes back as a cut-off run when the cut-off is deep in the nest", async () => {

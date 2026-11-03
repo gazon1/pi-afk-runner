@@ -118,6 +118,27 @@ export function fenceIssueComments(comments: readonly string[]): string {
 export { BRIEF_MARKER };
 
 /**
+ * The issue, as data, in one block.
+ *
+ * The body and the comments arrive together, fenced and labelled as untrusted.
+ * The rule that says they are data and not instructions is in the **system
+ * prompt** — the block goes above the turn's instruction, so the instruction
+ * the model reads last is the instruction.
+ *
+ * The brief is inside it: the comment that opens with `## Agent Brief`, or the
+ * body itself when the issue carries no such comment. The system prompt says
+ * which one this issue has.
+ */
+export function issueData(issue: IssueDetail): string {
+  return [
+    "## The issue, as data",
+    "",
+    fenceIssueBody(issue.body),
+    ...(issue.comments.length === 0 ? [] : ["", fenceIssueComments(issue.comments)]),
+  ].join("\n");
+}
+
+/**
  * The brief, fenced as untrusted data.
  *
  * A fix or review session is a **new** session: it has not seen the issue's
@@ -537,35 +558,15 @@ export function cutOffMessage(options: {
 /**
  * The states a session runs.
  *
- * The data goes first, in turns of its own, and is not counted: only the
- * prompts are the prompt array. The prompts run as the states they are
- * declared as — the single state a review or a merge resolution runs.
+ * The prompts run as the states they are declared as — the single state a
+ * review or a merge resolution runs. The issue's own data is not a state: it
+ * travels with the turn that reads it.
  */
 function sessionStates(options: {
   readonly prompts: readonly string[];
   readonly states: readonly StateName[];
-  readonly issueBody?: string;
-  readonly issueComments?: readonly string[];
 }): WorkflowState[] {
   const states: WorkflowState[] = [];
-  if (options.issueBody !== undefined) {
-    states.push({
-      name: "issue-body",
-      phase: "Intake",
-      text: fenceIssueBody(options.issueBody),
-      counts: false,
-      kind: "turn",
-    });
-  }
-  if (options.issueComments !== undefined && options.issueComments.length > 0) {
-    states.push({
-      name: "issue-comments",
-      phase: "Intake",
-      text: fenceIssueComments(options.issueComments),
-      counts: false,
-      kind: "turn",
-    });
-  }
   const names = options.states;
   if (names.length !== options.prompts.length) {
     throw new Error(
@@ -589,10 +590,8 @@ function sessionStates(options: {
 export interface WorkSessionGraphOptions {
   /** The prompt of each turn node, keyed by the node's name. */
   readonly prompts: ReadonlyMap<string, string>;
-  /** The issue's body, fenced as untrusted data. */
-  readonly issueBody?: string;
-  /** The issue's comments, fenced as untrusted data. */
-  readonly issueComments?: readonly string[];
+  /** The issue the session works on — its data travels with the first turn. */
+  readonly issue: IssueDetail;
   /** Whether the optional related-issues turn runs before triage. */
   readonly includeRelated?: boolean;
   /** The related-issues prompt, when the turn runs. */
@@ -605,9 +604,16 @@ export interface WorkSessionGraphOptions {
  * The script is the branch:
  *
  * ```
- * issue-body → issue-comments → triage ─┬─ work ─→ scope ─┬─ fits ─→ brief → implement → verify → next
- *                                       └─ skip ─→ close-skip          └─ split ─→ split
+ * related → triage ─┬─ work ─→ scope ─┬─ fits ─→ brief → implement → verify → next
+ *                    └─ skip ─→ close-skip          └─ split ─→ split
  * ```
+ *
+ * The issue's body and its comments are **data**, not turns: they go above the
+ * first turn's instruction, where the model reads them as what the issue says
+ * rather than as what it is told to do. A turn that carries nothing but the
+ * issue is a turn the model spends on reading the repository instead of on the
+ * work — and the issue it was reading is the first thing the memory drops
+ * when the conversation grows.
  *
  * The two decisions are the session's own turns, and the action nodes are the
  * runner's work — closing an issue, filing smaller ones — so the branch is the
@@ -615,26 +621,6 @@ export interface WorkSessionGraphOptions {
  */
 export function workSessionNodes(options: WorkSessionGraphOptions): WorkflowState[] {
   const nodes: WorkflowState[] = [];
-  const comments = options.issueComments ?? [];
-
-  if (options.issueBody !== undefined) {
-    nodes.push({
-      name: "issue-body",
-      phase: "Intake",
-      text: fenceIssueBody(options.issueBody),
-      counts: false,
-      kind: "turn",
-    });
-  }
-  if (comments.length > 0) {
-    nodes.push({
-      name: "issue-comments",
-      phase: "Intake",
-      text: fenceIssueComments(comments),
-      counts: false,
-      kind: "turn",
-    });
-  }
 
   if (options.includeRelated === true && options.relatedPrompt !== undefined) {
     nodes.push({
@@ -670,16 +656,28 @@ export function workSessionNodes(options: WorkSessionGraphOptions): WorkflowStat
     });
   }
 
+  // The issue's data goes above the first turn's instruction. It is the first
+  // turn that reads the issue, and the data is the oldest thing in the
+  // conversation: the memory drops the oldest messages first, so data that
+  // travels alone is data that is gone by the time the work starts.
+  const first = nodes.findIndex((node) => node.kind === "turn");
+  const firstNode = first === -1 ? undefined : nodes[first];
+  if (firstNode !== undefined) {
+    nodes[first] = {
+      ...firstNode,
+      text: [issueData(options.issue), "", firstNode.text].join("\n"),
+    };
+  }
+
   return nodes;
 }
 
 /**
  * Run the prompt array in one session.
  *
- * The body goes first, on its own, in a turn that carries nothing but data —
- * so that the instruction that follows it is the most recent thing the model
- * has read. Then the prompts, one turn each, each seeing the previous
- * turn's context.
+ * The prompts run one turn each, each seeing the previous turn's context. The
+ * issue's own data travels with the turn that reads it, above that turn's
+ * instruction.
  *
  * The turns are the session's **states**, and the workflow engine runs them:
  * it decides what runs next and in which phase, and the runner's own code
@@ -703,8 +701,6 @@ export async function runPromptArray(options: {
   readonly states?: readonly StateName[];
   /** The nodes to run, when the session has branches. */
   readonly nodes?: readonly WorkflowState[];
-  readonly issueBody?: string;
-  readonly issueComments?: readonly string[];
   readonly deadlineMs: number;
   readonly schedule?: Scheduler;
   /**
@@ -748,14 +744,10 @@ export async function runPromptArray(options: {
     sessionStates({
       prompts: options.prompts ?? [],
       states: options.states ?? [],
-      ...(options.issueBody === undefined ? {} : { issueBody: options.issueBody }),
-      ...(options.issueComments === undefined
-        ? {}
-        : { issueComments: options.issueComments }),
     });
   const branched = options.nodes !== undefined;
-  // The turns the run had to take. The intake turns and the actions are not
-  // counted, exactly as `completed` does not count them.
+  // The turns the run had to take. The actions are not counted, exactly as
+  // `completed` does not count them.
   const total = nodes.filter((node) => node.counts).length;
 
   // The deadline is a promise the run **races**, not a signal the run hopes
@@ -819,8 +811,8 @@ export async function runPromptArray(options: {
     if (failure !== null) {
       return { state: "error", error: failure };
     }
-    // The decision a turn made is the edge the graph takes next. The intake
-    // turns and the work turns return `ok`; only the first two decide.
+    // The decision a turn made is the edge the graph takes next. The work
+    // turns return `ok`; only the first two decide.
     return { state: "ok", result: options.after?.(state) ?? "ok" };
   };
 
@@ -1042,8 +1034,7 @@ export async function startAgent(options: {
     session,
     nodes: workSessionNodes({
       prompts,
-      issueBody: issue.body,
-      issueComments: issue.comments,
+      issue,
       includeRelated: options.batchRelated === true,
       ...(relatedPrompt === undefined ? {} : { relatedPrompt }),
     }),

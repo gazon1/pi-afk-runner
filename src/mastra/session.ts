@@ -132,6 +132,17 @@ export function mastraSessionFactory(options: {
 export type MastraModel = NonNullable<ConstructorParameters<typeof Agent>[0]["model"]>;
 
 /**
+ * How many messages the session keeps.
+ *
+ * The memory is what carries a turn into the next one, and it drops the
+ * **oldest** messages first: the issue's own data is the oldest thing in the
+ * conversation, so a short window throws away the contract the work is judged
+ * against. Forty messages is a handful of tool calls — a turn that reads the
+ * tree fills it in one step of the run.
+ */
+const LAST_MESSAGES = 400;
+
+/**
  * The session, on a model that is already resolved.
  *
  * The factory above resolves the model by its name; this one takes the model
@@ -160,7 +171,10 @@ export async function createMastraSession(options: {
   // The memory belongs to the session, not to the agent: a session that moves
   // onto another model builds a new agent and keeps this one, so the
   // conversation the session has is not lost by the move.
-  const memory = new Memory({ storage: new InMemoryStore(), options: { lastMessages: 40 } });
+  const memory = new Memory({
+    storage: new InMemoryStore(),
+    options: { lastMessages: LAST_MESSAGES },
+  });
   const build = (on: MastraModel): Agent =>
     createMastraAgent({
       cwd,

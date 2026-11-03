@@ -18,6 +18,7 @@ import {
   runPromptArray,
   splitIssue,
   startAgent,
+  workSessionNodes,
   type AgentSession,
   type SessionFactory,
 } from "../src/session.js";
@@ -36,7 +37,7 @@ import {
   runSummary,
 } from "../src/cli.js";
 import { budgetShares, defaultDeadlineMs } from "../src/budget.js";
-import { type StateName } from "../src/workflow/index.js";
+import { type StateName, WORKFLOW_STATES } from "../src/workflow/index.js";
 import { createLeftoverTool, LEFTOVER_TOOL_NAME, MAX_LEFTOVERS_PER_RUN } from "../src/leftovers.js";
 import { pullRequestArgs } from "../src/gh.js";
 import {
@@ -122,6 +123,7 @@ import {
   verdictFile,
   prepareWorktree,
   isStale,
+  journalFileName,
   observePullRequest,
   pullRequestsByBranch,
   selectIssue,
@@ -1104,8 +1106,9 @@ describe("the agent's session", () => {
     expect(fenced.startsWith("<issue-body")).toBe(true);
     expect(fenced.trimEnd().endsWith("</issue-body>")).toBe(true);
 
-    // And it arrives in a turn of its own, before the instructions: the
-    // instruction the model reads last is the instruction, not the data.
+    // And it arrives in the first turn, above the instruction: the instruction
+    // the model reads last is the instruction, and the issue is data, not a
+    // turn of its own.
     const turns: string[] = [];
     const session: AgentSession = {
       async prompt(text) {
@@ -1115,18 +1118,31 @@ describe("the agent's session", () => {
       dispose() {},
     };
 
+    const nodes = workSessionNodes({
+      prompts: new Map(WORKFLOW_STATES.map((state) => [state.name, `the ${state.name} prompt`])),
+      issue: {
+        title: "an issue",
+        body,
+        comments: [],
+        labels: [],
+        updatedAt: "",
+        state: "OPEN",
+      },
+    });
+
     await runPromptArray({
       session,
-      prompts: ["one", "two", "three"],
-      states: namedStates(3),
-      issueBody: body,
+      nodes,
       deadlineMs: 60_000,
     });
 
-    expect(turns).toHaveLength(4);
     expect(turns[0]).toContain('trust="untrusted"');
     expect(turns[0]).toContain(body);
-    expect(turns.slice(1)).toEqual(["one", "two", "three"]);
+    // The data is above the instruction, and the instruction is last.
+    expect(turns[0]?.indexOf(body)).toBeLessThan(turns[0]?.indexOf("the triage prompt") ?? -1);
+    expect(turns[0]?.trimEnd().endsWith("the triage prompt")).toBe(true);
+    // One turn per state: the issue is data, not a turn of its own.
+    expect(turns).toHaveLength(WORKFLOW_STATES.length);
   });
 
   it("test_the_untrusted_input_rule_is_in_the_system_prompt", () => {
@@ -1201,14 +1217,13 @@ describe("the agent's session", () => {
       session,
       prompts,
       states: namedStates(prompts.length),
-      issueBody: "the issue",
       deadlineMs: 60_000,
     });
 
     // One session, one pass over the array, one issue.
     expect(result.completed).toBe(PROMPT_FILES.length);
     expect(result.aborted).toBe(false);
-    expect(turns).toHaveLength(PROMPT_FILES.length + 1);
+    expect(turns).toHaveLength(PROMPT_FILES.length);
     expect(disposed).toBe(1);
   });
 
@@ -3074,6 +3089,39 @@ describe("the CLI's run", () => {
       expect(await readFile(journal, "utf8")).toContain("the agent is working");
       // The record is written beside the journal, at the end.
       expect(result.record.endsWith(".md")).toBe(true);
+      expect(result.record.replace(/\.md$/, ".log")).toBe(journal);
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("test_the_record_names_the_journal_beside_it", async () => {
+    // The record is the file a reader is sent to, so the record is where the
+    // pointer to the journal belongs. The name it carries is the file's real
+    // name: one place says it, and the record reads it from there.
+    const fixture = await fixtureWithSetupScript();
+    try {
+      const { gh } = stubGh([{ number: 42, title: "an issue" }]);
+      const options = runOptions(fixture, gh);
+      const result = await runOnce(options);
+
+      const record = await readFile(result.record, "utf8");
+      // The record carries the journal's name, and says what the file holds.
+      const journalLine = record
+        .split("\n")
+        .find((line) => line.startsWith("- journal: "));
+      expect(journalLine).toBeDefined();
+      expect(journalLine).toContain(journalFileName(options.runId));
+      expect(journalLine).toContain("lines");
+      // The name in the record is the name of the file that is really there.
+      const journal = join(
+        fixture.repo,
+        "build",
+        "diagnostics",
+        "issue-42",
+        journalFileName(options.runId),
+      );
+      expect(existsSync(journal)).toBe(true);
       expect(result.record.replace(/\.md$/, ".log")).toBe(journal);
     } finally {
       await fixture.dispose();
@@ -6697,9 +6745,10 @@ describe("the leftovers a run files", () => {
       deadlineMs: 60_000,
     });
 
-    // The tool is there, and the array ran all four turns.
+    // The tool is there, and the array ran every turn — and no turn ran just
+    // to carry the issue: the issue's data rides with the first one.
     expect(tools.map((tool) => tool.name)).toContain(LEFTOVER_TOOL_NAME);
-    expect(turns).toHaveLength(PROMPT_FILES.length + 1);
+    expect(turns).toHaveLength(PROMPT_FILES.length);
   });
 
   it("test_a_leftover_is_filed_as_an_issue_the_queue_can_take", async () => {
