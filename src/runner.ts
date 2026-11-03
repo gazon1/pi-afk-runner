@@ -26,9 +26,9 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { appendFileSync, readFileSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { claimIssue, reclaimClaim, releaseClaim } from "./claim.js";
 import { errorMessage } from "./cli.js";
@@ -1530,6 +1530,27 @@ export async function writeRunRecord(options: {
 }
 
 /**
+ * The journal of a run: the session's lines, written while the run works.
+ *
+ * The factory is wrapped, so every session the run opens — the work session,
+ * the review, the fixes — writes to the same file. The lines are appended as
+ * they come, and a line that cannot be written is dropped: a journal that
+ * cannot be written is not a reason to stop the run.
+ */
+export function journalFactory(factory: SessionFactory, path: string): SessionFactory {
+  return async (sessionOptions) => {
+    const write = (line: string): void => {
+      try {
+        appendFileSync(path, `${line}\n`, "utf8");
+      } catch {
+        // The journal is a witness, not a gate: the run goes on without it.
+      }
+    };
+    return factory({ ...sessionOptions, onEvent: write });
+  };
+}
+
+/**
  * Release everything the run took.
  *
  * The worktree goes first: it is the one that can fail, and a release that
@@ -2630,6 +2651,21 @@ async function runPlan(
   /** What the gates have spent of their share. */
   let gatesSpentMs = 0;
   /**
+   * The journal of the run: the session's own lines, written as they happen.
+   *
+   * The record is written when the run ends — and a run that is killed writes
+   * no record at all. The journal is the file beside it: it is there from the
+   * start of the run and grows while the work goes on, so a run that dies
+   * leaves behind what it was doing when it died.
+   */
+  const journalPath = join(
+    recordDirectory(options.checkout, issue.number),
+    `${runId}.log`,
+  );
+  await mkdir(dirname(journalPath), { recursive: true });
+  await writeFile(journalPath, `# run ${runId}, issue ${issue.number}\n`, "utf8");
+  const session = journalFactory(options.session, journalPath);
+  /**
    * The gates' whole output goes to a file beside the record.
    *
    * The record quotes the tail of what a gate printed and names the file; the
@@ -2696,7 +2732,7 @@ async function runPlan(
     }
     await gateFixWorktree({
       cwd: state.worktreePath,
-      factory: options.session,
+      factory: session,
       prompt: gateFixPrompt(failure),
       deadlineMs: budget,
       ...(options.stopped === undefined ? {} : { stopped: options.stopped }),
@@ -2774,7 +2810,7 @@ async function runPlan(
         // session's events carry the numbers, and the factory reports them.
         let usage: RunUsage | undefined;
         const result = await startAgent({
-          factory: options.session,
+          factory: session,
           cwd: state.worktreePath,
           repo: options.repo,
           issueNumber: issue.number,
@@ -2982,7 +3018,7 @@ async function runPlan(
               repo: options.repo,
               pullRequest: state.pullRequest,
               cwd: state.worktreePath,
-              factory: options.session,
+              factory: session,
               gh: options.gh,
               run: options.run,
               git: options.git,
@@ -3010,7 +3046,7 @@ async function runPlan(
             // the code, not the work session's whole conversation.
             await fixWorktree({
               cwd: state.worktreePath,
-              factory: options.session,
+              factory: session,
               findings: state.findings,
               deadlineMs: budget,
               ...(options.stopped === undefined ? {} : { stopped: options.stopped }),

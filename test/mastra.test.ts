@@ -217,6 +217,51 @@ describe("the guard on the Mastra engine", () => {
     expect(denyReason({ command: "rg --files" })).toBeNull();
   });
 
+  it("refuses a test suite and lets a search for one through", () => {
+    // A suite is a check, and this run does not gate the tree. The suite is
+    // refused by the program it starts — behind a `cd`, behind a `timeout`,
+    // however the agent spells it.
+    for (const command of [
+      "pytest -q",
+      "cd /work && pytest tests/",
+      "python3 -m unittest discover -s scripts/tests",
+      "cd /work && timeout 3000 python3 -m unittest discover -s scripts/tests 2>&1",
+      "HOME=/home/max python3 -m pytest",
+    ]) {
+      expect(denyReason({ command }) ?? "").toContain("Refused");
+    }
+    // The word alone is not the suite: reading how the target gates itself is
+    // the work, and the work is allowed.
+    expect(denyReason({ command: 'grep -rn "unittest discover" .github/workflows/ci.yml' })).toBeNull();
+  });
+
+  it("refuses the suite behind a shell", () => {
+    // The program a command starts may sit inside a shell's own command: the
+    // agent puts it there, and the guard reads it there.
+    for (const command of [
+      'bash -c "python3 -m unittest discover -s scripts/tests"',
+      "sh -c 'cd /work && python3 -m pytest'",
+      'bash -lc "pytest -q"',
+    ]) {
+      expect(denyReason({ command }) ?? "").toContain("Refused");
+    }
+    // A shell that runs something else is not a suite.
+    expect(denyReason({ command: 'bash -c "grep -rn unittest .github/workflows/ci.yml"' })).toBeNull();
+  });
+
+  it("refuses a command that asks to run for too long", () => {
+    // A run that waits is a run that does nothing else, and the tool's own
+    // timeout is what the sandbox enforces: a call that asks for an hour gets
+    // an hour, whatever the default is.
+    expect(denyReason({ command: "npm run build", timeout: 3000 }) ?? "").toContain("Refused");
+    // The shell's own `timeout` is the other way to ask for the same thing.
+    expect(denyReason({ command: "timeout 3000 npm run build" }) ?? "").toContain("Refused");
+    expect(denyReason({ command: "timeout 50m npm run build" }) ?? "").toContain("Refused");
+    // A command that asks for less than the ceiling goes through.
+    expect(denyReason({ command: "npm run build", timeout: 600 })).toBeNull();
+    expect(denyReason({ command: "timeout 60 npm run build" })).toBeNull();
+  });
+
   it("lets every other command through", () => {
     expect(denyReason({ command: "npm run check" })).toBeNull();
     expect(denyReason({ path: "src/cli.ts" })).toBeNull();
@@ -355,6 +400,35 @@ describe("the session of the Mastra engine", () => {
       await session.prompt("file the leftover");
       expect(seen).toEqual([{ value: "a leftover" }]);
       expect(session.messages?.at(-1)?.stopReason).toBe("stop");
+    } finally {
+      session.dispose();
+    }
+  });
+
+  it("writes the tool call while the call is still running", async () => {
+    // A tool that runs for minutes must not look like a run that stopped: the
+    // call is written when the model makes it, not when the turn ends.
+    const cwd = await mkdtemp(join(tmpdir(), "afk-worktree-"));
+    const lines: string[] = [];
+    let duringCall: string[] = [];
+    const tool = specOf({
+      execute: async () => {
+        duringCall = [...lines];
+        return { content: [{ type: "text" as const, text: "done" }], details: {} };
+      },
+    });
+    const session = await createMastraSession({
+      model: modelOf([toolTurn("agent_test", { value: "a leftover" }), textTurn("done")]),
+      cwd,
+      systemPromptSections: {},
+      tools: [tool],
+      onEvent: (line) => lines.push(line),
+    });
+    try {
+      await session.prompt("file the leftover");
+      expect(duringCall.some((line) => line.includes("agent_test"))).toBe(true);
+      // And it is written once — the turn that ends does not repeat it.
+      expect(lines.filter((line) => line.includes("agent_test")).length).toBe(1);
     } finally {
       session.dispose();
     }

@@ -52,6 +52,16 @@ fallback any more: a run that nobody told to gate runs no gate.
 implement, verify and next turns say the same thing in words: do not build, do not compile, do
 not run the checks; judge the change by reading it.
 
+**A test suite is a check, and it is refused by the program it starts.** `pytest` and
+`python -m unittest` are refused however the command spells them — behind a `cd`, behind a
+`timeout`, behind a shell's own `-c`. The refusal is by the **program** and not by the word the
+command carries: a `grep -rn unittest` reads how the target gates itself, and that is the work.
+
+**A command does not get to ask for an hour.** There are two ways to ask for time — the tool's own
+`timeout` and the shell's `timeout` — and both are bounded: the guard refuses a call that asks for
+more than ten minutes. A run that waits is a run that does nothing else, and the session's minutes
+are the run's whole budget.
+
 **The gates' share of the budget follows the gates a run actually runs.** A run with no gate
 reserves no gate budget, and its ceiling is the session's share and the review's share added
 up. A run told to run three gates reserves an hour each, as before.
@@ -92,11 +102,14 @@ an hour proving that it did not need to is slow.
   runs none of them, and the merge door runs the full one.
 - The gate's own budget share follows the gates a run runs: zero for a run with no gate, an hour
   each for a run with three.
+- A command that asks to run for longer than ten minutes is refused, whichever way it asks for the
+  time.
 
 ## Links
 
 - `src/gates.ts` — `NO_GATES`, the repository's own file, and the run of the gates.
-- `src/guard.ts` — the bash policy that refuses a build.
+- `src/guard.ts` — the bash policy that refuses a build, the programs that are a test suite, and the
+  ceiling on how long a command may run.
 - `src/budget.ts` — the ceiling that follows the gate count.
 - `src/prompts/02-implement.md`, `src/prompts/03-verify.md`, `src/prompts/04-next.md` — the
   turns that do not build.

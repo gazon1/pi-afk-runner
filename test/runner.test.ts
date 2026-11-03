@@ -3045,6 +3045,41 @@ describe("the CLI's run", () => {
     };
   }
 
+  it("test_the_journal_is_written_while_the_run_works", async () => {
+    // The record of a run is written when the run ends — and a run that is
+    // killed writes nothing. The journal is the file beside it: it is there
+    // before the session works, and it grows while the work goes on.
+    const fixture = await fixtureWithSetupScript();
+    try {
+      const { gh } = stubGh([{ number: 42, title: "an issue" }]);
+      const options = runOptions(fixture, gh);
+      const journal = join(
+        fixture.repo,
+        "build",
+        "diagnostics",
+        "issue-42",
+        "2026-10-30T09-00-00-000Z-abcdef12.log",
+      );
+      let thereBefore = false;
+      const result = await runOnce({
+        ...options,
+        session: async (sessionOptions) => {
+          thereBefore = existsSync(journal);
+          sessionOptions.onEvent?.("the agent is working");
+          return options.session(sessionOptions);
+        },
+      });
+
+      expect(thereBefore).toBe(true);
+      expect(await readFile(journal, "utf8")).toContain("the agent is working");
+      // The record is written beside the journal, at the end.
+      expect(result.record.endsWith(".md")).toBe(true);
+      expect(result.record.replace(/\.md$/, ".log")).toBe(journal);
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
   it("test_the_runner_commits_what_the_agent_left", async () => {
     // The prompt asks the agent to commit, and an agent does not always do it.
     // What it left in the worktree is still the work, and the worktree is about

@@ -453,6 +453,15 @@ export type SessionFactory = (options: {
    * answers with what the events said.
    */
   readonly onUsage?: (usage: RunUsage) => void;
+  /**
+   * Told what the agent is doing, as it does it.
+   *
+   * The lines the session writes while it works: the tool calls it makes, and
+   * what it says. The runner hands them to the **journal** — the file beside
+   * the run's record — so a run that is killed leaves behind what it was
+   * doing when it died. The record itself is written when the run ends.
+   */
+  readonly onEvent?: (line: string) => void;
 }) => Promise<AgentSession>;
 
 /** Schedules an action, and returns the way to cancel it. */
