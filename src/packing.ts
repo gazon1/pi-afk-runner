@@ -235,6 +235,14 @@ export function createPackTool(options: {
   readonly pack?: Packer;
   /** The most a pack may cost the model. */
   readonly maxTokens?: number;
+  /**
+   * Told what a pack holds, when the pack is made.
+   *
+   * The tool's own `details` are what a run can say about a pack: the path it
+   * packed, how many files it holds and what it costs the model. A run that
+   * never hears them has no way to name the pack in its record.
+   */
+  readonly onPack?: (details: PackDetails) => void;
 }): AnyToolSpec {
   const pack = options.pack ?? packWithRepomix;
   const maxTokens = options.maxTokens ?? MAX_PACK_TOKENS;
@@ -338,6 +346,15 @@ export function createPackTool(options: {
         outcome.suspicious.length === 0
           ? ""
           : ` ${outcome.suspicious.length} file(s) were left out as suspicious.`;
+      const details: PackDetails = {
+        packed: true,
+        files: outcome.paths.length,
+        tokens: outcome.tokens,
+        path,
+        reason: "",
+      };
+      // The run is told what the pack holds, so that its record can name it.
+      options.onPack?.(details);
       return {
         content: [
           {
@@ -347,13 +364,7 @@ export function createPackTool(options: {
               outcome.text,
           },
         ],
-        details: {
-          packed: true,
-          files: outcome.paths.length,
-          tokens: outcome.tokens,
-          path,
-          reason: "",
-        },
+        details,
       };
     },
   });

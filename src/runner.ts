@@ -63,7 +63,7 @@ import {
   createVerdictTool,
   type ReviewVerdict,
 } from "./decisions/index.js";
-import { createPackTool } from "./packing.js";
+import { createPackTool, type PackDetails } from "./packing.js";
 import {
   CommandFailed,
   addDetachedWorktree,
@@ -782,6 +782,14 @@ export async function reviewPullRequest(options: {
   /** The git the tree the reviewer judged is restored with. */
   readonly git: GitRunner;
   readonly deadlineMs: number;
+  /**
+   * Told what the reviewer packed, when it packed.
+   *
+   * The review packs the repository as the work session does, and the run's
+   * record names both: a pack nobody can account for is a pack nobody can
+   * judge.
+   */
+  readonly onPack?: (details: PackDetails) => void;
   /** Whether somebody has stopped the run. */
   readonly stopped?: () => boolean;
   readonly schedule?: Scheduler;
@@ -821,7 +829,13 @@ export async function reviewPullRequest(options: {
     systemPromptSections: {
       [UNTRUSTED_INPUT_SECTION]: UNTRUSTED_INPUT_RULE,
     },
-    tools: [createVerdictTool(holder), createPackTool({ cwd: options.cwd })],
+    tools: [
+      createVerdictTool(holder),
+      createPackTool({
+        cwd: options.cwd,
+        ...(options.onPack === undefined ? {} : { onPack: options.onPack }),
+      }),
+    ],
     // The review ends on the verdict tool. A reviewer that keeps reading is
     // told, between its steps, that the turn ends there.
     finalTool: VERDICT_TOOL_NAME,
@@ -1314,6 +1328,24 @@ export function planFor(observation: IssueObservation): Plan {
   };
 }
 
+/**
+ * What a run can say about a pack it made.
+ *
+ * The pack's own details are the pack's: the path it packed, the files it
+ * holds and what it costs the model. The record adds the one thing the tool
+ * does not know — which session made the pack.
+ */
+export interface PackReport {
+  /** The session that packed: the work session's, or the review's. */
+  readonly session: "work" | "review";
+  /** The path that was packed. */
+  readonly path: string;
+  /** How many files the pack holds. */
+  readonly files: number;
+  /** What the pack costs the model, in tokens. */
+  readonly tokens: number;
+}
+
 /** What one step of a run did. */
 export interface StepRecord {
   readonly step: string;
@@ -1468,6 +1500,8 @@ function renderRecord(options: {
   readonly subject?: JournalSubject;
   /** What the model pool did during the run. */
   readonly pool?: readonly string[];
+  /** The packs the run made, when it made any. */
+  readonly packs?: readonly PackReport[];
   /** Whether this run wrote a journal beside the record. */
   readonly hasJournal?: boolean;
 }): string {
@@ -1512,6 +1546,19 @@ function renderRecord(options: {
     }
   }
   lines.push("");
+  // The packs the run made. The pack is a document the agent read, and it cost
+  // the context tokens: a record that says a run worked the issue, and not
+  // what it read to do it, cannot answer what the run cost.
+  if (options.packs !== undefined && options.packs.length > 0) {
+    lines.push("## The pack", "");
+    for (const pack of options.packs) {
+      const session = pack.session === "work" ? "the work session" : "the review";
+      lines.push(
+        `- ${session} packed \`${pack.path}\` — ${pack.files} file(s), ${pack.tokens} tokens`,
+      );
+    }
+    lines.push("");
+  }
   if (options.pool !== undefined && options.pool.length > 0) {
     lines.push("## The model pool", "");
     for (const line of options.pool) {
@@ -1541,6 +1588,8 @@ export async function writeRunRecord(options: {
   readonly subject?: JournalSubject;
   /** What the model pool did during the run. */
   readonly pool?: readonly string[];
+  /** The packs the run made, when it made any. */
+  readonly packs?: readonly PackReport[];
   /** Whether this run wrote a journal beside the record. */
   readonly hasJournal?: boolean;
 }): Promise<string> {
@@ -1557,6 +1606,7 @@ export async function writeRunRecord(options: {
       ...(options.heading === undefined ? {} : { heading: options.heading }),
       ...(options.subject === undefined ? {} : { subject: options.subject }),
       ...(options.pool === undefined ? {} : { pool: options.pool }),
+      ...(options.packs === undefined ? {} : { packs: options.packs }),
       ...(options.hasJournal === undefined ? {} : { hasJournal: options.hasJournal }),
     }),
     "utf8",
@@ -1622,6 +1672,13 @@ export async function runSteps(options: {
   readonly subject?: JournalSubject;
   /** What the model pool did during the run. */
   readonly pool?: readonly string[];
+  /**
+   * The packs the run made.
+   *
+   * The steps fill it as they run: the work session's pack and the review's
+   * land here, and the record is written with what they left.
+   */
+  readonly packs?: PackReport[];
   /** Whether this run wrote a journal beside the record. */
   readonly hasJournal?: boolean;
   /** What a failure releases: the claim, the worktree, the ref. */
@@ -1715,6 +1772,7 @@ export async function runSteps(options: {
       ...(options.heading === undefined ? {} : { heading: options.heading }),
       ...(options.subject === undefined ? {} : { subject: options.subject }),
       ...(options.pool === undefined ? {} : { pool: options.pool }),
+      ...(options.packs === undefined ? {} : { packs: options.packs }),
       ...(options.hasJournal === undefined ? {} : { hasJournal: options.hasJournal }),
     });
   } catch (recordError) {
@@ -2768,6 +2826,9 @@ async function runPlan(
   };
 
   const steps: Step[] = [];
+  // The packs the run made: the work session's and the review's. The record
+  // is written with them, so the run's own account says what it read.
+  const packs: PackReport[] = [];
 
   if (works) {
     steps.push({
@@ -2858,6 +2919,14 @@ async function runPlan(
           ...(options.stopped === undefined ? {} : { stopped: options.stopped }),
           onUsage: (reported) => {
             usage = addUsage(usage, reported);
+          },
+          onPack: (details) => {
+            packs.push({
+              session: "work",
+              path: details.path,
+              files: details.files,
+              tokens: details.tokens,
+            });
           },
         });
         const workElapsedMs = workSessionStartedAt === undefined ? 0 : Date.now() - workSessionStartedAt;
@@ -3089,6 +3158,14 @@ async function runPlan(
               deadlineMs: budget,
               ...(options.stopped === undefined ? {} : { stopped: options.stopped }),
               issue: detail,
+              onPack: (details) => {
+                packs.push({
+                  session: "review",
+                  path: details.path,
+                  files: details.files,
+                  tokens: details.tokens,
+                });
+              },
             });
             state.verdict = reviewed.verdict;
             // And what the review cost, on top of the work's own.
@@ -3285,6 +3362,8 @@ async function runPlan(
     runId,
     root: options.checkout,
     steps,
+    // The packs the run made, for the record to name.
+    packs,
     // The run wrote a journal beside the record, so the record names it: the
     // record is the file a reader is sent to.
     hasJournal: true,

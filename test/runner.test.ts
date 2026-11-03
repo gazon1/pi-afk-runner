@@ -127,6 +127,7 @@ import {
   selectIssue,
   unworkableReason,
   type Observables,
+  type PackReport,
   type RunOptions,
   type Step,
 } from "../src/runner.js";
@@ -2916,6 +2917,49 @@ describe("the failure path and the record", () => {
       // The run's identifier is a file name, so it carries nothing a file
       // system would refuse.
       expect(newRunId(new Date("2026-10-30T09:00:00Z"))).not.toContain(":");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("test_the_record_names_the_pack_the_run_made", async () => {
+    const root = await mkdtemp(join(tmpdir(), "afk-pack-record-"));
+    try {
+      // The packs the run made: the work session's and the review's. The
+      // steps fill the list as they run, the way the runner's own do.
+      const packs: PackReport[] = [];
+      const outcome = await runSteps({
+        issue: 42,
+        runId: "2026-11-09T09-00-00-000Z-abcdef12",
+        root,
+        steps: [
+          {
+            name: "session",
+            run: async () => {
+              packs.push({ session: "work", path: "src/mastra", files: 8, tokens: 8345 });
+              return "3 turns";
+            },
+          },
+          {
+            name: "review",
+            run: async () => {
+              packs.push({ session: "review", path: "src", files: 41, tokens: 21400 });
+              return "pass";
+            },
+          },
+        ],
+        packs,
+      });
+
+      // The record names the pack: the path that was packed, the files it
+      // holds and what it cost the model. A run that read a document and
+      // cannot say so has not said what it did.
+      const record = await readFile(outcome.record, "utf8");
+      expect(record).toContain("## The pack");
+      expect(record).toContain("the work session packed `src/mastra`");
+      expect(record).toContain("8 file(s), 8345 tokens");
+      expect(record).toContain("the review packed `src`");
+      expect(record).toContain("41 file(s), 21400 tokens");
     } finally {
       await rm(root, { recursive: true, force: true });
     }

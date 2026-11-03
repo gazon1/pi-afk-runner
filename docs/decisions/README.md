@@ -15,7 +15,7 @@ for the rule that the copies follow.
 
 | Decision | What it settles |
 |---|---|
-| `2026-11-12-the-sweep-ends-with-the-smallest-failing-issues-code.md` | the sweep ends with the smallest failing issue's code: the failure of the issue with the smallest number decides it, and the order the failures happen in says nothing — **the exit-code clause replaced** in `2026-11-05-the-sweep-works-several-issues-at-once.md` |
+| `2026-11-09-the-runs-record-names-the-pack.md` | the run's record names the pack: the path that was packed, the files it holds and the tokens it cost — and what a real run showed, that a pack is good for an area of the repository and not for the repository |
 | `2026-11-11-the-engine-tells-the-model-when-a-turn-has-read-enough.md` | the engine tells the model, between its steps, that the reading is over: the work session's feedback points at the turn's own instruction, the turn that implements a change is checked against the tree and given one more chance, and the work is the paths that changed — not the commits |
 | `2026-11-11-the-queue-is-read-oldest-first.md` | the queue is read oldest first: `sort:created-asc` in the search form, so the backlog drains in the order it was filed and a run does not work the leftovers it just filed |
 | `2026-11-10-the-sweep-writes-a-journal-of-its-own.md` | the merge sweep writes a journal of its own: the file is in `build/diagnostics/merge/` beside the per-pull-request directories, it is there before the candidates are read, and it holds the sweep's own lines and the session's |
