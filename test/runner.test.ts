@@ -27,7 +27,7 @@ import {
   SCOPE_DECISION_TOOL_NAME,
   VERDICT_TOOL_NAME,
 } from "../src/decisions/index.js";
-import { assistantTextLines } from "../src/journal.js";
+import { assistantTextLines, journalFileName } from "../src/journal.js";
 import {
   DEFAULT_DEADLINE_MS,
   formatCost,
@@ -123,7 +123,6 @@ import {
   verdictFile,
   prepareWorktree,
   isStale,
-  journalFileName,
   observePullRequest,
   pullRequestsByBranch,
   selectIssue,

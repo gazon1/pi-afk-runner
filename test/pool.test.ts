@@ -32,7 +32,7 @@ import {
 } from "../src/pool.js";
 import { PoolSession, poolEventChannel, type PoolHost } from "../src/pool-session.js";
 import { useProxy } from "../src/proxy.js";
-import { journalFactory } from "../src/runner.js";
+import { journalFactory } from "../src/journal.js";
 import type { TurnMessage } from "../src/session.js";
 
 /** The pool the tests pick from: the best model, one behind a proxy, and a spare. */
