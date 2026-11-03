@@ -28,7 +28,7 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 
 import { claimIssue, reclaimClaim, releaseClaim } from "./claim.js";
 import { errorMessage } from "./cli.js";
@@ -38,10 +38,8 @@ import { GateFailed, runGates } from "./gates.js";
 import {
   issueSubject,
   journalDirectory,
-  journalFactory,
   journalFileName,
-  journalHeader,
-  journalPath,
+  openJournal,
   type JournalSubject,
 } from "./journal.js";
 import {
@@ -2743,13 +2741,12 @@ async function runPlan(
    * leaves behind what it was doing when it died.
    */
   const journalSubject = issueSubject(issue.number);
-  const journalFile = journalPath(
-    recordDirectory(options.checkout, issue.number),
+  const session = await openJournal(
+    options.checkout,
     runId,
+    journalSubject,
+    options.session,
   );
-  await mkdir(dirname(journalFile), { recursive: true });
-  await writeFile(journalFile, `${journalHeader(runId, journalSubject)}\n`, "utf8");
-  const session = journalFactory(options.session, journalFile);
   /**
    * The gates' whole output goes to a file beside the record.
    *

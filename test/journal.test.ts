@@ -16,11 +16,13 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
+  issueSubject,
   journalDirectory,
   journalFactory,
   journalFileName,
   journalHeader,
   journalPath,
+  openJournal,
   sweepJournalDirectory,
   sweepJournalHeader,
 } from "../src/journal.js";
@@ -104,5 +106,39 @@ describe("the journal file", () => {
 
     const opened = await factory({ cwd: tmpdir(), systemPromptSections: {} });
     expect(opened).toBe(session);
+  });
+
+  it("opens the journal of a run in one place", async () => {
+    // The pipeline names what the run was about and stops there: the module
+    // says what the file looks like. The file is there before the session
+    // opens, with its header line, and the lines are appended as they come.
+    const root = await mkdtemp(join(tmpdir(), "afk-journal-root-"));
+    try {
+      const session = fakeSession();
+      const factory = await openJournal(
+        root,
+        "run-1",
+        issueSubject(42),
+        async (sessionOptions) => {
+          sessionOptions.onEvent?.("the agent's own line");
+          return session;
+        },
+      );
+
+      const file = join(
+        journalDirectory(root, issueSubject(42)),
+        journalFileName("run-1"),
+      );
+      expect(await readFile(file, "utf8")).toBe(
+        `${journalHeader("run-1", issueSubject(42))}\n`,
+      );
+
+      await factory({ cwd: root, systemPromptSections: {} });
+      expect(await readFile(file, "utf8")).toBe(
+        `${journalHeader("run-1", issueSubject(42))}\nthe agent's own line\n`,
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });
