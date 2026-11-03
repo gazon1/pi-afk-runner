@@ -48,6 +48,7 @@ import {
   type ScopeDecision,
   type ScopeSubtask,
 } from "./decisions/index.js";
+import { changedPaths, runGit, type GitRunner } from "./git.js";
 import { createLeftoverTool, normaliseTitle } from "./leftovers.js";
 import { createPackTool } from "./packing.js";
 import { type ToolSpec } from "./tools.js";
@@ -442,6 +443,20 @@ export interface AgentSession {
   setModel?(reference: string): Promise<void>;
 }
 
+/**
+ * What the session tells the model between the steps of a turn.
+ *
+ * A turn that reads the tree does not stop by itself: the model finds one more
+ * file to look at, and one more after that. The engine that can push the model
+ * between its steps says what the turn is for once the model has read enough.
+ */
+export interface TurnFeedback {
+  /** After how many steps the model is told. */
+  readonly afterSteps: number;
+  /** What it is told. */
+  readonly text: string;
+}
+
 /** Creates a session bound to a directory. */
 export type SessionFactory = (options: {
   readonly cwd: string;
@@ -466,6 +481,14 @@ export type SessionFactory = (options: {
    * enough.
    */
   readonly finalTool?: string;
+  /**
+   * What the session tells the model between the steps of a turn.
+   *
+   * The same instrument as `finalTool`, for a turn that ends on nothing: a work
+   * turn makes the change and says what it did, and a model that reads finds one
+   * more file every time.
+   */
+  readonly feedback?: TurnFeedback;
   /**
    * Told what a turn cost, when the provider reported it.
    *
@@ -733,6 +756,15 @@ export async function runPromptArray(options: {
    * verdict — is skipped when the run says so.
    */
   readonly skip?: (state: WorkflowState) => boolean;
+  /**
+   * What is wrong with a turn's result, if anything.
+   *
+   * Asked after the turn, about the turn that has just run: it answers with
+   * what is missing, and the turn is given one more chance to do it — in the
+   * same session, with the same context. A turn that is still missing what it
+   * was asked for fails.
+   */
+  readonly check?: (state: WorkflowState) => Promise<string | null>;
 }): Promise<PromptArrayResult> {
   const schedule = options.schedule ?? defaultScheduler;
   let aborted = false;
@@ -781,6 +813,23 @@ export async function runPromptArray(options: {
     return true;
   };
 
+  /**
+   * Run one prompt in the session, and wait for it — or for the deadline.
+   *
+   * The deadline is the same race the turn itself races: a prompt that settles
+   * after the deadline has won is observed, not awaited.
+   */
+  const prompt = async (text: string): Promise<void> => {
+    const sent = options.session.prompt(text);
+    // The turn may reject after the deadline has already won the race. It is
+    // observed here, so it cannot become an unhandled rejection.
+    void sent.catch(() => {});
+    await Promise.race([sent, deadline]);
+    if (stopped() || aborted) {
+      throw cutOffError("the run was cut off before its next turn");
+    }
+  };
+
   /** Run one node: an action the runner performs, or a turn the agent takes. */
   const run = async (state: WorkflowState): Promise<StateOutcome> => {
     if (stopped()) {
@@ -796,20 +845,24 @@ export async function runPromptArray(options: {
       // graph turns it into the same failure a turn makes.
       return { state: "ok", result: await options.action(state) };
     }
-    const sent = options.session.prompt(state.text);
-    // The turn may reject after the deadline has already won the race. It is
-    // observed here, so it cannot become an unhandled rejection.
-    void sent.catch(() => {});
-    await Promise.race([sent, deadline]);
-    if (stopped() || aborted) {
-      throw cutOffError("the run was cut off before its next turn");
-    }
+    await prompt(state.text);
     // A turn whose model call failed settles normally; without this, a session
     // that answered nothing runs the states to their end and the run fails
     // later with whatever the empty work looks like.
     const failure = turnFailure(lastAssistant(options.session.messages));
     if (failure !== null) {
       return { state: "error", error: failure };
+    }
+    // What is missing from the turn's result, if anything. A turn that did not
+    // do its job is given one more chance: the same session, the same
+    // context, and the model told what is missing.
+    const complaint = (await options.check?.(state)) ?? null;
+    if (complaint !== null) {
+      await prompt(complaint);
+      const again = (await options.check?.(state)) ?? null;
+      if (again !== null) {
+        return { state: "error", error: new Error(again) };
+      }
     }
     // The decision a turn made is the edge the graph takes next. The work
     // turns return `ok`; only the first two decide.
@@ -930,6 +983,38 @@ export interface WorkSessionResult extends PromptArrayResult {
 }
 
 /**
+ * What the work session tells the model when it has read enough.
+ *
+ * The work session's turns read the tree before they work on it, and a model
+ * that reads finds one more file every time: the turn that implements a change
+ * ends with the model saying what it did, and the change is not in the tree.
+ *
+ * The words point at the turn's own instruction instead of naming a job: the
+ * brief's turn must change nothing, the implement's turn must change the tree,
+ * and a nudge that named the wrong one pushes the wrong turn into editing.
+ *
+ * Twelve steps is enough to read a plan and the code it names, and the turns
+ * before it are shorter: the triage decides in four calls, the scope in three.
+ */
+export const WORK_FEEDBACK: TurnFeedback = {
+  afterSteps: 12,
+  text:
+    "You have read enough. Do not read any more files. Do now what this turn's instruction says: " +
+    "make the change, call the tool this turn ends on, or say what you found.",
+};
+
+/**
+ * What the model is told when the tree is as it was.
+ *
+ * The turn that makes the change ends with the model saying what it did, and
+ * the change is not in the tree. The turn is given one more chance, in the
+ * same session, with the tree in front of it.
+ */
+const TREE_UNCHANGED =
+  "The tree is unchanged: the change you were asked for is not in the worktree. " +
+  "Make the change now, in this turn.";
+
+/**
  * Start the agent: read the prompts, create the session, run the graph.
  *
  * The order is the point, and it is here rather than in a convention: the
@@ -967,6 +1052,8 @@ export async function startAgent(options: {
   };
   /** How the issue is read and written. */
   readonly gh?: GhRunner;
+  /** How the worktree is read — the runner's own git, or the one under test. */
+  readonly git?: GitRunner;
   readonly promptsDirectory?: string;
   readonly batchRelated?: boolean;
   readonly deadlineMs: number;
@@ -1027,9 +1114,15 @@ export async function startAgent(options: {
         ? [createRelatedDecisionTool(related)]
         : []),
     ],
+    // The work session's turns end on nothing: a turn that decides calls its
+    // decision tool, and a turn that works leaves the change in the tree. A
+    // model that reads forever is told, between its steps, that the reading is
+    // over — the same instrument the review ends on.
+    feedback: WORK_FEEDBACK,
     ...(options.onUsage === undefined ? {} : { onUsage: options.onUsage }),
   });
 
+  const git = options.git ?? runGit;
   const result = await runPromptArray({
     session,
     nodes: workSessionNodes({
@@ -1041,6 +1134,22 @@ export async function startAgent(options: {
     deadlineMs: options.deadlineMs,
     ...(options.stopped === undefined ? {} : { stopped: options.stopped }),
     ...(options.schedule === undefined ? {} : { schedule: options.schedule }),
+    // The turn that makes the change is checked: a turn that read the tree and
+    // left it as it was is given one more chance, in the same session.
+    check: async (state) => {
+      if (state.name !== "implement") {
+        return null;
+      }
+      try {
+        const paths = await changedPaths(git, options.cwd, options.worktree.baseSha);
+        return paths.length === 0 ? TREE_UNCHANGED : null;
+      } catch {
+        // The tree could not be read: the check cannot say the work is
+        // missing. The runner's own guard — the paths that changed, before
+        // the push — is the backstop, and it fails the run.
+        return null;
+      }
+    },
     // A decision the model did not make is the safe default: the issue was
     // labelled ready-for-agent, so a triage that said nothing proceeds, and a
     // scope that said nothing treats the issue as one run's work.

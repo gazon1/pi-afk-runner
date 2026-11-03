@@ -10,7 +10,7 @@ import { Agent } from "@mastra/core/agent";
 import { InMemoryStore } from "@mastra/core/storage";
 import { LocalFilesystem, LocalSandbox, Workspace } from "@mastra/core/workspace";
 import { Memory } from "@mastra/memory";
-import { TokenLimiter, ToolCallFilter } from "@mastra/core/processors";
+import { TokenLimiter } from "@mastra/core/processors";
 
 import type { AnyToolSpec } from "../tools.js";
 import { guardWorkspace } from "./guard.js";

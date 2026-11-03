@@ -678,6 +678,37 @@ export async function hasUnmergedEntries(git: GitRunner, cwd: string): Promise<b
 }
 
 /**
+ * The paths that hold the work, against the base.
+ *
+ * The branch's own commits, measured from the **merge base**: the base's own
+ * changes are not the branch's work, and a branch that started from an older
+ * base would otherwise read as a change of its own. On top of them, the tree's
+ * own changes: the files that are modified and the files that are new.
+ *
+ * Git's own rules decide what counts. An ignored file is the host's business,
+ * not the work.
+ */
+export async function changedPaths(
+  git: GitRunner,
+  cwd: string,
+  base: string,
+): Promise<readonly string[]> {
+  const committed = await git(["diff", "--name-only", `${base}...HEAD`], { cwd });
+  const modified = await git(["diff", "--name-only", "HEAD"], { cwd });
+  const untracked = await git(["ls-files", "--others", "--exclude-standard"], { cwd });
+  const paths = new Set<string>();
+  for (const output of [committed, modified, untracked]) {
+    for (const raw of output.split("\n")) {
+      const path = raw.trim();
+      if (path !== "") {
+        paths.add(path);
+      }
+    }
+  }
+  return [...paths];
+}
+
+/**
  * The full ref of a branch.
  *
  * `git ls-remote` matches the **tail** of a ref, so `main` would also match

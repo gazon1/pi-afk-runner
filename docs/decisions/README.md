@@ -15,6 +15,8 @@ for the rule that the copies follow.
 
 | Decision | What it settles |
 |---|---|
+| `2026-11-11-the-engine-tells-the-model-when-a-turn-has-read-enough.md` | the engine tells the model, between its steps, that the reading is over: the work session's feedback points at the turn's own instruction, the turn that implements a change is checked against the tree and given one more chance, and the work is the paths that changed — not the commits |
+| `2026-11-11-the-queue-is-read-oldest-first.md` | the queue is read oldest first: `sort:created-asc` in the search form, so the backlog drains in the order it was filed and a run does not work the leftovers it just filed |
 | `2026-11-10-the-sweep-writes-a-journal-of-its-own.md` | the merge sweep writes a journal of its own: the file is in `build/diagnostics/merge/` beside the per-pull-request directories, it is there before the candidates are read, and it holds the sweep's own lines and the session's |
 | `2026-11-09-the-pack-drops-the-grammars-it-cannot-use.md` | the pack drops the grammars it cannot use: the install removes repomix's tree-sitter grammars, the compression stays off because repomix has no Kotlin grammar, and the pack holds the files as they are |
 | `2026-11-08-the-suite-list-is-the-policy.md` | the suites are the policy's list: one entry per runner, and the rule that reads it names none of them — the list of the suites **extended** from `2026-11-05-a-run-gates-nothing-and-builds-nothing.md` |
