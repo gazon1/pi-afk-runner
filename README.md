@@ -200,6 +200,10 @@ another runner holds the lock and `76` says the lock could not be taken. A run t
 gates leaves `45`, so a red gate is not read as an issue that could not be worked. The unit and the
 codes are in [systemd/](systemd/README.md).
 
+A sweep that works several issues at once ends with the code of the **failure of the issue with
+the smallest number**: the order the failures happen in says nothing about the sweep, and the same
+sweep says the same thing every time.
+
 A finished run ends with a **summary** — the facts a reader wants, one per line, because a journal
 reads lines and a table wraps:
 

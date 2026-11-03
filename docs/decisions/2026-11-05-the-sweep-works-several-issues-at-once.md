@@ -109,7 +109,8 @@ to make through a flag.
 - Every line a multi-worker sweep writes names its issue; a one-worker sweep is
   unchanged, byte for byte.
 - The exit code, the summary line and the total still mean the same thing: the
-  first failure's code, and the count of the issues that were worked.
+  code of the failure of the issue with the smallest number, and the count of
+  the issues that were worked.
 - The systemd unit is unchanged and works one issue at a time. The number of
   workers is the host's to choose, in the unit's arguments.
 
