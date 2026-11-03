@@ -33,6 +33,13 @@ import {
 } from "./gh.js";
 import { GATE_OUTPUT_LIMIT_BYTES, GATE_TIMEOUT_MS, gateFailure, gateInvocation } from "./gates.js";
 import {
+  journalDirectory,
+  journalFactory,
+  journalHeader,
+  journalPath,
+  type JournalSubject,
+} from "./journal.js";
+import {
   CommandFailed,
   fetchCommit,
   hasUnmergedEntries,
@@ -49,7 +56,6 @@ import {
   checkoutPullRequestBranch,
   commitAll,
   headSha,
-  journalFactory,
   newRunId,
   readCiOutcome,
   reviewPullRequest,
@@ -310,17 +316,12 @@ async function mergeOne(
    * before the first session opens and grows as the lines come, so a merge
    * that dies leaves behind what it was doing when it died.
    */
-  const directory = join(
-    options.checkout,
-    "build",
-    "diagnostics",
-    "merge",
-    `pr-${candidate.number}`,
-  );
-  const journalPath = join(directory, `${runId}.log`);
+  const subject: JournalSubject = { kind: "pull request", number: candidate.number };
+  const directory = journalDirectory(options.checkout, subject);
+  const journalFile = journalPath(directory, runId);
   await mkdir(directory, { recursive: true });
-  await writeFile(journalPath, `# run ${runId}, pull request ${candidate.number}\n`, "utf8");
-  const factory = journalFactory(options.session, journalPath);
+  await writeFile(journalFile, `${journalHeader(runId, subject)}\n`, "utf8");
+  const factory = journalFactory(options.session, journalFile);
 
   const steps: Step[] = [
     {

@@ -1,9 +1,97 @@
 /**
- * The run's journal: the lines a reader sees while the agent works.
+ * The run's journal: the lines a reader sees while the agent works, and the
+ * file they are written to.
  *
- * The session writes them: the adapter reads them off the engine's answer and
- * hands them here, so a line is spelled the same way whoever reads it.
+ * The session writes the lines: the adapter reads them off the engine's answer
+ * and hands them here, so a line is spelled the same way whoever reads it.
+ *
+ * The file's shape is written here too — its directory, its name, its header
+ * line and the factory that appends to it — because two pipelines write a
+ * journal and a rule written twice is a rule whose two copies drift. A
+ * pipeline that writes a journal names what the run was about; this module
+ * says what the file looks like.
  */
+
+import { appendFileSync } from "node:fs";
+import { join } from "node:path";
+
+import type { SessionFactory } from "./session.js";
+
+/**
+ * What a run was about: the issue's number, or the pull request's.
+ *
+ * It is the only thing a pipeline names. The journal's own shape — where it
+ * lives, what it is called and how it starts — is decided here, so a third
+ * pipeline writes the same shape without spelling it again.
+ */
+export type JournalSubject =
+  | { readonly kind: "issue"; readonly number: number }
+  | { readonly kind: "pull request"; readonly number: number };
+
+/**
+ * Where the journal of a run lives.
+ *
+ * `build/diagnostics/issue-<N>/` for a run about an issue, and
+ * `build/diagnostics/merge/pr-<N>/` for a run about a pull request. The
+ * journal sits beside the run's record, in the same directory.
+ */
+export function journalDirectory(root: string, subject: JournalSubject): string {
+  return subject.kind === "issue"
+    ? join(root, "build", "diagnostics", `issue-${subject.number}`)
+    : join(root, "build", "diagnostics", "merge", `pr-${subject.number}`);
+}
+
+/**
+ * The line a journal file starts with.
+ *
+ * It names the run and what the run was about, so a reader who opens the file
+ * knows which run it belongs to before reading a line of it.
+ */
+export function journalHeader(runId: string, subject: JournalSubject): string {
+  return `# run ${runId}, ${subject.kind} ${subject.number}`;
+}
+
+/**
+ * The journal's file name: the run's own id and the `.log` extension.
+ *
+ * One place says it. The run writes the file under this name and the record
+ * names the file the run wrote, so the name in the record cannot drift from
+ * the name on the disk.
+ */
+export function journalFileName(runId: string): string {
+  return `${runId}.log`;
+}
+
+/**
+ * The journal's path: the run's own directory, the run's id, the `.log`.
+ *
+ * The journal sits beside the record — the same directory — so a reader who
+ * opens the record finds the journal in the same place.
+ */
+export function journalPath(directory: string, runId: string): string {
+  return join(directory, journalFileName(runId));
+}
+
+/**
+ * The journal of a run: the session's lines, written while the run works.
+ *
+ * The factory is wrapped, so every session the run opens — the work session,
+ * the review, the fixes — writes to the same file. The lines are appended as
+ * they come, and a line that cannot be written is dropped: a journal that
+ * cannot be written is not a reason to stop the run.
+ */
+export function journalFactory(factory: SessionFactory, path: string): SessionFactory {
+  return async (sessionOptions) => {
+    const write = (line: string): void => {
+      try {
+        appendFileSync(path, `${line}\n`, "utf8");
+      } catch {
+        // The journal is a witness, not a gate: the run goes on without it.
+      }
+    };
+    return factory({ ...sessionOptions, onEvent: write });
+  };
+}
 
 /**
  * One line about a tool call: the tool, and the command when there is one.

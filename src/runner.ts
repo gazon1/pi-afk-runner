@@ -26,7 +26,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { appendFileSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
@@ -35,6 +35,14 @@ import { errorMessage } from "./cli.js";
 import { budgetShares } from "./budget.js";
 import { isProtectedPath } from "./guard.js";
 import { GateFailed, runGates } from "./gates.js";
+import {
+  journalDirectory,
+  journalFactory,
+  journalFileName,
+  journalHeader,
+  journalPath,
+  type JournalSubject,
+} from "./journal.js";
 import {
   UNTRUSTED_INPUT_RULE,
   UNTRUSTED_INPUT_SECTION,
@@ -1406,10 +1414,11 @@ function tail(text: string, limit: number): { readonly text: string; readonly tr
  * Where the record of a run lives.
  *
  * `build/diagnostics/issue-<N>/` — the repository's own convention for "here is
- * what happened", with the issue's number in the directory's name.
+ * what happened", with the issue's number in the directory's name. The record
+ * sits beside the journal, so it lives where the journal lives.
  */
 export function recordDirectory(root: string, issue: number): string {
-  return join(root, "build", "diagnostics", `issue-${issue}`);
+  return journalDirectory(root, { kind: "issue", number: issue });
 }
 
 /**
@@ -1435,27 +1444,6 @@ const RUNNER_STAMP = ((): string => {
   const sha = typeof built.sha === "string" ? built.sha : null;
   return sha === null ? version : `${version} ${sha}`;
 })();
-
-/**
- * The journal's file name: the run's own id and the `.log` extension.
- *
- * One place says it. The run writes the file under this name and the record
- * names the file the run wrote, so the name in the record cannot drift from
- * the name on the disk.
- */
-export function journalFileName(runId: string): string {
-  return `${runId}.log`;
-}
-
-/**
- * The journal's path: the record's own directory, the run's id, the `.log`.
- *
- * The journal sits beside the record — the same directory — so a reader who
- * opens the record finds the journal in the same place.
- */
-export function journalPath(directory: string, runId: string): string {
-  return join(directory, journalFileName(runId));
-}
 
 /** The record's own text. */
 function renderRecord(options: {
@@ -1559,27 +1547,6 @@ export async function writeRunRecord(options: {
     "utf8",
   );
   return path;
-}
-
-/**
- * The journal of a run: the session's lines, written while the run works.
- *
- * The factory is wrapped, so every session the run opens — the work session,
- * the review, the fixes — writes to the same file. The lines are appended as
- * they come, and a line that cannot be written is dropped: a journal that
- * cannot be written is not a reason to stop the run.
- */
-export function journalFactory(factory: SessionFactory, path: string): SessionFactory {
-  return async (sessionOptions) => {
-    const write = (line: string): void => {
-      try {
-        appendFileSync(path, `${line}\n`, "utf8");
-      } catch {
-        // The journal is a witness, not a gate: the run goes on without it.
-      }
-    };
-    return factory({ ...sessionOptions, onEvent: write });
-  };
 }
 
 /**
@@ -2693,12 +2660,13 @@ async function runPlan(
    * start of the run and grows while the work goes on, so a run that dies
    * leaves behind what it was doing when it died.
    */
+  const journalSubject: JournalSubject = { kind: "issue", number: issue.number };
   const journalFile = journalPath(
     recordDirectory(options.checkout, issue.number),
     runId,
   );
   await mkdir(dirname(journalFile), { recursive: true });
-  await writeFile(journalFile, `# run ${runId}, issue ${issue.number}\n`, "utf8");
+  await writeFile(journalFile, `${journalHeader(runId, journalSubject)}\n`, "utf8");
   const session = journalFactory(options.session, journalFile);
   /**
    * The gates' whole output goes to a file beside the record.
