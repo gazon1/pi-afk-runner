@@ -405,6 +405,35 @@ describe("the session of the Mastra engine", () => {
     }
   });
 
+  it("writes the tool call while the call is still running", async () => {
+    // A tool that runs for minutes must not look like a run that stopped: the
+    // call is written when the model makes it, not when the turn ends.
+    const cwd = await mkdtemp(join(tmpdir(), "afk-worktree-"));
+    const lines: string[] = [];
+    let duringCall: string[] = [];
+    const tool = specOf({
+      execute: async () => {
+        duringCall = [...lines];
+        return { content: [{ type: "text" as const, text: "done" }], details: {} };
+      },
+    });
+    const session = await createMastraSession({
+      model: modelOf([toolTurn("agent_test", { value: "a leftover" }), textTurn("done")]),
+      cwd,
+      systemPromptSections: {},
+      tools: [tool],
+      onEvent: (line) => lines.push(line),
+    });
+    try {
+      await session.prompt("file the leftover");
+      expect(duringCall.some((line) => line.includes("agent_test"))).toBe(true);
+      // And it is written once — the turn that ends does not repeat it.
+      expect(lines.filter((line) => line.includes("agent_test")).length).toBe(1);
+    } finally {
+      session.dispose();
+    }
+  });
+
   it("tells the model to end the turn when it has read enough", async () => {
     // A model that reads forever has to be told, between its steps, that the
     // turn ends with a tool. Without the words, the step limit ends the turn

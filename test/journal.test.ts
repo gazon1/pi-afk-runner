@@ -10,7 +10,7 @@
 import chalk from "chalk";
 import { describe, expect, it } from "vitest";
 
-import { logTurn, type TurnAnswer } from "../src/mastra/log.js";
+import { logTurn, refusalLine, type TurnAnswer } from "../src/mastra/log.js";
 
 /** A turn the agent answered with: one tool call and one spoken line. */
 function answerWith(call: unknown, text: string): TurnAnswer {
@@ -43,6 +43,15 @@ describe("the lines the runner prints", () => {
     } finally {
       chalk.level = level;
     }
+  });
+
+  it("says that a call was refused, and only that", () => {
+    // A refusal is over; a reader has to see that it is over.
+    expect(refusalLine("Refused: pytest -q. Do not run the checks.")).toBe(
+      "  ↳ Refused: pytest -q. Do not run the checks.",
+    );
+    expect(refusalLine("the leftover is filed")).toBeUndefined();
+    expect(refusalLine(undefined)).toBeUndefined();
   });
 
   it("says nothing when there is nothing to say", () => {

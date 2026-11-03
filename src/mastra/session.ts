@@ -17,7 +17,7 @@ import { Memory } from "@mastra/memory";
 import type { AgentSession, RunUsage, SessionFactory, TurnMessage } from "../session.js";
 import type { ToolSpec } from "../tools.js";
 import { createMastraAgent, systemPrompt } from "./agent.js";
-import { logTurn } from "./log.js";
+import { logTurn, refusalLine, toolCallLine } from "./log.js";
 import { DEFAULT_MASTRA_MODEL, resolveMastraModel } from "./model.js";
 import { skillDirectories } from "./skills.js";
 
@@ -156,6 +156,10 @@ export async function createMastraSession(options: {
       const controller = new AbortController();
       running = controller;
       finalToolCalled = false;
+      // The calls this turn hands over while it runs. The engine gives a call
+      // over when the model makes it — before the tool answers — so a tool
+      // that runs for minutes does not look like a run that stopped.
+      const streamed = new Set<string>();
       try {
         const answer = await agent.generate(text, {
           abortSignal: controller.signal,
@@ -164,6 +168,32 @@ export async function createMastraSession(options: {
           // The memory is what carries a turn into the next one: the work
           // session is one conversation.
           memory: { thread: THREAD, resource: cwd },
+          // The journal is written while the turn works, not when it ends.
+          onChunk: (chunk) => {
+            if (options.onEvent === undefined) {
+              return;
+            }
+            // A refusal is written too: a call the guard refused is over, and
+            // a reader has to see that it is over.
+            if (chunk.type === "tool-result") {
+              const line = refusalLine(chunk.payload.result);
+              if (line !== undefined) {
+                options.onEvent(line);
+              }
+              return;
+            }
+            if (chunk.type !== "tool-call") {
+              return;
+            }
+            const payload = chunk.payload;
+            if (streamed.has(payload.toolCallId)) {
+              return;
+            }
+            streamed.add(payload.toolCallId);
+            options.onEvent(
+              toolCallLine({ toolName: payload.toolName, args: payload.args }),
+            );
+          },
           // The model that reads forever is told, between its steps, that the
           // turn ends with a tool. Without this the turn is cut off by the
           // step limit, and a review that read everything and decided nothing
@@ -190,7 +220,7 @@ export async function createMastraSession(options: {
                 },
               }),
         });
-        logTurn(answer, options.onEvent);
+        logTurn(answer, options.onEvent, streamed);
         const usage = usageOf(answer);
         if (usage !== undefined) {
           onUsage?.(usage);
