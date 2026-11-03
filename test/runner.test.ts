@@ -27,7 +27,12 @@ import {
   SCOPE_DECISION_TOOL_NAME,
   VERDICT_TOOL_NAME,
 } from "../src/decisions/index.js";
-import { assistantTextLines, journalFileName } from "../src/journal.js";
+import {
+  assistantTextLines,
+  diagnosticsDirectory,
+  issueSubject,
+  journalFileName,
+} from "../src/journal.js";
 import {
   DEFAULT_DEADLINE_MS,
   formatCost,
@@ -113,7 +118,6 @@ import {
   openPullRequest,
   parseCiVerdict,
   readCiVerdict,
-  recordDirectory,
   RECORD_OUTPUT_LIMIT_BYTES,
   releaseRun,
   reviewPullRequest,
@@ -3748,7 +3752,9 @@ describe("the CLI's run", () => {
       // removes.
       const named = /the whole output is at (.+?)(?: — |$)/m.exec(record)?.[1];
       expect(named).toBeTruthy();
-      expect(named?.startsWith(recordDirectory(fixture.repo, 42))).toBe(true);
+      expect(named?.startsWith(diagnosticsDirectory(fixture.repo, issueSubject(42)))).toBe(
+        true,
+      );
       expect(existsSync(named ?? "")).toBe(true);
       const whole = await readFile(named ?? "", "utf8");
       expect(whole).toContain("line 1\n");

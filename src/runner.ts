@@ -36,12 +36,14 @@ import { budgetShares } from "./budget.js";
 import { isProtectedPath } from "./guard.js";
 import { GateFailed, runGates } from "./gates.js";
 import {
+  diagnosticsDirectory,
+  gatesLogPath,
   issueSubject,
-  journalDirectory,
   journalFactory,
   journalFileName,
   journalHeader,
   journalPath,
+  recordPath,
   type JournalSubject,
 } from "./journal.js";
 import {
@@ -1454,17 +1456,6 @@ function tail(text: string, limit: number): { readonly text: string; readonly tr
 }
 
 /**
- * Where the record of a run lives.
- *
- * `build/diagnostics/issue-<N>/` — the repository's own convention for "here is
- * what happened", with the issue's number in the directory's name. The record
- * sits beside the journal, so it lives where the journal lives.
- */
-export function recordDirectory(root: string, issue: number): string {
-  return journalDirectory(root, issueSubject(issue));
-}
-
-/**
  * The runner's own build, as the record names it.
  *
  * It is the package's version and the commit the build came from. The version
@@ -1497,7 +1488,7 @@ function renderRecord(options: {
   /** The record's first line, when it is not an issue's. */
   readonly heading?: string;
   /** What the run was about — the issue by default, a pull request for a merge. */
-  readonly subject?: JournalSubject;
+  readonly subject: JournalSubject;
   /** What the model pool did during the run. */
   readonly pool?: readonly string[];
   /** The packs the run made, when it made any. */
@@ -1507,7 +1498,7 @@ function renderRecord(options: {
 }): string {
   // The subject says what the run was about, and the record reads both the
   // word and the number from it: the word is spelled in one place.
-  const subject = options.subject ?? issueSubject(options.issue);
+  const subject = options.subject;
   const lines = [
     options.heading ?? `# Run issue-${options.issue}`,
     "",
@@ -1593,9 +1584,12 @@ export async function writeRunRecord(options: {
   /** Whether this run wrote a journal beside the record. */
   readonly hasJournal?: boolean;
 }): Promise<string> {
-  const directory = options.directory ?? recordDirectory(options.root, options.issue);
+  // The subject says what the run was about, and the directory of the run's
+  // files follows from it: an issue's own directory, or a pull request's.
+  const subject = options.subject ?? issueSubject(options.issue);
+  const directory = options.directory ?? diagnosticsDirectory(options.root, subject);
   await mkdir(directory, { recursive: true });
-  const path = join(directory, `${options.runId}.md`);
+  const path = recordPath(directory, options.runId);
   await writeFile(
     path,
     renderRecord({
@@ -1604,7 +1598,7 @@ export async function writeRunRecord(options: {
       outcome: options.outcome,
       steps: options.steps,
       ...(options.heading === undefined ? {} : { heading: options.heading }),
-      ...(options.subject === undefined ? {} : { subject: options.subject }),
+      subject,
       ...(options.pool === undefined ? {} : { pool: options.pool }),
       ...(options.packs === undefined ? {} : { packs: options.packs }),
       ...(options.hasJournal === undefined ? {} : { hasJournal: options.hasJournal }),
@@ -2744,7 +2738,7 @@ async function runPlan(
    */
   const journalSubject = issueSubject(issue.number);
   const journalFile = journalPath(
-    recordDirectory(options.checkout, issue.number),
+    diagnosticsDirectory(options.checkout, journalSubject),
     runId,
   );
   await mkdir(dirname(journalFile), { recursive: true });
@@ -2757,9 +2751,9 @@ async function runPlan(
    * file is where the rest of it is. A record is a document a person reads,
    * and a document that carries a whole build log is not read.
    */
-  const gatesLog = join(
-    recordDirectory(options.checkout, issue.number),
-    `${runId}-gates.log`,
+  const gatesLog = gatesLogPath(
+    diagnosticsDirectory(options.checkout, journalSubject),
+    runId,
   );
   /**
    * The gates run on the tree the agent left, and again on the tree a
