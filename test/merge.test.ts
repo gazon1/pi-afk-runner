@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
@@ -596,6 +597,43 @@ describe("the merge pipeline", () => {
       const landed = await mergeReviewedPullRequests(options(fixture, next.gh));
       expect(landed.merged).toEqual([7]);
       expect(next.merged).toEqual([7]);
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("test_the_merge_writes_a_journal_beside_its_record", async () => {
+    // The record of a merge is written when the merge ends — and a merge that
+    // is killed writes no record at all. The journal is the file beside it: it
+    // is there before the session works, and it grows while the merge works.
+    const fixture = await createFixtureRepository({
+      files: { "scripts/setup-worktree.sh": SETUP, "shared.txt": "the base\n" },
+    });
+    try {
+      // The branch and the base both change the same file, so the merge has
+      // to resolve a conflict — and the resolution is a session.
+      await pushBranch(fixture, "shared.txt", "the branch\n");
+      await moveMain(fixture, "the base moved\n");
+
+      const { gh } = stubGh([reviewedPullRequest()]);
+      const session: SessionFactory = async (sessionOptions) => {
+        sessionOptions.onEvent?.("the merge agent is working");
+        return resolvingSession("both sides\n")(sessionOptions);
+      };
+
+      await mergeReviewedPullRequests(options(fixture, gh, { session }));
+
+      // The journal sits beside the record, under the same directory shape.
+      const journal = join(
+        fixture.repo,
+        "build",
+        "diagnostics",
+        "merge",
+        "pr-7",
+        "2026-11-02T09-00-00-000Z-abcdef12.log",
+      );
+      expect(existsSync(journal)).toBe(true);
+      expect(await readFile(journal, "utf8")).toContain("the merge agent is working");
     } finally {
       await fixture.dispose();
     }
