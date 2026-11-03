@@ -32,7 +32,13 @@ import { rm } from "node:fs/promises";
 import { resolve, join } from "node:path";
 import { simpleGit } from "simple-git";
 
-import { KILL_GRACE_MS, withHardStop } from "./bound.js";
+import {
+  ENDING_WORDS,
+  KILL_GRACE_MS,
+  type TimeoutEnding,
+  whatTheChildPrinted,
+  withHardStop,
+} from "./bound.js";
 
 /** Who the claim is attributed to. Part of the tag object's identity. */
 export const CLAIM_TAGGER = {
@@ -141,11 +147,17 @@ export const COMMAND_TIMEOUT_MS = 15 * 60 * 1000;
  * It is a failure of its own, not a failure of the command: the command never
  * got to answer, so it has no exit code. What it printed before it was killed
  * is kept — that output is the only evidence there is.
+ *
+ * It says how the command ended as well: a child that stopped when it was
+ * asked and a child that ignored the request are two different ends, and a
+ * reader who cannot tell them apart reads a record that says nothing.
  */
 export class CommandTimedOut extends Error {
   readonly stdout: string;
   readonly stderr: string;
   readonly timeoutMs: number;
+  /** Which of the two endings the command had. */
+  readonly ending: TimeoutEnding;
 
   constructor(
     timeoutMs: number,
@@ -153,12 +165,17 @@ export class CommandTimedOut extends Error {
     args: readonly string[],
     stdout: string,
     stderr: string,
+    ending: TimeoutEnding = "stopped",
   ) {
-    super(`command timed out after ${timeoutMs}ms: ${command} ${args.join(" ")}`);
+    super(
+      `command timed out after ${timeoutMs}ms: ${command} ${args.join(" ")} — ` +
+        `${ENDING_WORDS[ending]}; ${whatTheChildPrinted(stdout, stderr)}`,
+    );
     this.name = "CommandTimedOut";
     this.stdout = stdout;
     this.stderr = stderr;
     this.timeoutMs = timeoutMs;
+    this.ending = ending;
   }
 }
 
@@ -192,6 +209,16 @@ class OutputTail {
   text(): string {
     return Buffer.concat(this.chunks).toString("utf8");
   }
+}
+
+/**
+ * What a child wrote, as the bytes it wrote.
+ *
+ * A stream hands over a buffer unless it was told otherwise, and the runner
+ * keeps the bytes either way.
+ */
+function asBuffer(chunk: Buffer | string): Buffer {
+  return typeof chunk === "string" ? Buffer.from(chunk) : chunk;
 }
 
 /**
@@ -248,8 +275,10 @@ export function gitFailure(
   const stdout = Buffer.concat(result.stdOut).toString("utf8");
   const stderr = Buffer.concat(result.stdErr).toString("utf8");
   if (context.aborted) {
-    // The bound was spent and the git was killed before it answered.
-    return new CommandTimedOut(context.timeoutMs, "git", context.args, stdout, stderr);
+    // The bound was spent and the git was killed before it answered. It
+    // stopped when it was asked: the call ended, and the run is not waiting
+    // on a child that is still there.
+    return new CommandTimedOut(context.timeoutMs, "git", context.args, stdout, stderr, "stopped");
   }
   if (result.exitCode !== null && result.exitCode !== undefined && result.exitCode !== 0) {
     // Git itself refused: the exit code is its answer, and what it said on the
@@ -281,6 +310,12 @@ export async function runGitWithTimeout(
   // is given into one of its own, and what the caller catches has to be the
   // error this file wrote.
   let failure: Error | undefined;
+  // What the child printed, kept as it arrives. A git that ignores the
+  // request to stop never hands its output over — the call is still open when
+  // the run stops waiting — so the runner reads the child's own streams, and
+  // the failure the run raises at the hard stop carries what it read.
+  const stdout = new OutputTail(Number.POSITIVE_INFINITY);
+  const stderr = new OutputTail(Number.POSITIVE_INFINITY);
   try {
     const git = simpleGit({
       baseDir: options.cwd,
@@ -306,12 +341,21 @@ export async function runGitWithTimeout(
         return raised;
       },
     });
+    // simple-git hands over the child's own streams, so the runner reads them
+    // as they come. The output of a git that is left behind is the output the
+    // failure has to carry: it is the only evidence there is.
+    git.outputHandler((_command, childStdout, childStderr) => {
+      childStdout.on("data", (chunk: Buffer | string) => stdout.push(asBuffer(chunk)));
+      childStderr.on("data", (chunk: Buffer | string) => stderr.push(asBuffer(chunk)));
+    });
     return await withHardStop(git.raw([...args]), {
       timeoutMs,
       killGraceMs,
       // The git was asked to stop and did not: the run stops waiting, and the
-      // output of a git that never answered is empty.
-      timeoutError: () => new CommandTimedOut(timeoutMs, "git", args, "", ""),
+      // child is left behind — with what it printed before it was asked, and
+      // with the failure saying that it is still there.
+      timeoutError: () =>
+        new CommandTimedOut(timeoutMs, "git", args, stdout.text(), stderr.text(), "ignored"),
     });
   } catch (thrown) {
     if (failure !== undefined) {
