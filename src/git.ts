@@ -24,12 +24,43 @@
  * The tag object is written with `git mktag` rather than `git tag -a`, so that
  * **no local ref is created**. The object is what gets pushed; the name lives
  * only on the remote, and the runner's own checkout is left as it found it.
+ *
+ * ## The shared checkout
+ *
+ * A sweep works several issues at once, and its workers **share one
+ * checkout**: one `.git`, one set of refs, one `FETCH_HEAD`, one worktree
+ * registry. A git command that two workers run at the same time has to be
+ * safe at the same time.
+ *
+ * Every git command in this file is therefore one of two kinds, and which
+ * kind it is is written where the command is:
+ *
+ * - **one at a time** — it goes through a queue, because two of them at once
+ *   make one of them fail. The **fetches** go through the fetch queue: every
+ *   fetch writes the checkout's `FETCH_HEAD`, and it updates the
+ *   remote-tracking refs its refspec maps to, and git locks both. The
+ *   **worktree commands** go through the worktree queue: `git worktree add`
+ *   writes the registration before the directory exists, and a `prune` in
+ *   that window deletes it.
+ * - **safe to run at the same time** — and the reason is written at the
+ *   command. The push of the work branch is the one that is not obvious: it
+ *   writes one ref of the remote, one that belongs to its own issue, and it
+ *   writes nothing in the checkout at all.
+ *
+ * The commands the runner runs **inside a worktree** — `add`, `commit`,
+ * `status`, `reset`, `clean`, `checkout` — are safe at the same time for the
+ * same reasons: the index and the `HEAD` they touch are the worktree's own,
+ * the branch they move is the issue's own, and the objects they write are
+ * content-addressed.
+ *
+ * The garbage collection git starts by itself is a third thing, and it is
+ * off: see `runGitWithTimeout`.
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { createWriteStream, existsSync } from "node:fs";
+import { createWriteStream } from "node:fs";
 import { rm } from "node:fs/promises";
-import { resolve, join } from "node:path";
+import { join } from "node:path";
 import { simpleGit } from "simple-git";
 
 import { KILL_GRACE_MS, withHardStop } from "./bound.js";
@@ -195,6 +226,22 @@ class OutputTail {
 }
 
 /**
+ * The options every git the runner runs carries.
+ *
+ * The garbage collection git starts by itself is **off**. `git fetch`, `git
+ * commit` and `git push` may start a collection on their own, and in a
+ * checkout that several workers share a second collection collides with the
+ * first: git then says "failed to run maintenance" and the command fails —
+ * and a sweep that fails on a collection nobody asked for is a sweep that
+ * fails.
+ *
+ * The runner never needs the collection: the checkout is the user's, and a
+ * collection the runner did not ask for is a collection the runner did not
+ * get to judge.
+ */
+const NO_AUTO_COLLECTION = ["-c", "gc.auto=0", "-c", "maintenance.auto=0"] as const;
+
+/**
  * Runs the real `git`, through simple-git.
  *
  * The runner's git is the real git: a claim is a ref, a push is a push, and a
@@ -306,7 +353,7 @@ export async function runGitWithTimeout(
         return raised;
       },
     });
-    return await withHardStop(git.raw([...args]), {
+    return await withHardStop(git.raw([...NO_AUTO_COLLECTION, ...args]), {
       timeoutMs,
       killGraceMs,
       // The git was asked to stop and did not: the run stops waiting, and the
@@ -550,7 +597,13 @@ export function claimTagObject(options: {
   );
 }
 
-/** Write the tag object and return its id. No ref is created — the object only. */
+/**
+ * Write the tag object and return its id. No ref is created — the object only.
+ *
+ * Safe to run at the same time as another write: an object is named by what
+ * it holds, so two writes of the same object are one object, and two writes
+ * of different objects touch different files.
+ */
 export async function createClaimObject(
   git: GitRunner,
   cwd: string,
@@ -577,6 +630,10 @@ export async function createClaimObject(
  *
  * It throws when the push is rejected, and the rejection is the interesting
  * case: it means another runner holds the issue.
+ *
+ * Safe to run at the same time as another push: it writes one tag of the
+ * remote, one that belongs to its own issue, and it writes nothing in the
+ * checkout.
  */
 export async function pushClaim(
   git: GitRunner,
@@ -597,7 +654,15 @@ export async function pushClaim(
   );
 }
 
-/** Remove the claim. */
+/**
+ * Remove the claim.
+ *
+ * The ref may not be there: a run that died before its claim landed has
+ * nothing to delete, and a delete of a ref that is not there fails.
+ *
+ * Safe to run at the same time as another delete: the read is a read, and
+ * the delete writes one tag of the remote and nothing in the checkout.
+ */
 export async function deleteClaim(
   git: GitRunner,
   cwd: string,
@@ -626,6 +691,10 @@ export async function deleteClaim(
  * `-D`, not `-d`: the branch is not merged and is not anybody's — it is the
  * runner's own `agent/issue-<N>`, and its commits are a dead run's. The caller
  * has decided that the work is redone.
+ *
+ * Safe to run at the same time as another delete: the listing is a read, and
+ * the delete writes one ref of the checkout — the branch of its own issue —
+ * and git locks that ref alone.
  */
 export async function deleteLocalBranch(
   git: GitRunner,
@@ -648,6 +717,9 @@ export async function deleteLocalBranch(
  * No hook: a delete pushes no tree, and the repository's pre-push hook gates
  * the tree that is being pushed. A hook that has nothing to gate must not
  * stand between the runner and a branch it has to remove.
+ *
+ * Safe to run at the same time as another delete: the read is a read, and
+ * the delete writes one branch of the remote and nothing in the checkout.
  */
 export async function deleteRemoteBranch(
   git: GitRunner,
@@ -671,6 +743,8 @@ export async function deleteRemoteBranch(
  * `git ls-files -u` lists the stages of the files a merge could not reconcile.
  * An empty listing means the index holds no conflict, whatever else made the
  * merge fail: unrelated histories, a locked index, a base that is not there.
+ *
+ * A read: safe to run at the same time as anything, and it writes nothing.
  */
 export async function hasUnmergedEntries(git: GitRunner, cwd: string): Promise<boolean> {
   const listed = await git(["ls-files", "-u"], { cwd });
@@ -687,6 +761,8 @@ export async function hasUnmergedEntries(git: GitRunner, cwd: string): Promise<b
  *
  * Git's own rules decide what counts. An ignored file is the host's business,
  * not the work.
+ *
+ * A read: safe to run at the same time as anything, and it writes nothing.
  */
 export async function changedPaths(
   git: GitRunner,
@@ -718,7 +794,12 @@ export function headRef(branch: string): string {
   return branch.startsWith("refs/") ? branch : `refs/heads/${branch}`;
 }
 
-/** The commit a ref points at on the remote, or null when it has none. */
+/**
+ * The commit a ref points at on the remote, or null when it has none.
+ *
+ * A read of the remote: safe to run at the same time as anything, and it
+ * writes nothing in the checkout.
+ */
 export async function readRemoteSha(
   git: GitRunner,
   cwd: string,
@@ -738,6 +819,9 @@ export async function readRemoteSha(
  *
  * The claim is an annotated tag, so the remote lists it twice: the tag object,
  * and the commit it peels to. The commit is the base.
+ *
+ * A read of the remote: safe to run at the same time as anything, and it
+ * writes nothing in the checkout.
  */
 export async function readClaimBase(
   git: GitRunner,
@@ -764,6 +848,9 @@ export async function readClaimBase(
  * and the commit it peels to. The **tag object** is the claim — it carries the
  * nonce — and it is what tells two claims apart: two runners that took the same
  * issue from the same base agree on the commit and differ on the object.
+ *
+ * A read of the remote: safe to run at the same time as anything, and it
+ * writes nothing in the checkout.
  */
 export async function readClaimObject(
   git: GitRunner,
@@ -802,6 +889,9 @@ let bulkCounter = 0;
  * One `ls-remote` for all of them: the branches grow with the issues the
  * runner has worked, and a call per branch made the cost of a run grow with
  * the queue's history.
+ *
+ * A read of the remote: safe to run at the same time as anything, and it
+ * writes nothing in the checkout.
  */
 async function readRemoteWorkBranches(
   git: GitRunner,
@@ -863,14 +953,20 @@ export async function branchesWithWork(
     // command line that does not grow with the queue, and a branch that was
     // deleted between the two calls is simply not fetched — a fetch that named
     // it would fail on it.
-    await git(
-      [
-        "fetch",
-        options.remote,
-        `+${headRef(options.base)}:${namespace}/base`,
-        `+${WORK_BRANCH_REF_GLOB}:${namespace}/branch/*`,
-      ],
-      { cwd },
+    //
+    // It is one at a time like every other fetch: the refs it writes are
+    // private, but it writes the checkout's `FETCH_HEAD` and updates the
+    // remote-tracking refs its refspecs map to.
+    await fetchAlone(() =>
+      git(
+        [
+          "fetch",
+          options.remote,
+          `+${headRef(options.base)}:${namespace}/base`,
+          `+${WORK_BRANCH_REF_GLOB}:${namespace}/branch/*`,
+        ],
+        { cwd },
+      ),
     );
     // The branches the base does not have are the branches that carry work:
     // their commits are not on the base, and GitHub would refuse a pull
@@ -908,7 +1004,12 @@ export async function branchesWithWork(
   return work;
 }
 
-/** Remove the refs of one bulk read, so the checkout is left as it was. */
+/**
+ * Remove the refs of one bulk read, so the checkout is left as it was.
+ *
+ * Safe to run at the same time as another clean-up: the refs are private to
+ * one bulk read, and git locks each of them alone.
+ */
 async function removeRefs(
   git: GitRunner,
   cwd: string,
@@ -929,6 +1030,28 @@ async function removeRefs(
   });
 }
 
+/**
+ * The fetches of this process, one after another.
+ *
+ * Every fetch of a checkout is **one at a time**. A fetch writes the
+ * checkout's `FETCH_HEAD` — one file for the whole checkout — and it updates
+ * the remote-tracking refs its refspec maps to, and git locks both. Two
+ * fetches at the same time make the second one fail with "cannot lock
+ * ref" or "cannot lock FETCH_HEAD", whichever it reaches first.
+ *
+ * The workers of one sweep share the checkout, so they take turns.
+ */
+let fetchQueue: Promise<unknown> = Promise.resolve();
+
+/** Run a fetch of the shared checkout on its own. */
+async function fetchAlone<T>(run: () => Promise<T>): Promise<T> {
+  const next = fetchQueue.then(run);
+  // The queue goes on even when a fetch fails: the next one is not this one's
+  // business.
+  fetchQueue = next.catch(() => {});
+  return next;
+}
+
 /** A counter that keeps the private fetch refs of one process apart. */
 let fetchCounter = 0;
 
@@ -939,6 +1062,10 @@ let fetchCounter = 0;
  * run in the checkout can be writing it, and removed again. That is what makes
  * it safe to read: `FETCH_HEAD` is shared by every run of the repository, and a
  * commit read from it may be a commit another run fetched.
+ *
+ * The fetch is one at a time all the same — it writes the same `FETCH_HEAD`
+ * every other fetch writes, and it updates the remote-tracking refs its
+ * refspec maps to.
  */
 export async function fetchCommit(
   git: GitRunner,
@@ -949,15 +1076,18 @@ export async function fetchCommit(
   // sweeps those up — clean them out when their number starts to matter.
   const name = `refs/afk/fetch-${process.pid}-${++fetchCounter}`;
   try {
-    await git(["fetch", options.remote, `+${options.ref}:${name}`], { cwd });
+    await fetchAlone(() =>
+      git(["fetch", options.remote, `+${options.ref}:${name}`], { cwd }),
+    );
+    // The read is a read: it names a private ref of this call, and it holds
+    // nothing but this call's own commit.
     return (await git(["rev-parse", name], { cwd })).trim();
   } finally {
+    // The private ref goes, and it is this call's own: two runs that clean up
+    // at the same time write two different refs.
     await git(["update-ref", "-d", name], { cwd }).catch(() => "");
   }
 }
-
-/** The fetches of this process, one after another. */
-let fetchQueue: Promise<unknown> = Promise.resolve();
 
 /**
  * Bring one ref's objects down from the remote.
@@ -973,11 +1103,7 @@ export async function fetchRef(
   cwd: string,
   options: { readonly remote: string; readonly ref: string },
 ): Promise<void> {
-  const fetch = fetchQueue.then(() => git(["fetch", options.remote, options.ref], { cwd }));
-  // The queue goes on even when a fetch fails: the next one is not this one's
-  // business.
-  fetchQueue = fetch.catch(() => {});
-  await fetch;
+  await fetchAlone(() => git(["fetch", options.remote, options.ref], { cwd }));
 }
 
 /**
@@ -1001,7 +1127,7 @@ export async function addWorktree(
     readonly baseSha: string;
   },
 ): Promise<void> {
-  await alone(() => addWorktreeNow(git, cwd, options));
+  await worktreeAlone(() => addWorktreeNow(git, cwd, options));
 }
 
 /**
@@ -1016,7 +1142,7 @@ export async function addDetachedWorktree(
   cwd: string,
   options: { readonly path: string; readonly sha: string },
 ): Promise<void> {
-  await alone(() =>
+  await worktreeAlone(() =>
     git(["worktree", "add", "--detach", options.path, options.sha], { cwd }),
   );
 }
@@ -1024,8 +1150,8 @@ export async function addDetachedWorktree(
 /** The worktree commands of this process, one after another. */
 let worktreeQueue: Promise<unknown> = Promise.resolve();
 
-/** Run a command of the checkout on its own. */
-async function alone<T>(run: () => Promise<T>): Promise<T> {
+/** Run a worktree command of the checkout on its own. */
+async function worktreeAlone<T>(run: () => Promise<T>): Promise<T> {
   const next = worktreeQueue.then(run);
   // The queue goes on even when a command fails: the next one is not this one's
   // business.
@@ -1088,7 +1214,7 @@ export async function removeWorktree(
   cwd: string,
   path: string,
 ): Promise<void> {
-  await alone(() => removeWorktreeNow(git, cwd, path));
+  await worktreeAlone(() => removeWorktreeNow(git, cwd, path));
 }
 
 async function removeWorktreeNow(
@@ -1155,7 +1281,17 @@ export function assertPushableRef(ref: string, issueNumber: number): void {
   }
 }
 
-/** Push one ref, if it is one the runner may push. */
+/**
+ * Push one ref, if it is one the runner may push.
+ *
+ * The push is **safe to run at the same time** as another push, and this is
+ * the reason: it writes one ref of the remote, and that ref belongs to its
+ * own issue — the claim is exclusive, so no two workers push the same one.
+ * It writes **nothing in the checkout**: a push does not move a local ref, it
+ * only reads the objects it sends. The hook it runs is the worktree's own,
+ * in the worktree's own directory, with the worktree's own build cache. The
+ * collection git may start on its own is off.
+ */
 export async function pushRef(
   git: GitRunner,
   cwd: string,
@@ -1206,160 +1342,4 @@ export async function pushWorkBranch(
     issueNumber: options.issueNumber,
     ...(options.verify === undefined ? {} : { verify: options.verify }),
   });
-}
-
-/**
- * What the restore of a worktree did.
- */
-export interface RestoredWorktree {
-  /** The worktree did not come back — why. */
-  readonly problem: string | null;
-  /** The worktree came back, but the repository's setup script did not run in it — why. */
-  readonly unprepared: string | null;
-}
-
-/**
- * Put the worktree back where the run had it, so a session whose working
- * directory is that path can read again.
- *
- * A worktree that comes back is **prepared**: the repository's own setup
- * script runs in it, the same way it runs in a worktree the runner makes. A
- * worktree without it holds tracked files only — no `.env`, no per-worktree
- * hooks, no private Gradle home — and the gates fail in a way that is not
- * about the work.
- *
- * A worktree that is still there is left as it is: the runner prepared it
- * when it made it, and preparing it again would be the runner's own step
- * done twice.
- */
-export async function restoreWorktree(
-  git: GitRunner,
-  options: {
-    readonly worktreePath: string;
-    readonly branch: string;
-    readonly remote: string;
-    readonly checkout: string;
-  },
-  /**
-   * The repository's own preparation, run in the worktree that came back.
-   *
-   * The caller runs it, so this module does not know which script the
-   * repository has. It answers with the reason it could not run, or null when
-   * it did.
-   */
-  prepare: (worktreePath: string) => Promise<string | null>,
-): Promise<RestoredWorktree> {
-  const targetPath = resolve(options.worktreePath);
-  const prune = async (): Promise<void> => {
-    try {
-      await git(["worktree", "prune"], { cwd: options.checkout });
-    } catch {
-      // The registration is still there. The `worktree add` below says "already
-      // exists", and the retry is what answers it.
-    }
-  };
-  let listError: string | null = null;
-  const registered = async (): Promise<boolean | null> => {
-    try {
-      const list = await git(["worktree", "list", "--porcelain"], { cwd: options.checkout });
-      listError = null;
-      return list.split("\n").some((line) => {
-        if (!line.startsWith("worktree ")) return false;
-        // Git prints absolute paths, so one comparison of resolved paths is
-        // the whole question.
-        return resolve(line.slice("worktree ".length).trim()) === targetPath;
-      });
-    } catch (failure) {
-      listError = errorMessage(failure);
-      return null;
-    }
-  };
-  /**
-   * Forget the worktree: the directory, and the registration of it.
-   *
-   * A directory git does not know makes `worktree add` refuse, and a
-   * registration git still knows makes it refuse too. Both have to go.
-   */
-  const reset = async (): Promise<void> => {
-    try {
-      await rm(targetPath, { recursive: true, force: true });
-    } catch {
-      // The directory is still there. The `worktree add` below says so, and
-      // the retry is what answers it.
-    }
-    await prune();
-  };
-  const add = async (args: readonly string[]): Promise<string | null> => {
-    try {
-      await git(args, { cwd: options.checkout });
-      return null;
-    } catch (failure) {
-      return errorMessage(failure);
-    }
-  };
-  const addBranch = (): Promise<string | null> =>
-    add(["worktree", "add", targetPath, options.branch]);
-  // A review-only run leaves a detached worktree and may have no local branch.
-  // On a single-branch clone the branch also has no remote-tracking ref, so put
-  // the chat on the fetched commit itself.
-  const addDetached = async (): Promise<string | null> => {
-    const tracking = `refs/remotes/${options.remote}/${options.branch}`;
-    await git(["fetch", options.remote, `${options.branch}:${tracking}`], {
-      cwd: options.checkout,
-    }).catch(() => {});
-    return add(["worktree", "add", "--detach", targetPath, tracking]);
-  };
-  /**
-   * The repository's own preparation, run from the worktree's own copy of the
-   * script — the script works on the checkout it lives in.
-   */
-  const prepared = async (): Promise<string | null> => await prepare(targetPath);
-
-  await prune();
-  if (existsSync(targetPath)) {
-    const isRegistered = await registered();
-    if (isRegistered === true) {
-      // It is still there, and the runner prepared it when it made it.
-      return { problem: null, unprepared: null };
-    }
-    if (isRegistered === null) {
-      // The checkout could not say whether the worktree is registered. Do not
-      // remove it: a directory git does not know would make `worktree add`
-      // refuse, but here we cannot tell, and removing it would destroy the
-      // run's work.
-      return {
-        problem: `could not tell whether the worktree is registered (${listError ?? "unknown error"}); left as it was`,
-        unprepared: null,
-      };
-    }
-    // A directory git does not know would make `worktree add` refuse.
-    await reset();
-  }
-  const first = await addBranch();
-  if (first === null) {
-    return { problem: null, unprepared: await prepared() };
-  }
-  if (first.includes("already exists")) {
-    // A registration prune missed: forget the tree and try once more.
-    await reset();
-    const second = await addBranch();
-    if (second === null) {
-      return { problem: null, unprepared: await prepared() };
-    }
-  }
-  const detached = await addDetached();
-  if (detached !== null) {
-    return { problem: detached, unprepared: null };
-  }
-  return { problem: null, unprepared: await prepared() };
-}
-
-/**
- * The message of a failure.
- *
- * The CLI has a copy of this, and it cannot be the same one: the CLI imports
- * this module, and an import that goes both ways is a cycle.
- */
-function errorMessage(failure: unknown): string {
-  return failure instanceof Error ? failure.message : String(failure);
 }

@@ -16,9 +16,12 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   CommandFailed,
   CommandTimedOut,
+  branchesWithWork,
   changedPaths,
   claimMessage,
   claimTagObject,
+  fetchCommit,
+  fetchRef,
   gitFailure,
   runGitWithTimeout,
   type GitRunner,
@@ -265,5 +268,62 @@ describe("the work in the tree", () => {
     } finally {
       await fixture.dispose();
     }
+  });
+});
+
+describe("the commands of the shared checkout", () => {
+  it("never starts a collection of its own", async () => {
+    const directory = await scratch();
+
+    // The collection git starts by itself is off. A second collection in a
+    // checkout that several workers share collides with the first, and git
+    // then fails the command that started it — a sweep that fails on a
+    // collection nobody asked for is a sweep that fails.
+    const gc = await runGitWithTimeout(["config", "--get", "gc.auto"], { cwd: directory }, 30_000);
+    const maintenance = await runGitWithTimeout(
+      ["config", "--get", "maintenance.auto"],
+      { cwd: directory },
+      30_000,
+    );
+
+    expect(gc.trim()).toBe("0");
+    expect(maintenance.trim()).toBe("0");
+  });
+
+  it("takes every fetch of one checkout one at a time", async () => {
+    let fetching = 0;
+    let overlapped = false;
+    const fake: GitRunner = async (args) => {
+      if (args[0] === "fetch") {
+        fetching += 1;
+        if (fetching > 1) {
+          overlapped = true;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        fetching -= 1;
+      }
+      if (args[0] === "ls-remote") {
+        return "0000000000000000000000000000000000000000\trefs/heads/agent/issue-7";
+      }
+      return "";
+    };
+
+    // Three fetches, three ways: the one that updates a remote-tracking ref,
+    // the one that fetches into a private ref, and the bulk one. Every fetch
+    // writes the checkout's `FETCH_HEAD`, so every fetch takes its turn.
+    await Promise.all([
+      fetchRef(fake, "/nonexistent", { remote: "origin", ref: "main" }),
+      fetchCommit(fake, "/nonexistent", {
+        remote: "origin",
+        ref: "refs/heads/agent/issue-7",
+      }),
+      branchesWithWork(fake, "/nonexistent", {
+        remote: "origin",
+        base: "main",
+        branches: ["agent/issue-7"],
+      }),
+    ]);
+
+    expect(overlapped).toBe(false);
   });
 });
