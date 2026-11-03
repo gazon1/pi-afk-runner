@@ -21,6 +21,9 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   createPackTool,
   insideWorktree,
+  packWithRepomix,
+  patternIsBounded,
+  patternsAreBounded,
   type PackDetails,
   type PackOutcome,
   type PackRequest,
@@ -301,5 +304,62 @@ describe("the worktree's own paths", () => {
     expect(insideWorktree("/tmp/worktree", "..")).toBe(false);
     expect(insideWorktree("/tmp/worktree", "../../etc")).toBe(false);
     expect(insideWorktree("/tmp/worktree", "/etc/passwd")).toBe(false);
+  });
+});
+
+describe("the patterns", () => {
+  it("takes the patterns an agent names", () => {
+    expect(patternsAreBounded("**/*.kt")).toBe(true);
+    expect(patternsAreBounded("**/*.kt,**/build/**")).toBe(true);
+    expect(patternIsBounded("{a,b}/**/*.kt")).toBe(true);
+  });
+
+  it("refuses a pattern that is too long", () => {
+    expect(patternIsBounded("a".repeat(600))).toBe(false);
+  });
+
+  it("refuses a pattern that names too many path segments", () => {
+    expect(patternIsBounded(`${"a/".repeat(80)}file.kt`)).toBe(false);
+  });
+
+  it("refuses a pattern whose braces hold too many alternatives", () => {
+    // The braces are the multiplication: each alternative is a pattern of its
+    // own, and every one of them is matched against every file.
+    expect(patternIsBounded("{a,b,c,d,e,f,g,h}")).toBe(false);
+  });
+
+  it("refuses a list that holds too many patterns", () => {
+    const many = Array.from({ length: 40 }, (_unused, index) => `**/*.${index}`).join(",");
+    expect(patternsAreBounded(many)).toBe(false);
+  });
+
+  it("refuses the pack, and the packer is never asked", async () => {
+    // The matcher never sees a pattern that asks for too much: the tool says
+    // no before the pack is made.
+    const { pack, calls } = packerOf(SMALL);
+    const tool = createPackTool({ cwd: await worktree(), pack });
+
+    const result = await tool.execute("call-1", {
+      path: "src",
+      include: "a".repeat(600),
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0]?.text).toContain("more than the matcher takes");
+    expect(calls).toHaveLength(0);
+  });
+
+  it("refuses an unbounded pattern in the packer itself", async () => {
+    // The packer is bounded on its own: it is the one that hands the patterns
+    // to the matcher.
+    await expect(
+      packWithRepomix({
+        cwd: await worktree(),
+        path: ".",
+        include: "a".repeat(600),
+        structureOnly: false,
+        maxTokens: 60_000,
+      }),
+    ).rejects.toThrow("more than the matcher takes");
   });
 });
