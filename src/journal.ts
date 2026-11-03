@@ -18,15 +18,50 @@ import { join } from "node:path";
 import type { SessionFactory } from "./session.js";
 
 /**
+ * The words that name what a run was about.
+ *
+ * They are written here, once. The subject's kind is one of them, and the two
+ * constructors below are the only way a caller names a kind — so a pipeline
+ * that writes a record cannot spell the subject a third way.
+ */
+const SUBJECT_WORDS = {
+  issue: "issue",
+  pullRequest: "pull request",
+} as const;
+
+/**
  * What a run was about: the issue's number, or the pull request's.
  *
  * It is the only thing a pipeline names. The journal's own shape — where it
  * lives, what it is called and how it starts — is decided here, so a third
  * pipeline writes the same shape without spelling it again.
+ *
+ * Its kinds are the words above, so the wording of the subject is written
+ * once — and the record and the journal both read it from here.
  */
 export type JournalSubject =
-  | { readonly kind: "issue"; readonly number: number }
-  | { readonly kind: "pull request"; readonly number: number };
+  | { readonly kind: typeof SUBJECT_WORDS.issue; readonly number: number }
+  | { readonly kind: typeof SUBJECT_WORDS.pullRequest; readonly number: number };
+
+/**
+ * The subject of a run about an issue.
+ *
+ * The number is the issue's. The kind is the word the record and the journal
+ * both read, and it is spelled in one place.
+ */
+export function issueSubject(number: number): JournalSubject {
+  return { kind: SUBJECT_WORDS.issue, number };
+}
+
+/**
+ * The subject of a run about a pull request.
+ *
+ * The number is the pull request's. The kind is the word the record and the
+ * journal both read, and it is spelled in one place.
+ */
+export function pullRequestSubject(number: number): JournalSubject {
+  return { kind: SUBJECT_WORDS.pullRequest, number };
+}
 
 /**
  * Where the journal of a run lives.
@@ -36,7 +71,7 @@ export type JournalSubject =
  * journal sits beside the run's record, in the same directory.
  */
 export function journalDirectory(root: string, subject: JournalSubject): string {
-  return subject.kind === "issue"
+  return subject.kind === SUBJECT_WORDS.issue
     ? join(root, "build", "diagnostics", `issue-${subject.number}`)
     : join(root, "build", "diagnostics", "merge", `pr-${subject.number}`);
 }
