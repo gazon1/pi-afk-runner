@@ -13,11 +13,13 @@
  * judged. The timer model makes that a delay of one tick, not a manual step.
  *
  * The record of each pull request lives under
- * `build/diagnostics/merge/pr-<N>/`, beside the work runs' own records.
+ * `build/diagnostics/merge/pr-<N>/`, beside the work runs' own records, and
+ * the journal of the merge — the session's lines, written while it works — is
+ * the file beside that record.
  */
 
 import { dirname, join } from "node:path";
-import { mkdir, rm } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 
 import { budgetShares } from "./budget.js";
 import { errorMessage } from "./cli.js";
@@ -47,6 +49,7 @@ import {
   checkoutPullRequestBranch,
   commitAll,
   headSha,
+  journalFactory,
   newRunId,
   readCiOutcome,
   reviewPullRequest,
@@ -299,6 +302,26 @@ async function mergeOne(
   const branch = candidate.headRefName;
   const state = { before: "", after: "", changed: false };
 
+  /**
+   * The journal of the merge: the session's lines, written while it works.
+   *
+   * The record is written when the merge ends — and a merge that is killed
+   * writes no record at all. The journal is the file beside it: it is there
+   * before the first session opens and grows as the lines come, so a merge
+   * that dies leaves behind what it was doing when it died.
+   */
+  const directory = join(
+    options.checkout,
+    "build",
+    "diagnostics",
+    "merge",
+    `pr-${candidate.number}`,
+  );
+  const journalPath = join(directory, `${runId}.log`);
+  await mkdir(directory, { recursive: true });
+  await writeFile(journalPath, `# run ${runId}, pull request ${candidate.number}\n`, "utf8");
+  const factory = journalFactory(options.session, journalPath);
+
   const steps: Step[] = [
     {
       name: "merge-worktree",
@@ -359,6 +382,7 @@ async function mergeOne(
           }
           await resolveWithAgent(
             options,
+            factory,
             worktreePath,
             budgetShares(remainingMs(), MERGE_GATE_COUNT).sessionMs,
           );
@@ -376,15 +400,9 @@ async function mergeOne(
         }
         return await verifyGate(
           options,
+          factory,
           worktreePath,
-          join(
-            options.checkout,
-            "build",
-            "diagnostics",
-            "merge",
-            `pr-${candidate.number}`,
-            `${runId}-gates.log`,
-          ),
+          join(directory, `${runId}-gates.log`),
           remainingMs,
         );
       },
@@ -419,7 +437,7 @@ async function mergeOne(
           repo: options.repo,
           pullRequest: candidate.number,
           cwd: worktreePath,
-          factory: options.session,
+          factory,
           gh: options.gh,
           run: options.run,
           git: options.git,
@@ -475,13 +493,7 @@ async function mergeOne(
       runId,
       root: options.checkout,
       steps,
-      directory: join(
-        options.checkout,
-        "build",
-        "diagnostics",
-        "merge",
-        `pr-${candidate.number}`,
-      ),
+      directory,
       heading: `# Merge pull request ${candidate.number}`,
       subject: "pull request",
       ...(options.poolEvents === undefined ? {} : { pool: options.poolEvents }),
@@ -535,6 +547,7 @@ async function mergeOne(
  */
 async function verifyGate(
   options: MergeOptions,
+  factory: SessionFactory,
   worktreePath: string,
   outputFile: string,
   remainingMs: () => number,
@@ -598,6 +611,7 @@ async function verifyGate(
     ].join("\n");
     await resolveWithAgent(
       options,
+      factory,
       worktreePath,
       budgetShares(remainingMs(), MERGE_GATE_COUNT).sessionMs,
       prompt,
@@ -637,11 +651,12 @@ async function verifyGate(
  */
 async function resolveWithAgent(
   options: MergeOptions,
+  factory: SessionFactory,
   worktreePath: string,
   deadlineMs: number,
   prompt: string = MERGE_PROMPT,
 ): Promise<void> {
-  const session = await options.session({
+  const session = await factory({
     cwd: worktreePath,
     systemPromptSections: { [UNTRUSTED_INPUT_SECTION]: UNTRUSTED_INPUT_RULE },
   });

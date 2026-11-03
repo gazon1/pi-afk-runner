@@ -335,7 +335,9 @@ agent resolves the worktree, the runner runs the repository's gate (`./check.sh`
 fresh review of the new diff. That pull request is **not** merged in the same run: it lands on the
 next one, once CI has judged the new commit. A merge never lands a commit CI has not seen.
 
-Each pull request's record goes under `build/diagnostics/merge/pr-<N>/`. A failed step is reported
+Each pull request's record goes under `build/diagnostics/merge/pr-<N>/`, and the journal of the merge
+— the session's lines, written while it works — is the file beside it: a merge that is killed leaves
+the journal behind, and it says what the merge was doing when it died. A failed step is reported
 with its name and the pull request stays open; a skipped pull request is not a failure. A merge takes
 its own lock — `merge.lock` — and not the work lock, so a merge and the work runs do not wait for each
 other.

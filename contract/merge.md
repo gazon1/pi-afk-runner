@@ -56,6 +56,9 @@ pull request stays open.
 - Push `agent/issue-<N>`, and nothing else.
 - Run the repository's gate, `./check.sh`, on a branch that moved.
 - Write its record under `build/diagnostics/merge/pr-<N>/`.
+- Write its journal — the session's lines, written while it works — beside that record, under
+  `build/diagnostics/merge/pr-<N>/`. A merge that is killed leaves the file behind, and the file
+  says what it was doing when it died.
 
 ## What it must never do
 
