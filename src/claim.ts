@@ -19,8 +19,13 @@
  * message, so that a second creation is rejected rather than absorbed as
  * "everything up-to-date".
  *
- * When the push is rejected, the runner **removes the label it just added** and
- * moves on: it lost the race, and it must not leave a claim behind.
+ * When the push is rejected, the runner reads the claim ref on the remote and
+ * decides from it. The ref is the claim, and the label is the claim's label:
+ * when the ref is not there, the label this runner added comes off — a claim
+ * nobody is working is an issue nobody can take; when the ref is there, the
+ * label stays, because it belongs to whoever holds the ref, and a runner that
+ * lost the race and took the label off would leave the winner's issue looking
+ * free while the winner is working on it.
  */
 
 import { randomUUID } from "node:crypto";
@@ -37,6 +42,7 @@ import {
   headRef,
   issueWorktreePath,
   pushClaim,
+  readClaimObject,
   readRemoteSha,
   removeWorktree,
   workBranch,
@@ -82,8 +88,8 @@ export interface ClaimOptions {
  *
  * The label goes on first, so the issue's age starts. Then the base commit is
  * read, the claim object is written, and it is pushed. A rejected push means
- * another runner got there first: the label comes off again and the issue is
- * somebody else's.
+ * the claim did not happen — and the label is settled by the remote's claim
+ * ref, not by this runner: see `settleClaimLabel`.
  */
 export async function claimIssue(options: ClaimOptions): Promise<ClaimOutcome> {
   const { issue, repo, remote, baseBranch, cwd, git, gh } = options;
@@ -102,6 +108,11 @@ export async function claimIssue(options: ClaimOptions): Promise<ClaimOutcome> {
     CLAIM_LABEL,
   ]);
 
+  // The claim object this runner wrote, when it gets that far. The remote's
+  // ref is compared against it: a ref that holds it is this runner's own
+  // claim, and a ref that holds another object is another runner's.
+  let claimObject: string | undefined;
+
   try {
     const base = await readRemoteSha(git, cwd, { remote, ref: headRef(baseBranch) });
     if (base === null) {
@@ -115,51 +126,171 @@ export async function claimIssue(options: ClaimOptions): Promise<ClaimOutcome> {
     // claim names and the commit that is local cannot disagree.
     await fetchRef(git, cwd, { remote, ref: base });
 
-    const objectId = await createClaimObject(git, cwd, {
+    claimObject = await createClaimObject(git, cwd, {
       baseSha: base,
       issueNumber: issue.number,
       nonce,
       timestampSeconds: Math.floor(now.getTime() / 1000),
     });
 
-    await pushClaim(git, cwd, { remote, issueNumber: issue.number, objectId });
+    await pushClaim(git, cwd, { remote, issueNumber: issue.number, objectId: claimObject });
 
     return { claimed: true, base, ref: claimRef(issue.number) };
   } catch (failure) {
-    // It lost the race, or something else went wrong. Either way it must not
-    // leave a label behind: a claim nobody is working is an issue nobody can
-    // take.
-    //
-    // The release can fail too — a network error while taking the label off.
-    // When it does, the **original** cause is the one worth reporting: "the
-    // claim was rejected" says what happened, and "gh issue edit failed" does
-    // not.
-    let releaseError: string | null = null;
-    try {
-      await removeClaimLabel(gh, repo, issue.number);
-    } catch (releaseFailure) {
-      releaseError =
-        releaseFailure instanceof Error ? releaseFailure.message : String(releaseFailure);
-    }
+    // The label is the claim's label, and the claim is whoever holds the ref.
+    // So the ref is read, and the label follows it.
+    const label = await settleClaimLabel({
+      git,
+      gh,
+      cwd,
+      repo,
+      remote,
+      issueNumber: issue.number,
+      ...(claimObject === undefined ? {} : { objectId: claimObject }),
+    });
 
     if (failure instanceof CommandFailed) {
       return {
         claimed: false,
         reason:
           `the claim on issue ${issue.number} was rejected: ${failure.stderr.trim()}` +
-          (releaseError === null
-            ? ""
-            : ` — and the claim label could not be taken off: ${releaseError}`),
+          ` — and ${label.sentence}`,
       };
     }
-    if (releaseError !== null) {
+    if (label.failure !== null) {
       throw new Error(
         `${failure instanceof Error ? failure.message : String(failure)} ` +
-          `— and the claim label could not be taken off: ${releaseError}`,
+          `— and the claim label could not be taken off: ${label.failure}`,
+        { cause: failure },
+      );
+    }
+    if (!label.removed) {
+      // The label stayed on, and that is worth saying: the issue looks
+      // claimed, and it is — by whoever holds the ref.
+      throw new Error(
+        `${failure instanceof Error ? failure.message : String(failure)} — and ${label.sentence}`,
         { cause: failure },
       );
     }
     throw failure;
+  }
+}
+
+/**
+ * Who holds the claim on an issue, as the remote's ref says.
+ *
+ * - `ours`: the ref holds this runner's own claim object — the claim landed.
+ * - `theirs`: the ref holds another claim object — another runner won the race.
+ * - `none`: the ref is not on the remote — nobody holds the claim.
+ */
+type ClaimHolder = "ours" | "theirs" | "none";
+
+/**
+ * Read who holds the claim from the remote's claim ref.
+ *
+ * The ref is the claim. The label cannot be, because adding a label is
+ * idempotent: two runners both "win" it, and only the ref tells them apart.
+ */
+async function readClaimHolder(
+  git: GitRunner,
+  cwd: string,
+  options: {
+    readonly remote: string;
+    readonly issueNumber: number;
+    /** The claim object this runner wrote, when it got that far. */
+    readonly objectId?: string;
+  },
+): Promise<ClaimHolder> {
+  const remote = await readClaimObject(git, cwd, {
+    remote: options.remote,
+    issueNumber: options.issueNumber,
+  });
+  if (remote === null) {
+    return "none";
+  }
+  return remote === options.objectId ? "ours" : "theirs";
+}
+
+/** What became of the claim label after a claim that did not happen. */
+interface LabelOutcome {
+  /** Whether the label came off the issue. */
+  readonly removed: boolean;
+  /** What happened to the label, in a sentence a reader can act on. */
+  readonly sentence: string;
+  /** Why the label could not be taken off, when it could not. */
+  readonly failure: string | null;
+}
+
+/**
+ * Settle the claim label after a claim that did not happen.
+ *
+ * The label is not this runner's to remove: it is the claim's, and the claim
+ * is whoever holds the ref. So the ref is read, and the label follows it:
+ *
+ * - **the ref is not on the remote**: nobody holds the claim, and the label
+ *   this runner added comes off — a claim nobody is working is an issue nobody
+ *   can take;
+ * - **the ref holds this runner's own claim object**: the claim is its own, and
+ *   the label stays;
+ * - **the ref holds another claim object**: another runner won the race, and
+ *   the label is theirs — taking it off would leave their issue looking free
+ *   while they are working on it, and the next runner would be offered an
+ *   issue it cannot claim.
+ *
+ * When the ref cannot be read, the label stays: it is not known to be
+ * anybody's to remove.
+ */
+async function settleClaimLabel(options: {
+  readonly git: GitRunner;
+  readonly gh: GhRunner;
+  readonly cwd: string;
+  readonly repo: string;
+  readonly remote: string;
+  readonly issueNumber: number;
+  /** The claim object this runner wrote, when it got that far. */
+  readonly objectId?: string;
+}): Promise<LabelOutcome> {
+  let holder: ClaimHolder;
+  try {
+    holder = await readClaimHolder(options.git, options.cwd, {
+      remote: options.remote,
+      issueNumber: options.issueNumber,
+      ...(options.objectId === undefined ? {} : { objectId: options.objectId }),
+    });
+  } catch (failure) {
+    const detail = failure instanceof Error ? failure.message : String(failure);
+    return {
+      removed: false,
+      failure: null,
+      sentence: `the claim on the remote could not be read, so the claim label was left on: ${detail}`,
+    };
+  }
+
+  if (holder === "ours") {
+    return {
+      removed: false,
+      failure: null,
+      sentence: "the claim landed, so the claim label was left on",
+    };
+  }
+  if (holder === "theirs") {
+    return {
+      removed: false,
+      failure: null,
+      sentence: "another runner holds the claim, so the claim label was left on",
+    };
+  }
+
+  try {
+    await removeClaimLabel(options.gh, options.repo, options.issueNumber);
+    return { removed: true, failure: null, sentence: "the claim label was taken off" };
+  } catch (failure) {
+    const detail = failure instanceof Error ? failure.message : String(failure);
+    return {
+      removed: false,
+      failure: detail,
+      sentence: `the claim label could not be taken off: ${detail}`,
+    };
   }
 }
 
@@ -190,7 +321,9 @@ export async function removeClaimLabel(
  * no-op.
  *
  * The label is left alone. It is already on — it is the marker of a claim — and
- * adding it again is idempotent, which is exactly what a re-claim needs.
+ * adding it again is idempotent, which is exactly what a re-claim needs. A
+ * reclaim that loses the race to another runner leaves it on too: the label is
+ * the claim's, and the claim is then the runner that won.
  *
  * The stale **branch** goes too, when there is one: the work is redone rather
  * than resumed, because the session that made it is gone with the process that

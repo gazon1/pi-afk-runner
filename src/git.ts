@@ -758,6 +758,29 @@ export async function readClaimBase(
 }
 
 /**
+ * The claim object the remote holds for an issue, or null when it holds none.
+ *
+ * The claim is an annotated tag, so the remote lists it twice: the tag object,
+ * and the commit it peels to. The **tag object** is the claim — it carries the
+ * nonce — and it is what tells two claims apart: two runners that took the same
+ * issue from the same base agree on the commit and differ on the object.
+ */
+export async function readClaimObject(
+  git: GitRunner,
+  cwd: string,
+  options: { readonly remote: string; readonly issueNumber: number },
+): Promise<string | null> {
+  const output = await git(["ls-remote", options.remote, claimRef(options.issueNumber)], { cwd });
+  for (const line of output.trim().split("\n")) {
+    const [sha, ref] = line.trim().split(/\s+/);
+    if (ref === claimRef(options.issueNumber)) {
+      return sha ?? null;
+    }
+  }
+  return null;
+}
+
+/**
  * The pattern that names every work branch on the remote.
  *
  * The runner's branches are `agent/issue-<N>` (see `workBranch`), and this is
