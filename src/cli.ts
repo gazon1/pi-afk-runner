@@ -46,7 +46,7 @@ import {
   type Pool,
   type PoolState,
 } from "./pool.js";
-import { PoolSession, type PoolHost } from "./pool-session.js";
+import { PoolSession, poolEventChannel, type PoolHost } from "./pool-session.js";
 import { proxyFromEnvironment } from "./proxy.js";
 import {
   mergeReviewedPullRequests,
@@ -995,10 +995,15 @@ export async function main(
       state: poolState,
       reference: chosen.reference,
       proxyConfigured,
-      onEvent: (line) => {
-        poolEvents.push(line);
-        say(line);
-      },
+      onEvent: poolEventChannel({
+        pool: (line) => {
+          poolEvents.push(line);
+          say(line);
+        },
+        // The session's own channel is the journal the run writes: the pool's
+        // lines are part of the run's own stream, not a separate report.
+        session: options,
+      }),
     });
   };
 
