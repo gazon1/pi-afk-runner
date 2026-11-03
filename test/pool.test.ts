@@ -30,7 +30,7 @@ import {
   type ModelCatalogue,
   type Pool,
 } from "../src/pool.js";
-import { PoolSession, poolEventChannel, type PoolHost } from "../src/pool-session.js";
+import { PoolSession, createPoolSession, type PoolHost } from "../src/pool-session.js";
 import { useProxy } from "../src/proxy.js";
 import { journalFactory } from "../src/journal.js";
 import type { TurnMessage } from "../src/session.js";
@@ -526,7 +526,9 @@ describe("a session in the pool", () => {
 
   it("says_its_lines_to_the_journal_the_run_writes", async () => {
     // The pool's lines are the run's lines: a model switch the journal does
-    // not show is a switch the reader of the journal cannot see.
+    // not show is a switch the reader of the journal cannot see. The session
+    // is built the way the command line builds it, so the journal holds the
+    // pool's lines for the same reason in a run and here.
     const directory = await mkdtemp(join(tmpdir(), "afk-pool-journal-"));
     const journal = join(directory, "run.log");
     try {
@@ -534,7 +536,7 @@ describe("a session in the pool", () => {
       const host = new FakeHost(["429 RATE_LIMITED", null]);
       const said: string[] = [];
       const factory = journalFactory(async (sessionOptions) => {
-        const session = new PoolSession({
+        const session = createPoolSession({
           host,
           catalogue,
           pool: parsePool(
@@ -543,12 +545,10 @@ describe("a session in the pool", () => {
           reference: "fake/beam",
           state: newPoolState(),
           proxyConfigured: true,
-          onEvent: poolEventChannel({
-            pool: (line) => {
-              said.push(line);
-            },
-            session: sessionOptions,
-          }),
+          poolEvent: (line) => {
+            said.push(line);
+          },
+          session: sessionOptions,
         });
         // The session's own line, between the pool's two.
         sessionOptions.onEvent?.("the agent is working");

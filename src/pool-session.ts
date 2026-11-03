@@ -367,6 +367,17 @@ export class PoolSession implements AgentSession {
 }
 
 /**
+ * The session's own channel — the journal's writer is installed on it.
+ *
+ * The pool's lines travel on it, next to the session's own lines, so a reader
+ * of the journal sees them in the order the run happened.
+ */
+export interface SessionChannel {
+  /** Told what the session is doing, as it does it. */
+  readonly onEvent?: ((line: string) => void) | undefined;
+}
+
+/**
  * The pool's channel, and the session's own — composed.
  *
  * The pool's lines are the run's lines: the model a session starts on, the
@@ -385,12 +396,57 @@ export function poolEventChannel(options: {
    * The session's own channel, and not a copy of it: the line is written when
    * the pool says it, so the journal reads in the order the run happened.
    */
-  readonly session?:
-    | { readonly onEvent?: ((line: string) => void) | undefined }
-    | undefined;
+  readonly session: SessionChannel;
 }): (line: string) => void {
   return (line) => {
     options.pool(line);
-    options.session?.onEvent?.(line);
+    options.session.onEvent?.(line);
   };
+}
+
+/**
+ * The pooled session the run drives.
+ *
+ * One rule, one place: the pool's lines go to the pool's own channel and to
+ * the session's own channel, and this is where the two are joined. The command
+ * line builds the session this way, and so does the suite — so the journal the
+ * run writes holds the pool's lines for the same reason it holds them in a
+ * run.
+ *
+ * The session's own options are not optional here: without them the pool's
+ * lines would reach the command line and stop there, and the journal would
+ * lose the model switches without anything failing.
+ */
+export function createPoolSession(options: {
+  /** The session the pool drives — the engine's own. */
+  readonly host: PoolHost;
+  /** What the runner knows about the models it may use. */
+  readonly catalogue: ModelCatalogue;
+  /** The pool the session draws its models from. */
+  readonly pool: Pool;
+  /** What the pool remembers for the whole run. */
+  readonly state: PoolState;
+  /** The model the session starts on. */
+  readonly reference: string;
+  /** Whether the host has a proxy of its own. */
+  readonly proxyConfigured: boolean;
+  /** The pool's own channel — the command line and the record. */
+  readonly poolEvent: (line: string) => void;
+  /**
+   * The session's own options — its event channel is the journal.
+   */
+  readonly session: SessionChannel;
+}): PoolSession {
+  return new PoolSession({
+    host: options.host,
+    catalogue: options.catalogue,
+    pool: options.pool,
+    state: options.state,
+    reference: options.reference,
+    proxyConfigured: options.proxyConfigured,
+    onEvent: poolEventChannel({
+      pool: options.poolEvent,
+      session: options.session,
+    }),
+  });
 }

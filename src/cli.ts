@@ -46,7 +46,7 @@ import {
   type Pool,
   type PoolState,
 } from "./pool.js";
-import { PoolSession, poolEventChannel, type PoolHost } from "./pool-session.js";
+import { createPoolSession, type PoolHost } from "./pool-session.js";
 import { proxyFromEnvironment } from "./proxy.js";
 import {
   mergeReviewedPullRequests,
@@ -1025,22 +1025,20 @@ export async function main(
       setModel: (reference) => move(reference),
     };
     const { mastraCatalogue } = await import("./mastra/model.js");
-    return new PoolSession({
+    return createPoolSession({
       host,
       catalogue: mastraCatalogue(),
       pool: pool as Pool,
       state: poolState,
       reference: chosen.reference,
       proxyConfigured,
-      onEvent: poolEventChannel({
-        pool: (line) => {
-          poolEvents.push(line);
-          say(line);
-        },
-        // The session's own channel is the journal the run writes: the pool's
-        // lines are part of the run's own stream, not a separate report.
-        session: options,
-      }),
+      poolEvent: (line) => {
+        poolEvents.push(line);
+        say(line);
+      },
+      // The session's own channel is the journal the run writes: the pool's
+      // lines are part of the run's own stream, not a separate report.
+      session: options,
     });
   };
 
