@@ -21,6 +21,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   createPackTool,
   insideWorktree,
+  type PackDetails,
   type PackOutcome,
   type PackRequest,
 } from "../src/packing.js";
@@ -103,6 +104,42 @@ describe("the pack tool", () => {
     expect(calls[0]?.include).toBe("**/*.kt");
     expect(calls[0]?.ignore).toBe("**/build/**");
     expect(calls[0]?.structureOnly).toBe(true);
+  });
+
+  it("tells the run what it packed", async () => {
+    const { pack } = packerOf(SMALL);
+    const packs: PackDetails[] = [];
+    const tool = createPackTool({
+      cwd: await worktree(),
+      pack,
+      onPack: (details) => packs.push(details),
+    });
+
+    await tool.execute("call-1", { path: "src" });
+
+    // What the run can say about the pack: the path it packed, the files it
+    // holds and what it costs the model.
+    expect(packs).toHaveLength(1);
+    expect(packs[0]?.packed).toBe(true);
+    expect(packs[0]?.path).toBe("src");
+    expect(packs[0]?.files).toBe(1);
+    expect(packs[0]?.tokens).toBe(42);
+  });
+
+  it("does not report a refusal as a pack", async () => {
+    const { pack } = packerOf(SMALL);
+    const packs: PackDetails[] = [];
+    const tool = createPackTool({
+      cwd: await worktree(),
+      pack,
+      onPack: (details) => packs.push(details),
+    });
+
+    const result = await tool.execute("call-1", { path: "../.." });
+
+    // Nothing was packed, so there is no pack to report.
+    expect(result.isError).toBe(true);
+    expect(packs).toHaveLength(0);
   });
 
   it("refuses a path that climbs out of the worktree", async () => {

@@ -49,7 +49,7 @@ import {
   type ScopeSubtask,
 } from "./decisions/index.js";
 import { createLeftoverTool, normaliseTitle } from "./leftovers.js";
-import { createPackTool } from "./packing.js";
+import { createPackTool, type PackDetails } from "./packing.js";
 import { type ToolSpec } from "./tools.js";
 import {
   cutOffError,
@@ -980,6 +980,14 @@ export async function startAgent(options: {
    * sees them: it reports what the events said, and the run adds it up.
    */
   readonly onUsage?: (usage: RunUsage) => void;
+  /**
+   * Told what a pack holds, when the agent made one.
+   *
+   * The pack's own details are what a run can say about the pack — the path
+   * it packed, the files it holds and what it costs the model — and the run's
+   * record is where that belongs.
+   */
+  readonly onPack?: (details: PackDetails) => void;
 }): Promise<WorkSessionResult> {
   const prompts = await readNodePrompts(options.promptsDirectory ?? promptsDirectory());
   const gh = options.gh ?? runGh;
@@ -1022,7 +1030,10 @@ export async function startAgent(options: {
       createIssueDecisionTool(triage),
       createScopeDecisionTool(scope),
       createLeftoverTool({ repo: options.repo, gh }),
-      createPackTool({ cwd: options.cwd }),
+      createPackTool({
+        cwd: options.cwd,
+        ...(options.onPack === undefined ? {} : { onPack: options.onPack }),
+      }),
       ...(options.batchRelated === true
         ? [createRelatedDecisionTool(related)]
         : []),

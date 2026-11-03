@@ -15,6 +15,7 @@ for the rule that the copies follow.
 
 | Decision | What it settles |
 |---|---|
+| `2026-11-09-the-runs-record-names-the-pack.md` | the run's record names the pack: the path that was packed, the files it holds and the tokens it cost — and what a real run showed, that a pack is good for an area of the repository and not for the repository |
 | `2026-11-08-the-suite-list-is-the-policy.md` | the suites are the policy's list: one entry per runner, and the rule that reads it names none of them — the list of the suites **extended** from `2026-11-05-a-run-gates-nothing-and-builds-nothing.md` |
 | `2026-11-08-the-issue-travels-with-the-turn.md` | the issue's data travels with the first turn, above its instruction: no intake turn, no intake sub-workflow, and the data read once — **the intake clause replaced** in `2026-11-06-the-graph-runs-on-the-mastra-workflow-engine.md` |
 | `2026-11-08-the-session-keeps-its-memory.md` | the session keeps its memory: 400 messages and 150000 tokens, so a long run does not drop the contract it is judged against |
