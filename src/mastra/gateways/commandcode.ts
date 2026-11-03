@@ -87,8 +87,8 @@ export class CommandCodeGateway extends MastraModelGateway {
       // Stash reasoning_content from the response for the next turn.
       try {
         const clone = (res as any).clone();
-        const json = (await clone.json()) as { choices?: Array<{ message?: { reasoning_content?: string } }> };
-        const rc = json.choices?.[0]?.message?.reasoning_content;
+        const json = (await clone.json()) as { choices?: Array<{ message?: { reasoning_content?: string; reasoning?: string } }> };
+        const rc = json.choices?.[0]?.message?.reasoning_content ?? json.choices?.[0]?.message?.reasoning;
         if (typeof rc === "string" && rc !== "") {
           reasoningByTurn.push(rc);
         }
