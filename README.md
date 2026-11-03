@@ -88,7 +88,12 @@ The work session runs in a **Mastra agent**, and it carries:
   tree and the files' contents — so it reads an area of the repository in one call instead of
   file by file. The pack is [repomix](https://github.com/yamadashy/repomix), and it is the
   runner's own: the repository's `repomix.config.*` is never loaded, the files the guard
-  refuses are not in the pack, and nothing is fetched from the network.
+  refuses are not in the pack, and nothing is fetched from the network. The pack holds the
+  files as they are — no comment is stripped and no file is reduced to its structure — and the
+  twenty-four megabytes of tree-sitter grammars repomix carries for that reduction are dropped
+  by the install: the target repository is written in Kotlin, and repomix has no grammar for
+  it. The decision is in
+  [docs/decisions/2026-11-09-the-pack-drops-the-grammars-it-cannot-use.md](docs/decisions/2026-11-09-the-pack-drops-the-grammars-it-cannot-use.md).
 
 Two things are **not** packages, on purpose. The **guardrail** — the rule that an issue body is
 data — is a string in the code, because a rule read from disk can vanish without a word. And the
