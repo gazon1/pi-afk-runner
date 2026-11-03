@@ -36,6 +36,7 @@ import { budgetShares } from "./budget.js";
 import { isProtectedPath } from "./guard.js";
 import { GateFailed, runGates } from "./gates.js";
 import {
+  issueSubject,
   journalDirectory,
   journalFactory,
   journalFileName,
@@ -1418,7 +1419,7 @@ function tail(text: string, limit: number): { readonly text: string; readonly tr
  * sits beside the journal, so it lives where the journal lives.
  */
 export function recordDirectory(root: string, issue: number): string {
-  return journalDirectory(root, { kind: "issue", number: issue });
+  return journalDirectory(root, issueSubject(issue));
 }
 
 /**
@@ -1453,17 +1454,20 @@ function renderRecord(options: {
   readonly steps: readonly StepRecord[];
   /** The record's first line, when it is not an issue's. */
   readonly heading?: string;
-  /** What the number names — `issue` by default, `pull request` for a merge. */
-  readonly subject?: string;
+  /** What the run was about — the issue by default, a pull request for a merge. */
+  readonly subject?: JournalSubject;
   /** What the model pool did during the run. */
   readonly pool?: readonly string[];
   /** Whether this run wrote a journal beside the record. */
   readonly hasJournal?: boolean;
 }): string {
+  // The subject says what the run was about, and the record reads both the
+  // word and the number from it: the word is spelled in one place.
+  const subject = options.subject ?? issueSubject(options.issue);
   const lines = [
     options.heading ?? `# Run issue-${options.issue}`,
     "",
-    `- ${options.subject ?? "issue"}: ${options.issue}`,
+    `- ${subject.kind}: ${subject.number}`,
     `- run: ${options.runId}`,
     `- runner: ${RUNNER_STAMP}`,
     `- outcome: ${options.outcome}`,
@@ -1523,7 +1527,8 @@ export async function writeRunRecord(options: {
   /** Where the record goes, when it is not under the issue's own directory. */
   readonly directory?: string;
   readonly heading?: string;
-  readonly subject?: string;
+  /** What the run was about — the issue by default, a pull request for a merge. */
+  readonly subject?: JournalSubject;
   /** What the model pool did during the run. */
   readonly pool?: readonly string[];
   /** Whether this run wrote a journal beside the record. */
@@ -1603,7 +1608,8 @@ export async function runSteps(options: {
   /** Where the record goes, when it is not under the issue's own directory. */
   readonly directory?: string;
   readonly heading?: string;
-  readonly subject?: string;
+  /** What the run was about — the issue by default, a pull request for a merge. */
+  readonly subject?: JournalSubject;
   /** What the model pool did during the run. */
   readonly pool?: readonly string[];
   /** Whether this run wrote a journal beside the record. */
@@ -2660,7 +2666,7 @@ async function runPlan(
    * start of the run and grows while the work goes on, so a run that dies
    * leaves behind what it was doing when it died.
    */
-  const journalSubject: JournalSubject = { kind: "issue", number: issue.number };
+  const journalSubject = issueSubject(issue.number);
   const journalFile = journalPath(
     recordDirectory(options.checkout, issue.number),
     runId,

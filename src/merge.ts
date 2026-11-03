@@ -37,7 +37,7 @@ import {
   journalFactory,
   journalHeader,
   journalPath,
-  type JournalSubject,
+  pullRequestSubject,
 } from "./journal.js";
 import {
   CommandFailed,
@@ -316,7 +316,7 @@ async function mergeOne(
    * before the first session opens and grows as the lines come, so a merge
    * that dies leaves behind what it was doing when it died.
    */
-  const subject: JournalSubject = { kind: "pull request", number: candidate.number };
+  const subject = pullRequestSubject(candidate.number);
   const directory = journalDirectory(options.checkout, subject);
   const journalFile = journalPath(directory, runId);
   await mkdir(directory, { recursive: true });
@@ -496,7 +496,7 @@ async function mergeOne(
       steps,
       directory,
       heading: `# Merge pull request ${candidate.number}`,
-      subject: "pull request",
+      subject,
       ...(options.poolEvents === undefined ? {} : { pool: options.poolEvents }),
       ...(options.onStep === undefined ? {} : { onStep: options.onStep }),
       ...(options.onStepStart === undefined ? {} : { onStepStart: options.onStepStart }),
