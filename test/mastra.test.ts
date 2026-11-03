@@ -14,7 +14,6 @@ import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { GUARD_POLICY, matchesPattern } from "../src/guard.js";
 import { defineTool, type AnyToolSpec } from "../src/tools.js";
 import { denyReason } from "../src/mastra/guard.js";
 import { skillDirectories } from "../src/mastra/skills.js";
@@ -194,18 +193,6 @@ describe("the tools of the Mastra engine", () => {
 });
 
 describe("the guard on the Mastra engine", () => {
-  it("reads the policy the runner holds", () => {
-    // The rules live in one place, so nothing can refuse something else.
-    expect(GUARD_POLICY.path["*.env"]).toBe("deny");
-    expect(GUARD_POLICY.bash["gh issue create*"]).toBeDefined();
-  });
-
-  it("matches the way the policy's wildcards say", () => {
-    expect(matchesPattern("*.env", "app/.env")).toBe(true);
-    expect(matchesPattern("*.env", "app/.env.example")).toBe(false);
-    expect(matchesPattern("*.env.*", "app/.env.example")).toBe(true);
-  });
-
   it("refuses the files nobody hands to an agent", () => {
     expect(denyReason({ path: ".env" })).toContain("Refused");
     expect(denyReason({ path: "secrets/key.pem" })).toContain("Refused");

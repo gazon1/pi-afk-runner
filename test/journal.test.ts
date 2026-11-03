@@ -1,11 +1,8 @@
 /**
- * The run's log — the lines the runner prints while the agent works — and the
- * run's journal — the file they are written to.
+ * The run's journal — the file the run's lines are written to.
  *
- * Under systemd the output is not a TTY, so chalk emits no colour and every
- * line is the same shape on the page. The marker is then the only thing that
- * says whether a line came from the agent or from the runner, and the tool
- * calls have to carry one too.
+ * The lines themselves — the log the engine projects — are in
+ * `test/mastra-log.test.ts`.
  *
  * The file the lines go to has a shape too — where it lives, what it is called
  * and how it starts — and one place says it, so a reader who learns it from
@@ -16,7 +13,6 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import chalk from "chalk";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -28,65 +24,7 @@ import {
   sweepJournalDirectory,
   sweepJournalHeader,
 } from "../src/journal.js";
-import { logTurn, refusalLine, type TurnAnswer } from "../src/mastra/log.js";
-import type { AgentSession } from "../src/session.js";
-
-/** A turn the agent answered with: one tool call and one spoken line. */
-function answerWith(call: unknown, text: string): TurnAnswer {
-  return {
-    toolCalls: call === undefined ? [] : [{ payload: { toolName: "agent_test", args: call } }],
-    text,
-  } as unknown as TurnAnswer;
-}
-
-describe("the lines the runner prints", () => {
-  it("marks the agent's speech, and drops the blank lines", () => {
-    const lines: string[] = [];
-    logTurn(
-      answerWith(undefined, "Running the gates.\n\nThe gates are green."),
-      (line) => lines.push(line),
-    );
-    expect(lines).toEqual(["· Running the gates.", "· The gates are green."]);
-  });
-
-  it("marks the tool calls, and says which command they ran", () => {
-    const lines: string[] = [];
-    const level = chalk.level;
-    try {
-      chalk.level = 0;
-      logTurn(
-        answerWith({ command: "npm run check" }, "done"),
-        (line) => lines.push(line),
-      );
-      expect(lines[0]).toBe("  → agent_test: npm run check");
-    } finally {
-      chalk.level = level;
-    }
-  });
-
-  it("says that a call was refused, and only that", () => {
-    // A refusal is over; a reader has to see that it is over.
-    expect(refusalLine("Refused: pytest -q. Do not run the checks.")).toBe(
-      "  ↳ Refused: pytest -q. Do not run the checks.",
-    );
-    expect(refusalLine("the leftover is filed")).toBeUndefined();
-    expect(refusalLine(undefined)).toBeUndefined();
-  });
-
-  it("says nothing when there is nothing to say", () => {
-    const lines: string[] = [];
-    logTurn({ toolCalls: [], text: "" } as unknown as TurnAnswer, (line) =>
-      lines.push(line),
-    );
-    expect(lines).toEqual([]);
-  });
-
-  it("writes nothing when no one is listening", () => {
-    // A turn with no listener writes nothing at all — the run may not want the
-    // lines at all, and asking for them must not break the turn.
-    expect(() => logTurn(answerWith(undefined, "done"))).not.toThrow();
-  });
-});
+import { fakeSession } from "./shared.js";
 
 describe("the journal file", () => {
   it("names the run and what the run was about", () => {
@@ -132,11 +70,7 @@ describe("the journal file", () => {
     try {
       const sweepFile = join(directory, "sweep.log");
       const pullRequestFile = join(directory, "pull-request.log");
-      const session: AgentSession = {
-        prompt: async () => {},
-        abort: async () => {},
-        dispose: () => {},
-      };
+      const session = fakeSession();
       const factory = journalFactory(
         async (sessionOptions) => {
           sessionOptions.onEvent?.("the agent's own line");
@@ -158,11 +92,7 @@ describe("the journal file", () => {
   it("drops a line it cannot write, and keeps the run going", async () => {
     // A journal that cannot be written is not a reason to stop the run: the
     // line is dropped and the session carries on.
-    const session: AgentSession = {
-      prompt: async () => {},
-      abort: async () => {},
-      dispose: () => {},
-    };
+    const session = fakeSession();
     const factory = journalFactory(
       async (sessionOptions) => {
         // The line the journal cannot take: its directory is not there.

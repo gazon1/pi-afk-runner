@@ -13,10 +13,10 @@ import { join } from "node:path";
 
 import { ARGS, parseArgs, prepareRun, sweepExitCode, usage } from "../src/cli.js";
 import { defaultDeadlineMs } from "../src/budget.js";
-import type { GitRunner } from "../src/git.js";
+import { fakeGit } from "./shared.js";
 
 /** A git runner that answers what the repository's origin is. */
-const originGit: GitRunner = async () => "git@github.com:gazon1/sing.git\n";
+const originGit = fakeGit("git@github.com:gazon1/sing.git\n");
 
 describe("the command line", () => {
   it("names every flag it has, in one place", () => {
