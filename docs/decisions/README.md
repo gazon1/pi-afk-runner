@@ -15,12 +15,13 @@ for the rule that the copies follow.
 
 | Decision | What it settles |
 |---|---|
+| `2026-11-09-the-pack-drops-the-grammars-it-cannot-use.md` | the pack drops the grammars it cannot use: the install removes repomix's tree-sitter grammars, the compression stays off because repomix has no Kotlin grammar, and the pack holds the files as they are |
 | `2026-11-08-the-suite-list-is-the-policy.md` | the suites are the policy's list: one entry per runner, and the rule that reads it names none of them — the list of the suites **extended** from `2026-11-05-a-run-gates-nothing-and-builds-nothing.md` |
 | `2026-11-08-the-issue-travels-with-the-turn.md` | the issue's data travels with the first turn, above its instruction: no intake turn, no intake sub-workflow, and the data read once — **the intake clause replaced** in `2026-11-06-the-graph-runs-on-the-mastra-workflow-engine.md` |
 | `2026-11-08-the-session-keeps-its-memory.md` | the session keeps its memory: 400 messages and 150000 tokens, so a long run does not drop the contract it is judged against |
 | `2026-11-08-the-journal-is-written-while-the-agent-works.md` | the journal is written while the agent works: the engine hands each tool call over as the model makes it, so a call that runs for minutes does not look like a run that stopped |
 | `2026-11-08-the-lock-keeps-every-platform.md` | the lock carries every platform's optional packages, and it is regenerated on top of the lock that is there — so `npm ci` installs the repository on every platform, not only on the one that wrote the lock |
-| `2026-11-07-the-repository-is-packed-for-the-agent.md` | the repository is packed for the agent with repomix: the tool that packs it, the guard's policy applied to the pack, and the scenarios that pack instead of read |
+| `2026-11-07-the-repository-is-packed-for-the-agent.md` | the repository is packed for the agent with repomix: the tool that packs it, the guard's policy applied to the pack, and the scenarios that pack instead of read — **the grammars clause replaced** in `2026-11-09-the-pack-drops-the-grammars-it-cannot-use.md`: the install drops the grammars, and the compression stays off |
 | `2026-11-06-the-graph-runs-on-the-mastra-workflow-engine.md` | the graph runs on Mastra's workflow engine and is a set of components: the states, the tokens, the errors, the step, the straight line, the work session, the review loop — **the graph clause replaced** in `2026-11-05-pi-is-gone.md`: the graph is the engine's, and the runner's rules stay the runner's |
 | `2026-11-05-the-bound-is-one-rule.md` | the bound is one rule: one grace, one hard stop, and the run stops waiting for a child that ignores the request to stop — `gh` and `git` alike |
 | `2026-11-05-the-git-runs-through-simple-git.md` | the git runs through simple-git: the seam stays a function, the errors stay the runner's, the child git sees the whole environment, and the bound is the runner's as well as the child's |

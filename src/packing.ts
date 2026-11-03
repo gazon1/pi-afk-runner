@@ -15,6 +15,14 @@
  * loaded, its processors never run, and what is packed is the runner's own
  * options over the runner's own rules.
  *
+ * **The pack holds the files as they are.** Repomix can rewrite a file into a
+ * compact form: it strips the comments, and it can reduce a file to its
+ * structure — its classes and its functions — with a tree-sitter pass. The
+ * runner asks for neither. The pass covers the languages repomix has a grammar
+ * for, and Kotlin — the language the target repository is written in — is not
+ * one of them, so it would do nothing to the files the target is made of. The
+ * grammars are not installed either: the install drops them.
+ *
  * **The pack is what the guard would allow.** The pack hands files to the
  * model the way a read does, so the files the policy refuses — the ones
  * nobody hands to an agent — are not in it. The policy is asked the question
@@ -131,6 +139,16 @@ export const packWithRepomix: Packer = async (request) => {
       skipLocalConfig: true,
       skipGlobalConfig: true,
       enableFileProcessors: false,
+      // The pack holds the files as they are: no comment is stripped, and no
+      // file is reduced to its structure. With the compression the pack would
+      // hold the structure of a file — its classes and its functions — in
+      // place of the file. The compression covers the languages repomix has a
+      // grammar for; Kotlin, which the target repository is written in, is not
+      // one of them, so the pass would do nothing to the files the target is
+      // made of. The grammars it would need are not installed: the install
+      // drops them.
+      compress: false,
+      removeComments: false,
       // The runner's own scan: the repository's config is never loaded, so
       // nothing in it can turn the scan off.
       securityCheck: true,
