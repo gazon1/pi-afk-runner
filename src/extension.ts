@@ -18,6 +18,9 @@
  *
  * What a human sees when they come back to a session is `live.ts`: the status is
  * a session entry, so a session opened tomorrow shows the line the run ended on.
+ *
+ * The door itself is here. The queue it drives is `steering.ts`, the log it
+ * shows is `logview.ts`, and the status line it writes is `live.ts`.
  */
 
 import type {
@@ -27,15 +30,9 @@ import type {
   InputEvent,
   InputEventResult,
 } from "@earendil-works/pi-coding-agent";
-import {
-  QueueController,
-  type QueueBoundary,
-  type QueueLifecycle,
-  type QueueRow,
-} from "pi-queue-steer-factory/headless";
+import { QueueController } from "pi-queue-steer-factory/headless";
 
 import {
-  describeToolCall,
   errorMessage,
   parseArgs,
   piSessionFactory,
@@ -48,9 +45,11 @@ import { join, resolve } from "node:path";
 
 import { runGit, workBranch } from "./git.js";
 import { RUN_STATUS_ENTRY, statusFromEntries, statusLine, type RunStatus } from "./live.js";
-import { takeLock } from "./lock.js";
+import { takeLock, type Lock } from "./lock.js";
+import { logLine } from "./logview.js";
 import { RunFailed, newRunId, runOnce, type RunOptions, type RunResult } from "./runner.js";
-import type { AgentSession, SessionFactory } from "./session.js";
+import type { SessionEvent, SessionFactory } from "./session.js";
+import { deliverRow, follow, steeringFactory, type SteerableSession } from "./steering.js";
 import { PINNED_PI_RANGE, assertInstalledPiVersion, installedPiVersion } from "./version.js";
 
 /** The key the run's status line is published under. */
@@ -62,6 +61,7 @@ export const LOG_KEY = "afk-runner-log";
 /** How many lines of the session in flight the host shows. */
 export const LOG_LINES = 6;
 
+<<<<<<< HEAD
 /** One event from the session the runner drives, as far as this module reads it. */
 export interface SessionEvent {
   readonly type: string;
@@ -208,6 +208,8 @@ export async function deliverRow(
   return { outcome: "completed" };
 }
 
+=======
+>>>>>>> 32c4aef (the agent's work)
 /**
  * The model reference of the session the human is in, or null.
  *
@@ -233,6 +235,108 @@ interface LiveRun {
   status: RunStatus | null;
 }
 
+/**
+ * What is needed to open the run's session as a chat, kept after the run ends:
+ * the transcript Pi switches to, and the worktree it was written in.
+ */
+interface LastRun {
+  transcript: string | null;
+  readonly worktreePath: string;
+  readonly branch: string;
+  readonly remote: string;
+  readonly checkout: string;
+}
+
+/**
+ * The state the door shares.
+ *
+ * It is one object and not six variables, so that a run cannot keep one field of
+ * the last run and reset the rest: `resetRun` sets all of them at once.
+ */
+interface DoorState {
+  /** The run in flight. */
+  live: LiveRun | null;
+  /** The session the queue's rows are delivered into. */
+  session: SteerableSession | null;
+  /** The work session, once the run has created it. */
+  workSession: SteerableSession | null;
+  /** Whether the agent has a turn running: an abort only means something then. */
+  working: boolean;
+  /** Whether the human stopped this run: the prompt array asks before every turn. */
+  stopped: boolean;
+  /** What is needed to open the run's session as a chat. */
+  last: LastRun | null;
+  /** The last lines of the work session, as the host shows them. */
+  log: string[];
+  /** The auto-attach of the run under way, so the run can wait for it before the worktree goes. */
+  autoAttach: Promise<void> | null;
+  /** The session that started the run, when it is still there. */
+  hostContext: ExtensionCommandContext | null;
+}
+
+/** A run that is ready to be worked: the options it runs with, and the lock it holds. */
+interface Prepared {
+  readonly options: CliOptions & { readonly repo: string };
+  readonly lock: Lock;
+}
+
+/**
+ * Reset the state a run owns, in one place.
+ *
+ * A run that keeps one field of the last run keeps the last run's claims on the
+ * world: the log it shows, the flag that says the human stopped it, and the
+ * transcript its chat would switch to.
+ */
+function resetRun(state: DoorState, run: LiveRun): void {
+  state.live = run;
+  state.log.length = 0;
+  state.working = false;
+  state.stopped = false;
+  state.last = null;
+  state.workSession = null;
+  state.autoAttach = null;
+}
+
+/**
+ * What a run's outcome is said in, and how loudly.
+ *
+ * One place for the three outcomes a run can have, so that a sentence is said
+ * the same way wherever it is said from: a run that worked nothing is not a
+ * failure, and a run that could not work its issue says why.
+ */
+export function report(
+  result: RunResult,
+  options: { readonly issue?: number | undefined },
+): { readonly message: string; readonly kind: "info" | "warning" } {
+  if (result.outcome === "unworkable") {
+    const issueNumber = result.issue ?? options.issue;
+    let reason: string;
+    if (result.derivedState === "Claimed") {
+      reason = "it is held by another runner";
+    } else if (result.derivedState === "Reviewed") {
+      reason = "already reviewed";
+    } else if (result.derivedState === "Counted") {
+      reason = "already counted";
+    } else {
+      reason = "check whether it is claimed by another runner, already reviewed, or already counted";
+    }
+    return {
+      message: `afk-runner: issue ${issueNumber ?? ""} could not be worked — ${reason}`,
+      kind: "warning",
+    };
+  }
+  if (result.outcome === "empty") {
+    return {
+      message: "afk-runner: the queue is empty — there was nothing to work",
+      kind: "info",
+    };
+  }
+  return {
+    message: `afk-runner: worked issue ${result.issue} — the record is at ${result.record}`,
+    kind: "info",
+  };
+}
+
 /** The live front door: one run at a time, and the human's corrections delivered into it. */
 export interface LiveFrontDoor {
   /** Start one run. It reports through the session's UI and returns without waiting for it. */
@@ -252,35 +356,11 @@ export interface LiveFrontDoor {
   attach(ctx: ExtensionCommandContext): Promise<void>;
 }
 
-/**
- * Drive the queue and the log from the session's own lifecycle.
- *
- * The dispatch's outcome is reported through the queue's own snapshot; a
- * rejection here would be an unhandled one inside an event listener, and it
- * would stop the observations that come after it.
- */
-function follow(
-  session: SteerableSession,
-  controller: QueueController,
-  mirror: (event: SessionEvent) => void,
-): void {
-  session.subscribe((event) => {
-    mirror(event);
-    const at = boundaryOf(event);
-    if (at === null) {
-      return;
-    }
-    controller.observe(at.observe);
-    if (at.boundary !== null) {
-      void controller.dispatch(at.boundary).catch(() => {});
-    }
-  });
-}
-
 export function liveFrontDoor(
   pi: ExtensionAPI,
   dependencies: LiveDependencies = {},
 ): LiveFrontDoor {
+<<<<<<< HEAD
   let live: LiveRun | null = null;
   /** The session the run is driving now: the work session first, then the review's. */
   let session: SteerableSession | null = null;
@@ -301,12 +381,31 @@ export function liveFrontDoor(
   } | null = null;
   /** The last lines of the session in flight, as the host shows them. */
   const log: string[] = [];
+=======
+  const state: DoorState = {
+    live: null,
+    session: null,
+    workSession: null,
+    working: false,
+    stopped: false,
+    last: null,
+    log: [],
+    autoAttach: null,
+    hostContext: null,
+  };
+>>>>>>> 32c4aef (the agent's work)
 
   /**
    * Say what the run is doing: the footer, and the entry a reconnected session
-   * reads.
+   * reads. A stage, when one is given, is the step the run has reached.
    */
-  const publish = (ctx: ExtensionContext, run: LiveRun): void => {
+  const publish = (ctx: ExtensionContext, run: LiveRun, stage?: string): void => {
+    if (stage !== undefined) {
+      if (run.status === null) {
+        return;
+      }
+      run.status = { ...run.status, stage };
+    }
     try {
       if (run.status !== null) {
         pi.appendEntry(RUN_STATUS_ENTRY, run.status);
@@ -335,32 +434,29 @@ export function liveFrontDoor(
       return;
     }
     if (event.type === "agent_start") {
+<<<<<<< HEAD
       turning = source;
     } else if (event.type === "agent_settled" && turning === source) {
       turning = null;
+=======
+      state.working = true;
+    } else if (event.type === "agent_settled") {
+      state.working = false;
+>>>>>>> 32c4aef (the agent's work)
     }
     const line = logLine(event);
     if (line === null) {
       return;
     }
-    log.push(line);
-    if (log.length > LOG_LINES) {
-      log.splice(0, log.length - LOG_LINES);
+    state.log.push(line);
+    if (state.log.length > LOG_LINES) {
+      state.log.splice(0, state.log.length - LOG_LINES);
     }
     try {
-      ctx.ui.setWidget(LOG_KEY, [...log], { placement: "aboveEditor" });
+      ctx.ui.setWidget(LOG_KEY, [...state.log], { placement: "aboveEditor" });
     } catch {
       // The session is gone; the record on disk still has the run.
     }
-  };
-
-  /** The stage a run ended on. The word is the runner's: "done", or the step it stopped at. */
-  const finish = (ctx: ExtensionContext, run: LiveRun, stage: string): void => {
-    if (run.status === null) {
-      return;
-    }
-    run.status = { ...run.status, stage };
-    publish(ctx, run);
   };
 
   /**
@@ -379,17 +475,17 @@ export function liveFrontDoor(
     }
   };
 
-  let hostContext: ExtensionCommandContext | null = null;
-  /** The auto-attach of the run under way, so the run can wait for it before the worktree goes. */
-  let autoAttach: Promise<void> | null = null;
-
-  const start = async (args: string, ctx: ExtensionCommandContext): Promise<void> => {
-    hostContext = ctx;
-    if (live !== null) {
-      talk(ctx, "afk-runner: a run is already under way", "warning");
-      return;
-    }
-
+  /**
+   * Parse the command, resolve the repository, and take the lock.
+   *
+   * Everything that can refuse the run happens here, before the door holds
+   * anything: a wrong command, a repository that is not there, a lock another
+   * runner holds.
+   */
+  const prepare = async (
+    args: string,
+    ctx: ExtensionCommandContext,
+  ): Promise<Prepared | null> => {
     let options: CliOptions & { readonly repo: string };
     try {
       // The repository is the checkout's `origin` unless the command names one.
@@ -398,12 +494,13 @@ export function liveFrontDoor(
       );
     } catch (failure) {
       talk(ctx, `afk-runner: ${errorMessage(failure)}`, "error");
-      return;
+      return null;
     }
     if (options.all === true) {
       talk(ctx, "afk-runner: --all is the CLI's sweep; this command works one issue", "warning");
-      return;
+      return null;
     }
+<<<<<<< HEAD
     if (options.merge === true) {
       talk(ctx, "afk-runner: --merge is the CLI's mode; this command works one issue", "warning");
       return;
@@ -412,27 +509,45 @@ export function liveFrontDoor(
     const model = options.model ?? hostModel(ctx.model) ?? undefined;
 
     let lock: Awaited<ReturnType<typeof takeLock>>;
+=======
+    let lock: Lock;
+>>>>>>> 32c4aef (the agent's work)
     try {
       lock = await takeLock(options.lockDirectory);
     } catch (failure) {
       // A held lock and an unusable one both mean "not this runner, not now", and
       // both already say which.
       talk(ctx, `afk-runner: ${errorMessage(failure)}`, "error");
-      return;
+      return null;
     }
+    return { options, lock };
+  };
 
+  /**
+   * The run the door owns: the queue controller it steers, the status it shows,
+   * and the options the work runs with.
+   *
+   * The run is made ready here — the door's state is reset to it, its status is
+   * published, and the queue is unpaused — so that `start` has nothing left to
+   * do but hand the run over to the loop.
+   */
+  const makeRun = async (
+    options: CliOptions & { readonly repo: string },
+    ctx: ExtensionCommandContext,
+  ): Promise<{ readonly run: LiveRun; readonly runOptions: RunOptions }> => {
     const run: LiveRun = {
       status: null,
       controller: new QueueController({
         sessionId: newRunId(),
         ports: {
           send: (row, { boundary }) =>
-            session === null
+            state.session === null
               ? Promise.resolve({ outcome: "rejected", error: "the run has no session yet" })
-              : deliverRow(session, row, boundary),
+              : deliverRow(state.session, row, boundary),
         },
       }),
     };
+<<<<<<< HEAD
     live = run;
     log.length = 0;
     turning = null;
@@ -454,6 +569,10 @@ export function liveFrontDoor(
     // session's, so the first one is the one that counts.
     let firstSession = true;
 
+=======
+    // The model is the one this session runs on unless the command names one.
+    const model = options.model ?? hostModel(ctx.model) ?? undefined;
+>>>>>>> 32c4aef (the agent's work)
     const factory = steeringFactory(
       dependencies.session ??
         piSessionFactory({
@@ -461,6 +580,7 @@ export function liveFrontDoor(
           ...(model === undefined ? {} : { model }),
         }),
       (created) => {
+<<<<<<< HEAD
         const isWorkSession = firstSession;
         firstSession = false;
         // One session in flight: the newest one the run drives. The work
@@ -479,33 +599,46 @@ export function liveFrontDoor(
         }
         follow(created, run.controller, (event) => {
           mirror(ctx, event, created);
+=======
+        if (state.workSession === null) {
+          state.workSession = created;
+        }
+        state.session = created;
+        follow(created, run.controller, (event) => {
+          if (state.workSession !== null && created === state.workSession) {
+            mirror(ctx, event);
+          }
+>>>>>>> 32c4aef (the agent's work)
         });
         // The work session is headless: there is no chat to join. Its transcript is
         // a file, and a human who wants the whole of it reads that file.
         const transcript = created.sessionManager?.getSessionFile();
         if (
+<<<<<<< HEAD
           isWorkSession &&
+=======
+          state.workSession === created &&
+>>>>>>> 32c4aef (the agent's work)
           transcript !== null &&
           transcript !== undefined &&
-          last !== null &&
-          last.transcript === null
+          state.last !== null &&
+          state.last.transcript === null
         ) {
-          last.transcript = transcript;
+          state.last.transcript = transcript;
           talk(ctx, `afk-runner: the run's transcript is ${transcript}`, "info");
-          if (hostContext !== null) {
-            autoAttach = attach(hostContext, true).catch(() => {});
+          if (state.hostContext !== null) {
+            state.autoAttach = attach(state.hostContext, true).catch(() => {});
           }
         }
       },
     );
-
     const runOptions: RunOptions = {
       ...runOptionsFrom(options, factory),
-      stopped: () => stopped,
+      stopped: () => state.stopped,
       onIssue: (issue) => {
         run.status = { issue: issue.number, title: issue.title, stage: "" };
         publish(ctx, run);
-        last = {
+        state.last = {
           transcript: null,
           worktreePath: join(options.worktreeRoot, `issue-${issue.number}`),
           branch: workBranch(issue.number),
@@ -521,46 +654,46 @@ export function liveFrontDoor(
         publish(ctx, run);
       },
     };
+    resetRun(state, run);
+    // A run that selects nothing must not leave the previous run's line standing.
+    publish(ctx, run);
+    // The hold starts paused, so that constructing a queue cannot send anything.
+    // Only a boundary may, and this is the one that unpauses it.
+    await run.controller.request({
+      version: 1,
+      requestId: newRunId(),
+      operation: { type: "resume" },
+    });
+    return { run, runOptions };
+  };
 
-    void (async () => {
-      try {
-        const result = await (dependencies.work ?? runOnce)(runOptions);
-        if ((result.outcome as string) === "unworkable") {
-          const issueNum = result.issue ?? options.issue;
-          const derivedState = (result as { derivedState?: string }).derivedState;
-          let reason: string;
-          if (derivedState === "Claimed") {
-            reason = "it is held by another runner";
-          } else if (derivedState === "Reviewed") {
-            reason = "already reviewed";
-          } else if (derivedState === "Counted") {
-            reason = "already counted";
-          } else {
-            reason = "check whether it is claimed by another runner, already reviewed, or already counted";
-          }
-          talk(
-            ctx,
-            `afk-runner: issue ${issueNum ?? ""} could not be worked — ${reason}`,
-            "warning",
-          );
-          finish(ctx, run, "done");
-        } else if (result.outcome === "empty") {
-          talk(ctx, "afk-runner: the queue is empty — there was nothing to work", "info");
-          finish(ctx, run, "done");
-        } else {
-          talk(
-            ctx,
-            `afk-runner: worked issue ${result.issue} — the record is at ${result.record}`,
-            "info",
-          );
-          finish(ctx, run, "done");
-        }
-      } catch (failure) {
-        finish(
+  /**
+   * The run itself: the work, what came of it, and the cleanup either way.
+   */
+  const runLoop = async (
+    ctx: ExtensionCommandContext,
+    run: LiveRun,
+    runOptions: RunOptions,
+    prepared: Prepared,
+  ): Promise<void> => {
+    try {
+      const result = await (dependencies.work ?? runOnce)(runOptions);
+      const said = report(result, { issue: prepared.options.issue });
+      talk(ctx, said.message, said.kind);
+      publish(ctx, run, "done");
+    } catch (failure) {
+      publish(ctx, run, failure instanceof RunFailed ? `failed (${failure.step})` : "failed");
+      talk(ctx, `afk-runner: ${errorMessage(failure)}`, "error");
+    } finally {
+      // A correction typed after the session's last boundary has nowhere to go.
+      const undelivered = run.controller.snapshot().rows.length;
+      if (undelivered > 0) {
+        talk(
           ctx,
-          run,
-          failure instanceof RunFailed ? `failed (${failure.step})` : "failed",
+          `afk-runner: the run had already finished — ${undelivered} correction(s) were not delivered`,
+          "warning",
         );
+<<<<<<< HEAD
         talk(ctx, `afk-runner: ${errorMessage(failure)}`, "error");
       } finally {
         // A correction typed after the session's last boundary has nowhere to go.
@@ -591,23 +724,59 @@ export function liveFrontDoor(
                 "error",
               );
             }
+=======
+      }
+      await run.controller.dispose();
+      state.session = null;
+      state.workSession = null;
+      state.working = false;
+      state.live = null;
+      // The auto-attach moved this chat into the run's session, whose working
+      // directory is the worktree the run has just removed as scratch. Put it
+      // back, or the chat this run switched to is left standing in a directory
+      // that is gone.
+      if (state.autoAttach !== null) {
+        await state.autoAttach;
+        if (state.last !== null) {
+          const problem = await restoreWorktree(state.last);
+          if (problem !== null) {
+            talk(
+              ctx,
+              `afk-runner: the worktree this chat is in would not come back: ${problem}`,
+              "error",
+            );
+>>>>>>> 32c4aef (the agent's work)
           }
         }
-        try {
-          ctx.ui.setWidget(LOG_KEY, undefined);
-        } catch {
-          // The session is gone; so is its log.
-        }
-        await lock.release();
       }
-    })();
+      try {
+        ctx.ui.setWidget(LOG_KEY, undefined);
+      } catch {
+        // The session is gone; so is its log.
+      }
+      await prepared.lock.release();
+    }
+  };
+
+  const start = async (args: string, ctx: ExtensionCommandContext): Promise<void> => {
+    state.hostContext = ctx;
+    if (state.live !== null) {
+      talk(ctx, "afk-runner: a run is already under way", "warning");
+      return;
+    }
+    const prepared = await prepare(args, ctx);
+    if (prepared === null) {
+      return;
+    }
+    const { run, runOptions } = await makeRun(prepared.options, ctx);
+    void runLoop(ctx, run, runOptions, prepared);
   };
 
   const steer = async (
     event: InputEvent,
     ctx: ExtensionContext,
   ): Promise<InputEventResult> => {
-    const run = live;
+    const run = state.live;
     if (run === null) {
       return { action: "continue" };
     }
@@ -648,15 +817,23 @@ export function liveFrontDoor(
    * step instead — which is what the flag is for.
    */
   const stop = (ctx: ExtensionContext): void => {
-    const run = live;
+    const run = state.live;
     if (run === null) {
       talk(ctx, "afk-runner: no run is under way", "info");
       return;
     }
+<<<<<<< HEAD
     stopped = true;
     const stage = run.status === null ? "selecting" : run.status.stage;
     const where = stage === "" ? "selecting" : stage;
     if (turning === null) {
+=======
+    const targetSession = state.workSession ?? state.session;
+    if (targetSession === null || !state.working) {
+      // The agent is between turns, or done and the run is pushing. There is
+      // nothing to cut, and saying "stopping" would be a lie.
+      const stage = run.status === null ? "selecting" : run.status.stage;
+>>>>>>> 32c4aef (the agent's work)
       talk(
         ctx,
         `afk-runner: stopping — no turn is running; the run is at "${where}" ` +
@@ -665,12 +842,18 @@ export function liveFrontDoor(
       );
       return;
     }
+<<<<<<< HEAD
     talk(
       ctx,
       "afk-runner: stopping — the turn is cut, and the run ends before its next step",
       "warning",
     );
     void turning.abort().catch((failure: unknown) => {
+=======
+    state.stopped = true;
+    talk(ctx, "afk-runner: stopping — the run releases its claim when the turn ends", "warning");
+    void targetSession.abort().catch((failure: unknown) => {
+>>>>>>> 32c4aef (the agent's work)
       talk(ctx, `afk-runner: the session would not abort: ${errorMessage(failure)}`, "error");
     });
   };
@@ -681,9 +864,16 @@ export function liveFrontDoor(
    * run is stopped and its own failure path takes over.
    */
   const abandon = (): void => {
+<<<<<<< HEAD
     stopped = true;
     if (turning !== null) {
       void turning.abort().catch(() => {});
+=======
+    const targetSession = state.workSession ?? state.session;
+    if (targetSession !== null && state.working) {
+      state.stopped = true;
+      void targetSession.abort().catch(() => {});
+>>>>>>> 32c4aef (the agent's work)
     }
   };
 
@@ -775,11 +965,15 @@ export function liveFrontDoor(
    * whose working directory is gone can read nothing.
    */
   const attach = async (ctx: ExtensionCommandContext, force = false): Promise<void> => {
-    if (last === null || last.transcript === null) {
+    if (state.last === null || state.last.transcript === null) {
       talk(ctx, "afk-runner: this session has no run to attach to yet", "info");
       return;
     }
+<<<<<<< HEAD
     if (turning !== null && !force) {
+=======
+    if (state.working && !force) {
+>>>>>>> 32c4aef (the agent's work)
       talk(
         ctx,
         "afk-runner: the agent is working — /afk-runner-stop first, or /afk-runner-attach when it settles",
@@ -787,7 +981,7 @@ export function liveFrontDoor(
       );
       return;
     }
-    const target = last;
+    const target = state.last;
     const problem = await restoreWorktree(target);
     if (problem !== null) {
       talk(
