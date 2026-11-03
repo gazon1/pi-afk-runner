@@ -15,6 +15,8 @@ for the rule that the copies follow.
 
 | Decision | What it settles |
 |---|---|
+| `2026-11-08-the-issue-travels-with-the-turn.md` | the issue's data travels with the first turn, above its instruction: no intake turn, no intake sub-workflow, and the data read once — **the intake clause replaced** in `2026-11-06-the-graph-runs-on-the-mastra-workflow-engine.md` |
+| `2026-11-08-the-session-keeps-its-memory.md` | the session keeps its memory: 400 messages and 150000 tokens, so a long run does not drop the contract it is judged against |
 | `2026-11-08-the-journal-is-written-while-the-agent-works.md` | the journal is written while the agent works: the engine hands each tool call over as the model makes it, so a call that runs for minutes does not look like a run that stopped |
 | `2026-11-08-the-lock-keeps-every-platform.md` | the lock carries every platform's optional packages, and it is regenerated on top of the lock that is there — so `npm ci` installs the repository on every platform, not only on the one that wrote the lock |
 | `2026-11-07-the-repository-is-packed-for-the-agent.md` | the repository is packed for the agent with repomix: the tool that packs it, the guard's policy applied to the pack, and the scenarios that pack instead of read |

@@ -1,22 +1,23 @@
 /**
  * The work session's script.
  *
- * It is the issue's own: the intake data, a triage that may close the issue
- * instead of working it, a scope check that may split it into smaller issues,
- * and then the four work turns.
+ * It is the issue's own: a triage that may close the issue instead of working
+ * it, a scope check that may split it into smaller issues, and then the four
+ * work turns. The issue's own data — its body and its comments — travels with
+ * the first turn, above that turn's instruction; it is not a turn of its own.
  *
- * The script is a composition of workflows: the intake, the two decisions and
- * what each of them leads to. Each of them is a workflow of its own, and the
- * branch is what puts them together — the triage's answer picks the closing
- * workflow or the working one, and the scope's answer picks the splitting
- * workflow or the work turns.
+ * The script is a composition of workflows: the two decisions and what each of
+ * them leads to. Each of them is a workflow of its own, and the branch is what
+ * puts them together — the triage's answer picks the closing workflow or the
+ * working one, and the scope's answer picks the splitting workflow or the work
+ * turns.
  */
 
 import { createWorkflow } from "@mastra/core/workflows";
 
 import { SCOPE_TOKEN, TRIAGE_TOKEN } from "./tokens.js";
 import { WorkflowError, WORKFLOW_ERROR_CODE } from "./errors.js";
-import { GRAPH_NAMES, WORK_STATES, type StatesResult, type TurnRunner, type WorkflowState } from "./states.js";
+import { WORK_STATES, type StatesResult, type TurnRunner, type WorkflowState } from "./states.js";
 import {
   answerSchema,
   asStep,
@@ -76,17 +77,10 @@ export async function runWorkSession(options: {
     });
   };
 
-  // The intake: the turns the session declares that are not the graph's own
-  // states — the issue's body, its comments, the related issues. They are
-  // data, they come first, and they are in the session's order.
-  const intakeStates = options.nodes
-    .map((node) => node.name)
-    .filter((name) => !GRAPH_NAMES.includes(name));
-  const intake = sub("work-session-intake");
-  for (const name of intakeStates) {
-    intake.then(node(name));
-  }
-  intake.commit();
+  // The optional related-issues turn, when the session declares it, runs
+  // before the triage: it decides whether several issues are one piece of
+  // work, and the triage then judges the issue it was given.
+  const hasRelated = options.nodes.some((node) => node.name === "related");
 
   // What the triage's `skip` leads to: the runner closes the issue.
   const closeSkip = sub("work-session-close-skip").then(node("close-skip")).commit();
@@ -120,10 +114,11 @@ export async function runWorkSession(options: {
     ])
     .commit();
 
-  // The script itself: the intake, the triage, and what the triage leads to.
+  // The script itself: the optional related turn, the triage, and what the
+  // triage leads to.
   const script = sub("work-session");
-  if (intakeStates.length > 0) {
-    script.then(asStep(intake));
+  if (hasRelated) {
+    script.then(node("related"));
   }
   script.then(node("triage"));
   script.branch([

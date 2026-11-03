@@ -51,9 +51,20 @@ export interface MastraAgentOptions {
    * agent and keeps this one, so the conversation is not lost by the move.
    */
   readonly memory?: Memory;
-  /** The token budget the conversation is kept inside. Defaults to 50000. */
+  /** The token budget the conversation is kept inside. Defaults to 150000. */
   readonly tokenLimit?: number;
 }
+
+/**
+ * The token budget the conversation is kept inside.
+ *
+ * The limiter trims the **oldest** messages first, and the issue's own data is
+ * the oldest thing in the conversation: a budget of fifty thousand tokens is
+ * a couple of file reads, and the contract the work is judged against is what
+ * it throws away. The models the runner uses carry two hundred thousand
+ * tokens of context, and this leaves room for the answer.
+ */
+const DEFAULT_TOKEN_LIMIT = 150_000;
 
 /**
  * The agent.
@@ -82,7 +93,10 @@ export function createMastraAgent(options: MastraAgentOptions): Agent {
     tools: toMastraTools(options.tools),
     workspace,
     skills: [...options.skills],
-    inputProcessors: [new TokenLimiter(options.tokenLimit ?? 50000), new ToolCallFilter({ filterAfterToolSteps: 2 })],
+    inputProcessors: [
+      new TokenLimiter(options.tokenLimit ?? DEFAULT_TOKEN_LIMIT),
+      new ToolCallFilter({ filterAfterToolSteps: 2 }),
+    ],
     // The memory is what carries a turn into the next one: the work session is
     // one conversation, and each prompt sees what the prompts before it said.
     memory: options.memory ?? new Memory({ storage: new InMemoryStore() }),
