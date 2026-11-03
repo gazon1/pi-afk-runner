@@ -365,3 +365,32 @@ export class PoolSession implements AgentSession {
     useProxy(typeof model?.proxy === "string" ? model.proxy : undefined);
   }
 }
+
+/**
+ * The pool's channel, and the session's own — composed.
+ *
+ * The pool's lines are the run's lines: the model a session starts on, the
+ * model whose limit is gone, the file that changed under the pool. They reach
+ * the command line and the record through the pool's own channel, and they
+ * reach the **journal** — the file the run writes while it works — through the
+ * session's own channel. A reader of that one file then sees the session's
+ * calls and the model they were made against, in the order they happened.
+ */
+export function poolEventChannel(options: {
+  /** The pool's own channel — the command line and the record. */
+  readonly pool: (line: string) => void;
+  /**
+   * The session the pool drives — its own channel is the journal.
+   *
+   * The session's own channel, and not a copy of it: the line is written when
+   * the pool says it, so the journal reads in the order the run happened.
+   */
+  readonly session?:
+    | { readonly onEvent?: ((line: string) => void) | undefined }
+    | undefined;
+}): (line: string) => void {
+  return (line) => {
+    options.pool(line);
+    options.session?.onEvent?.(line);
+  };
+}

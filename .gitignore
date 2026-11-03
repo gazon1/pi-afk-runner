@@ -4,3 +4,6 @@ dist/
 
 # the runner writes its lock and its run records here
 build/
+
+# the host's own state — the gh device id, and whatever else a tool leaves here
+.local/

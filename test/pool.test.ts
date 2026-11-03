@@ -10,7 +10,7 @@
  * catalogue below is the runner's own answer, and nothing else.
  */
 
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -30,8 +30,9 @@ import {
   type ModelCatalogue,
   type Pool,
 } from "../src/pool.js";
-import { PoolSession, type PoolHost } from "../src/pool-session.js";
+import { PoolSession, poolEventChannel, type PoolHost } from "../src/pool-session.js";
 import { useProxy } from "../src/proxy.js";
+import { journalFactory } from "../src/runner.js";
 import type { TurnMessage } from "../src/session.js";
 
 /** The pool the tests pick from: the best model, one behind a proxy, and a spare. */
@@ -521,6 +522,57 @@ describe("a session in the pool", () => {
     // in the same process must not go through the model's proxy.
     session.dispose();
     expect(getGlobalDispatcher()).not.toBeInstanceOf(ProxyAgent);
+  });
+
+  it("says_its_lines_to_the_journal_the_run_writes", async () => {
+    // The pool's lines are the run's lines: a model switch the journal does
+    // not show is a switch the reader of the journal cannot see.
+    const directory = await mkdtemp(join(tmpdir(), "afk-pool-journal-"));
+    const journal = join(directory, "run.log");
+    try {
+      const catalogue = new FakeCatalogue(["fake/beam", "fake/spare"]);
+      const host = new FakeHost(["429 RATE_LIMITED", null]);
+      const said: string[] = [];
+      const factory = journalFactory(async (sessionOptions) => {
+        const session = new PoolSession({
+          host,
+          catalogue,
+          pool: parsePool(
+            "models:\n  - model: fake/beam\n    priority: 100\n  - model: fake/spare\n    priority: 50\n",
+          ),
+          reference: "fake/beam",
+          state: newPoolState(),
+          proxyConfigured: true,
+          onEvent: poolEventChannel({
+            pool: (line) => {
+              said.push(line);
+            },
+            session: sessionOptions,
+          }),
+        });
+        // The session's own line, between the pool's two.
+        sessionOptions.onEvent?.("the agent is working");
+        return session;
+      }, journal);
+      const session = await factory({ cwd: directory, systemPromptSections: {} });
+      await session.prompt("do the work");
+      session.dispose();
+
+      // The pool said what it did, on its own channel...
+      expect(said).toContain("the model is now fake/beam");
+      // ...and the journal holds it, among the session's own lines, in the
+      // order it happened.
+      const lines = (await readFile(journal, "utf8"))
+        .split("\n")
+        .filter((line) => line.trim() !== "");
+      expect(lines).toEqual([
+        "the model is now fake/beam",
+        "the agent is working",
+        "fake/beam has run out of its limit — the model is now fake/spare",
+      ]);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 });
 
