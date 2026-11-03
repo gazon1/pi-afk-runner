@@ -15,6 +15,7 @@ for the rule that the copies follow.
 
 | Decision | What it settles |
 |---|---|
+| `2026-11-08-the-suite-list-is-the-policy.md` | the suites are the policy's list: one entry per runner, and the rule that reads it names none of them — the list of the suites **extended** from `2026-11-05-a-run-gates-nothing-and-builds-nothing.md` |
 | `2026-11-08-the-issue-travels-with-the-turn.md` | the issue's data travels with the first turn, above its instruction: no intake turn, no intake sub-workflow, and the data read once — **the intake clause replaced** in `2026-11-06-the-graph-runs-on-the-mastra-workflow-engine.md` |
 | `2026-11-08-the-session-keeps-its-memory.md` | the session keeps its memory: 400 messages and 150000 tokens, so a long run does not drop the contract it is judged against |
 | `2026-11-08-the-journal-is-written-while-the-agent-works.md` | the journal is written while the agent works: the engine hands each tool call over as the model makes it, so a call that runs for minutes does not look like a run that stopped |
