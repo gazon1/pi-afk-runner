@@ -13,10 +13,15 @@
  * judged. The timer model makes that a delay of one tick, not a manual step.
  *
  * The record of each pull request lives under
- * `build/diagnostics/merge/pr-<N>/`, beside the work runs' own records.
+ * `build/diagnostics/merge/pr-<N>/`, beside the work runs' own records, and
+ * the journal of the merge — the session's lines, written while it works — is
+ * the file beside that record. The sweep has a journal of its own, under
+ * `build/diagnostics/merge/` beside those directories: the pull requests it
+ * considered, the ones it left alone and why, and where it stopped.
  */
 
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 
 import { budgetShares } from "./budget.js";
 import { errorMessage } from "./cli.js";
@@ -28,7 +33,17 @@ import {
   type GhRunner,
   type OpenPullRequest,
 } from "./gh.js";
-import { GATE_OUTPUT_LIMIT_BYTES, GATE_TIMEOUT_MS } from "./gates.js";
+import { GATE_OUTPUT_LIMIT_BYTES, GATE_TIMEOUT_MS, gateFailure, gateInvocation } from "./gates.js";
+import {
+  journalDirectory,
+  journalFactory,
+  journalHeader,
+  journalPath,
+  journalWriter,
+  pullRequestSubject,
+  sweepJournalDirectory,
+  sweepJournalHeader,
+} from "./journal.js";
 import {
   CommandFailed,
   fetchCommit,
@@ -73,6 +88,15 @@ export { WORK_BRANCH_PATTERN };
 /** The repository's own gate — the command the work prompt names. */
 export const GATE_SCRIPT = "./check.sh";
 
+/**
+ * How many gates the merge pipeline runs: one.
+ *
+ * The work pipeline runs no gate unless it is told to, but the merge door
+ * always runs the repository's own gate, and the budget it gets is a gate's
+ * share.
+ */
+const MERGE_GATE_COUNT = 1;
+
 /** A marker a resolved conflict must not leave behind. */
 const CONFLICT_MARKER = "^<<<<<<< ";
 
@@ -89,15 +113,7 @@ export const MERGE_PROMPT = [
   "1. Resolve every conflict. Read both sides: keep what each was trying to do,",
   "   do not drop one side to make the merge quiet.",
   "",
-  "2. Run the repository's gate:",
-  "",
-  "   ```bash",
-  `   ${GATE_SCRIPT}`,
-  "   ```",
-  "",
-  "   Fix what it reports. A gate that fails is the merge not being finished.",
-  "",
-  "3. Leave the tree with no conflict markers and the gate green. Do not commit,",
+  "2. Leave the tree with no conflict markers. Do not commit,",
   "   do not push: the pipeline commits and pushes so the push stays under its",
   "   control.",
   "",
@@ -157,6 +173,8 @@ export interface MergeOptions {
   readonly stopped?: () => boolean;
   readonly onStep?: (record: StepRecord) => void;
   readonly onStepStart?: (step: string) => void;
+  /** What the model pool did during the run — the record says it. */
+  readonly poolEvents?: readonly string[];
   /** The pull request under way, told before its first step. */
   readonly onSubject?: (subject: MergeSubject) => void;
   readonly now?: Date;
@@ -187,6 +205,32 @@ export async function mergeReviewedPullRequests(
   const startedAt = Date.now();
   const remainingMs = (): number =>
     Math.max(0, options.deadlineMs - (Date.now() - startedAt));
+
+  /**
+   * The journal of the sweep: the lines the sweep writes, beside the
+   * per-pull-request journals.
+   *
+   * Each pull request the sweep starts has a journal of its own, and a sweep
+   * that is killed between two pull requests leaves only those behind: nothing
+   * says which pull requests it considered, which it left alone, or where it
+   * stopped. This file is the sweep's own account, and it is there before the
+   * candidates are read, so a sweep that dies leaves behind what it was doing
+   * when it died.
+   *
+   * The sessions the sweep opens write to it too — the factory is wrapped
+   * once, the way the per-pull-request merge wraps it — so the file has the
+   * shape the other journals have.
+   */
+  const directory = sweepJournalDirectory(options.checkout);
+  const journalFile = journalPath(directory, runId);
+  await mkdir(directory, { recursive: true });
+  await writeFile(journalFile, `${sweepJournalHeader(runId)}\n`, "utf8");
+  const write = journalWriter(journalFile);
+  const sweepOptions: MergeOptions = {
+    ...options,
+    session: journalFactory(options.session, journalFile),
+  };
+
   const candidates = await readOpenPullRequests(
     options.repo,
     options.baseBranch,
@@ -196,14 +240,31 @@ export async function mergeReviewedPullRequests(
   const merged: number[] = [];
   const skipped: { pullRequest: number; reason: string }[] = [];
   const failed: { pullRequest: number; step: string; message: string }[] = [];
+  /**
+   * The pull requests the sweep left alone, counted for the sweep's own
+   * summary.
+   *
+   * A pull request whose branch is not ours is left alone too, and it is not
+   * a candidate the result names — so the count the summary says is the count
+   * of the lines the journal holds, not the length of the result's list.
+   */
+  let leftAlone = 0;
+  const leaveAlone = (pullRequest: number, reason: string): void => {
+    leftAlone += 1;
+    write(`left #${pullRequest} alone — ${reason}`);
+  };
 
   for (const candidate of candidates) {
     if (options.stopped?.() === true) {
+      write("the sweep was stopped");
       break;
     }
     const issueNumber = issueNumberFromBranch(candidate.headRefName);
     if (issueNumber === null) {
-      // Another author's pull request. The pipeline lands only its own.
+      // Another author's pull request. The pipeline lands only its own, and the
+      // journal says so: the sweep read it, and a reader has to see that it was
+      // left alone on purpose.
+      leaveAlone(candidate.number, "its branch is not ours");
       continue;
     }
     if (remainingMs() <= 0) {
@@ -214,30 +275,44 @@ export async function mergeReviewedPullRequests(
         pullRequest: candidate.number,
         reason: "the run's deadline left no budget",
       });
+      leaveAlone(candidate.number, "the run's deadline left no budget");
       continue;
     }
     const reason = await skipReason(options, candidate);
     if (reason !== null) {
       skipped.push({ pullRequest: candidate.number, reason });
+      leaveAlone(candidate.number, reason);
       continue;
     }
 
+    // The line before the work: a sweep that is killed while it works on a
+    // pull request has to say which one it was working on.
+    write(`#${candidate.number} is a candidate — the merge starts`);
     options.onSubject?.({ pullRequest: candidate.number, title: candidate.title });
     try {
-      const outcome = await mergeOne(options, candidate, issueNumber, runId, remainingMs);
+      const outcome = await mergeOne(sweepOptions, candidate, issueNumber, runId, remainingMs);
       if (outcome.merged) {
         merged.push(candidate.number);
+        write(`#${candidate.number} landed`);
       } else {
         skipped.push({ pullRequest: candidate.number, reason: outcome.reason });
+        leaveAlone(candidate.number, outcome.reason);
       }
     } catch (failure) {
+      const step = failure instanceof RunFailed ? failure.step : "merge";
+      const message = errorMessage(failure);
       failed.push({
         pullRequest: candidate.number,
-        step: failure instanceof RunFailed ? failure.step : "merge",
-        message: errorMessage(failure),
+        step,
+        message,
       });
+      write(`#${candidate.number} stopped at the ${step} step — ${message}`);
     }
   }
+
+  write(
+    `the sweep ended — ${merged.length} landed, ${leftAlone} left alone, ${failed.length} stopped`,
+  );
 
   return { merged, skipped, failed };
 }
@@ -294,6 +369,21 @@ async function mergeOne(
   const worktreePath = join(options.worktreeRoot, `pull-request-${candidate.number}`);
   const branch = candidate.headRefName;
   const state = { before: "", after: "", changed: false };
+
+  /**
+   * The journal of the merge: the session's lines, written while it works.
+   *
+   * The record is written when the merge ends — and a merge that is killed
+   * writes no record at all. The journal is the file beside it: it is there
+   * before the first session opens and grows as the lines come, so a merge
+   * that dies leaves behind what it was doing when it died.
+   */
+  const subject = pullRequestSubject(candidate.number);
+  const directory = journalDirectory(options.checkout, subject);
+  const journalFile = journalPath(directory, runId);
+  await mkdir(directory, { recursive: true });
+  await writeFile(journalFile, `${journalHeader(runId, subject)}\n`, "utf8");
+  const factory = journalFactory(options.session, journalFile);
 
   const steps: Step[] = [
     {
@@ -355,8 +445,9 @@ async function mergeOne(
           }
           await resolveWithAgent(
             options,
+            factory,
             worktreePath,
-            budgetShares(remainingMs()).sessionMs,
+            budgetShares(remainingMs(), MERGE_GATE_COUNT).sessionMs,
           );
         }
         state.after = await headSha(options.git, worktreePath);
@@ -370,7 +461,13 @@ async function mergeOne(
         if (!state.changed) {
           return "not needed — CI judged this commit";
         }
-        return await verifyGate(options, worktreePath, remainingMs);
+        return await verifyGate(
+          options,
+          factory,
+          worktreePath,
+          join(directory, `${runId}-gates.log`),
+          remainingMs,
+        );
       },
     },
     {
@@ -403,10 +500,11 @@ async function mergeOne(
           repo: options.repo,
           pullRequest: candidate.number,
           cwd: worktreePath,
-          factory: options.session,
+          factory,
           gh: options.gh,
           run: options.run,
-          deadlineMs: budgetShares(remainingMs()).reviewMs,
+          git: options.git,
+          deadlineMs: budgetShares(remainingMs(), MERGE_GATE_COUNT).reviewMs,
           ...(options.stopped === undefined ? {} : { stopped: options.stopped }),
         });
         if (outcome.verdict !== "pass") {
@@ -450,31 +548,47 @@ async function mergeOne(
     },
   ];
 
+  let stoppedAt: string | null = null;
+  let record = "";
   try {
-    await runSteps({
+    const outcome = await runSteps({
       issue: candidate.number,
       runId,
       root: options.checkout,
       steps,
-      directory: join(
-        options.checkout,
-        "build",
-        "diagnostics",
-        "merge",
-        `pr-${candidate.number}`,
-      ),
+      directory,
       heading: `# Merge pull request ${candidate.number}`,
-      subject: "pull request",
+      subject,
+      ...(options.poolEvents === undefined ? {} : { pool: options.poolEvents }),
       ...(options.onStep === undefined ? {} : { onStep: options.onStep }),
       ...(options.onStepStart === undefined ? {} : { onStepStart: options.onStepStart }),
+      // The merge's steps ask the flag the work pipeline's ask: a stop that
+      // arrives between two of them ends the merge at the next boundary, and
+      // the step that would have run does not.
+      ...(options.stopped === undefined ? {} : { stopped: options.stopped }),
       release: async () => {
         await removeWorktree(options.git, options.checkout, worktreePath);
       },
     });
+    const stopped = outcome.steps.find((entry) => entry.outcome === "stopped");
+    stoppedAt = stopped?.step ?? null;
+    record = outcome.record;
   } finally {
     // Scratch, on both paths: the branch holds the work.
     await removeWorktree(options.git, options.checkout, worktreePath).catch(() => {
       // A worktree that could not be removed is cleaned up by the next attempt.
+    });
+  }
+
+  if (stoppedAt !== null) {
+    // The merge stopped before this step ran, so nothing was landed: the pull
+    // request stays open, and the step it stopped at is what a reader starts
+    // from.
+    throw new RunFailed({
+      step: stoppedAt,
+      message: "the merge was stopped before this step",
+      cause: new Error("stopped"),
+      record,
     });
   }
 
@@ -496,48 +610,98 @@ async function mergeOne(
  */
 async function verifyGate(
   options: MergeOptions,
+  factory: SessionFactory,
   worktreePath: string,
+  outputFile: string,
   remainingMs: () => number,
 ): Promise<string> {
   const startedAt = Date.now();
-  const budgetMs = budgetShares(remainingMs()).gatesMs;
+  const budgetMs = budgetShares(remainingMs(), MERGE_GATE_COUNT).gatesMs;
   const left = (): number => Math.max(0, budgetMs - (Date.now() - startedAt));
+  const invocation = gateInvocation(GATE_SCRIPT);
   const run = async (): Promise<void> => {
     const remaining = left();
     if (remaining <= 0) {
       throw new Error("the run's deadline left no budget for the gate");
     }
+    await mkdir(dirname(outputFile), { recursive: true }).catch(() => {});
     await options.run({
-      command: "bash",
-      args: [GATE_SCRIPT],
+      command: invocation.command,
+      args: [...invocation.args],
       cwd: worktreePath,
-      // The gate's own budget, and no more than the run has left: a timeout the
-      // gate never chose is not a verdict.
       timeoutMs: Math.min(options.gateTimeoutMs ?? GATE_TIMEOUT_MS, remaining),
-      // The tail of the output is the evidence; the rest is noise neither the
-      // runner nor the record has to hold.
       maxOutputBytes: GATE_OUTPUT_LIMIT_BYTES,
-      // The build the gate starts dies with the gate: a build that keeps
-      // going writes into the worktree the merge pushes.
       killGroup: true,
+      outputFile,
+    }).catch(async (failure) => {
+      const failed = await gateFailure(GATE_SCRIPT, invocation, failure, outputFile);
+      if (failed.outputFile === undefined) {
+        await rm(outputFile, { force: true }).catch(() => {});
+      }
+      throw failed;
     });
   };
   try {
     await run();
+    await rm(outputFile, { force: true }).catch(() => {});
     return "passed";
   } catch (failure) {
-    // A gate the run's own clock killed is not a failure for the agent to fix:
-    // there is nothing left to spend on the fix either.
     if (left() <= 0) {
       throw failure;
     }
+    const output =
+      failure instanceof CommandFailed
+        ? [failure.stdout, failure.stderr].filter((part) => part.trim() !== "").join("\n")
+        : String(failure);
+    const prompt = [
+      "A pull request branch was brought up to date with its base, and the",
+      "repository's gate failed on the resulting tree. Fix it.",
+      "",
+      "The gate run failed with this output:",
+      "",
+      "```",
+      output,
+      "```",
+      "",
+      "1. Fix what the gate reports. Do not run the gate yourself.",
+      "",
+      "2. Leave the tree with no conflict markers. Do not commit, do not push:",
+      "   the pipeline commits and pushes so the push stays under its control.",
+      "",
+      "   **The fix stays in the tree while this turn runs.** The pipeline keeps",
+      "   the tree and commits it. A stash is not part of what the pipeline",
+      "   commits.",
+    ].join("\n");
     await resolveWithAgent(
       options,
+      factory,
       worktreePath,
-      budgetShares(remainingMs()).sessionMs,
+      budgetShares(remainingMs(), MERGE_GATE_COUNT).sessionMs,
+      prompt,
     );
-    await run();
-    return "passed after the agent's fix";
+    const remaining = left();
+    if (remaining <= 0) {
+      throw new Error("the run's deadline left no budget for the gate");
+    }
+    try {
+      await options.run({
+        command: invocation.command,
+        args: [...invocation.args],
+        cwd: worktreePath,
+        timeoutMs: Math.min(options.gateTimeoutMs ?? GATE_TIMEOUT_MS, remaining),
+        maxOutputBytes: GATE_OUTPUT_LIMIT_BYTES,
+        killGroup: true,
+        outputFile,
+      });
+      await rm(outputFile, { force: true }).catch(() => {});
+      return "passed after the agent's fix";
+    } catch (failure2) {
+      const failed = await gateFailure(GATE_SCRIPT, invocation, failure2, outputFile);
+      if (failed.outputFile === undefined) {
+        await rm(outputFile, { force: true }).catch(() => {});
+      }
+      throw failed;
+    }
   }
 }
 
@@ -550,16 +714,18 @@ async function verifyGate(
  */
 async function resolveWithAgent(
   options: MergeOptions,
+  factory: SessionFactory,
   worktreePath: string,
   deadlineMs: number,
+  prompt: string = MERGE_PROMPT,
 ): Promise<void> {
-  const session = await options.session({
+  const session = await factory({
     cwd: worktreePath,
     systemPromptSections: { [UNTRUSTED_INPUT_SECTION]: UNTRUSTED_INPUT_RULE },
   });
   const result = await runPromptArray({
     session,
-    prompts: [MERGE_PROMPT],
+    prompts: [prompt],
     // The resolution is one state: the conflict, resolved in one turn.
     states: [{ name: "resolve", phase: "Resolve" }],
     deadlineMs,
@@ -589,7 +755,7 @@ async function resolveWithAgent(
       throw failure;
     });
   if (marked.trim() !== "") {
-    throw new Error(`conflict markers remain in ${marked.trim().split("\n")[0] ?? "the tree"}`);
+    throw new Error(`conflict marker "<<<<<<<" remains in ${marked.trim().split("\n")[0] ?? "the tree"}`);
   }
 
   // The resolution is the work; what the session left that the resolution

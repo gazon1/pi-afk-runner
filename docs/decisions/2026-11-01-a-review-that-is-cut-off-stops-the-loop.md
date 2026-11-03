@@ -92,7 +92,7 @@ run left is on the branch, and the next run continues it.
 
 ## Links
 
-- `src/workflow.ts` — the `cutOff` the review gate comes back with, and the abort error the
+- `src/workflow/errors.ts` — the `cutOff` the review gate comes back with, and the abort error the
   engine stops the run on.
 - `src/runner.ts` — the cut-off the review raises, and the run that reports it instead of a
   failed review.

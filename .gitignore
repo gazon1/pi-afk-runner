@@ -1,10 +1,9 @@
-# the components are installed here by `pi install -l`; they are declared in
-# .pi/settings.json, not committed
-.pi/npm/
-
 node_modules/
 dist/
 *.log
 
 # the runner writes its lock and its run records here
 build/
+
+# the host's own state — the gh device id, and whatever else a tool leaves here
+.local/

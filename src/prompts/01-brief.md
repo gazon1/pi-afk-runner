@@ -18,6 +18,10 @@ first of four turns. Do not change any file yet.
    no extra file, no speculative generality, no refactoring the brief did not
    ask for.
 
+   You have never seen this repository, and it is large: the
+   `agent_pack_codebase` tool packs a part of it into one document, so you read
+   the part the brief is about in one call instead of opening file after file.
+
 3. **Work out the acceptance criteria.** The brief carries them. Write down
    what "done" means, in terms someone else could check.
 

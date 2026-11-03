@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
@@ -19,10 +20,10 @@ import {
   type MergeOptions,
 } from "../src/merge.js";
 import {
-  VERDICT_TOOL_NAME,
   type AgentSession,
   type SessionFactory,
 } from "../src/session.js";
+import { VERDICT_TOOL_NAME } from "../src/decisions/index.js";
 import { createFixtureRepository, gitOutput } from "./git-sandbox.js";
 
 /** The stand-in for the repository's own setup script. */
@@ -601,6 +602,104 @@ describe("the merge pipeline", () => {
     }
   });
 
+  it("test_the_merge_writes_a_journal_beside_its_record", async () => {
+    // The record of a merge is written when the merge ends — and a merge that
+    // is killed writes no record at all. The journal is the file beside it: it
+    // is there before the session works, and it grows while the merge works.
+    const fixture = await createFixtureRepository({
+      files: { "scripts/setup-worktree.sh": SETUP, "shared.txt": "the base\n" },
+    });
+    try {
+      // The branch and the base both change the same file, so the merge has
+      // to resolve a conflict — and the resolution is a session.
+      await pushBranch(fixture, "shared.txt", "the branch\n");
+      await moveMain(fixture, "the base moved\n");
+
+      const { gh } = stubGh([reviewedPullRequest()]);
+      const session: SessionFactory = async (sessionOptions) => {
+        sessionOptions.onEvent?.("the merge agent is working");
+        return resolvingSession("both sides\n")(sessionOptions);
+      };
+
+      await mergeReviewedPullRequests(options(fixture, gh, { session }));
+
+      // The journal sits beside the record, under the same directory shape.
+      const journal = join(
+        fixture.repo,
+        "build",
+        "diagnostics",
+        "merge",
+        "pr-7",
+        "2026-11-02T09-00-00-000Z-abcdef12.log",
+      );
+      expect(existsSync(journal)).toBe(true);
+      expect(await readFile(journal, "utf8")).toContain("the merge agent is working");
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("test_the_sweep_writes_a_journal_beside_the_pull_request_journals", async () => {
+    // Each pull request the sweep starts has a journal of its own. The sweep has
+    // one too: a sweep killed between two pull requests leaves only those
+    // behind, and nothing says what the sweep was doing.
+    const fixture = await createFixtureRepository({ files: { "scripts/setup-worktree.sh": SETUP } });
+    try {
+      const { gh } = stubGh([
+        reviewedPullRequest({ number: 7, isDraft: true }),
+        reviewedPullRequest({ number: 8, comments: [`${REVIEW_MARKER}\n\n**Verdict:** fail`] }),
+        reviewedPullRequest({ number: 9, headRefName: "someone/feature" }),
+      ]);
+
+      await mergeReviewedPullRequests(options(fixture, gh));
+
+      // The file sits under `build/diagnostics/merge/`, beside the per-pull-request
+      // directories, and it is one file per run.
+      const journal = join(
+        fixture.repo,
+        "build",
+        "diagnostics",
+        "merge",
+        "2026-11-02T09-00-00-000Z-abcdef12.log",
+      );
+      expect(existsSync(journal)).toBe(true);
+      const lines = await readFile(journal, "utf8");
+      expect(lines).toContain("left #7 alone — it is a draft");
+      expect(lines).toContain("left #8 alone — its newest review said fail");
+      expect(lines).toContain("left #9 alone — its branch is not ours");
+      // The summary counts the pull requests the sweep left alone — the one
+      // whose branch is not ours is one of them, and the result does not name
+      // it.
+      expect(lines).toContain("the sweep ended — 0 landed, 3 left alone, 0 stopped");
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("test_a_sweep_that_dies_before_it_reads_the_candidates_leaves_its_journal", async () => {
+    const fixture = await createFixtureRepository({ files: { "scripts/setup-worktree.sh": SETUP } });
+    try {
+      const gh = async (): Promise<string> => {
+        throw new Error("gh is down");
+      };
+
+      await expect(mergeReviewedPullRequests(options(fixture, gh))).rejects.toThrow("gh is down");
+
+      // The journal is there before the candidates are read, so a sweep that
+      // dies leaves the file behind.
+      const journal = join(
+        fixture.repo,
+        "build",
+        "diagnostics",
+        "merge",
+        "2026-11-02T09-00-00-000Z-abcdef12.log",
+      );
+      expect(existsSync(journal)).toBe(true);
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
   it("test_the_record_says_the_deadline_cut_the_merge_session", async () => {
     const fixture = await createFixtureRepository({
       files: { "scripts/setup-worktree.sh": SETUP, "shared.txt": "the base\n" },
@@ -732,6 +831,46 @@ describe("the merge pipeline", () => {
 
       // not merged
       expect(calls.some((call) => call.includes("merge"))).toBe(false);
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("test_a_stopped_merge_ends_at_the_next_step_and_lands_nothing", async () => {
+    const fixture = await createFixtureRepository({ files: { "scripts/setup-worktree.sh": SETUP } });
+    try {
+      await pushBranch(fixture);
+      const { gh, merged } = stubGh([reviewedPullRequest()]);
+      // The flag is asked once before the candidate and once before every
+      // step, so the third ask is the one that finds the stop: the worktree
+      // step ran, and the step after it does not.
+      let asks = 0;
+      const stopped = (): boolean => {
+        asks += 1;
+        return asks >= 3;
+      };
+
+      const result = await mergeReviewedPullRequests(options(fixture, gh, { stopped }));
+
+      // The pull request stays open and unlanded.
+      expect(result.merged).toEqual([]);
+      expect(merged).toEqual([]);
+      // The failure names the step the merge stopped at.
+      expect(result.failed[0]?.step).toBe("merge-sync");
+      expect(result.failed[0]?.message).toContain("stopped");
+
+      const record = await readFile(
+        join(
+          fixture.repo,
+          "build",
+          "diagnostics",
+          "merge",
+          "pr-7",
+          "2026-11-02T09-00-00-000Z-abcdef12.md",
+        ),
+        "utf8",
+      );
+      expect(record).toContain("merge-sync — stopped");
     } finally {
       await fixture.dispose();
     }

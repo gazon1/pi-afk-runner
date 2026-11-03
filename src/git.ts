@@ -27,9 +27,12 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { createWriteStream } from "node:fs";
+import { createWriteStream, existsSync } from "node:fs";
 import { rm } from "node:fs/promises";
-import { join } from "node:path";
+import { resolve, join } from "node:path";
+import { simpleGit } from "simple-git";
+
+import { KILL_GRACE_MS, withHardStop } from "./bound.js";
 
 /** Who the claim is attributed to. Part of the tag object's identity. */
 export const CLAIM_TAGGER = {
@@ -64,6 +67,14 @@ export interface CommandSpec {
    * still holds only the tail.
    */
   readonly outputFile?: string;
+  /**
+   * The environment the command runs with, over the runner's own.
+   *
+   * A gate needs the tools of the checkout it runs in: the repository's gate
+   * CLI lives in a venv of that checkout's own, and a gate that cannot find
+   * it is a gate that never got to answer.
+   */
+  readonly env?: Readonly<Record<string, string>>;
   /**
    * Whether a timeout kills the command's whole tree, not just the command.
    *
@@ -184,19 +195,133 @@ class OutputTail {
 }
 
 /**
- * Runs the real `git`.
+ * Runs the real `git`, through simple-git.
  *
- * `spawn` rather than `execFile`, because `git mktag` reads its payload from
- * stdin, and `execFile` has no way to write to it — the command would wait
- * for input that never comes.
+ * The runner's git is the real git: a claim is a ref, a push is a push, and a
+ * claim that is not exclusive is a claim two runners hold. simple-git runs the
+ * binary, feeds it and reads it; what the commands **mean** is this file's.
+ *
+ * Every option is spelled out in full: simple-git puts
+ * `GIT_TEST_DISALLOW_ABBREVIATED_OPTIONS` into the child, and a git that is
+ * told to refuse abbreviations refuses a short one.
  */
 export const runGit: GitRunner = (args, options) =>
-  runCommand({
-    command: "git",
-    args: [...args],
-    cwd: options.cwd,
-    ...(options.input === undefined ? {} : { input: options.input }),
-  });
+  runGitWithTimeout(args, options, COMMAND_TIMEOUT_MS);
+
+/**
+ * What a git call said about itself.
+ *
+ * The shape simple-git hands over, named here so that the failure can be built
+ * from it without a git in sight.
+ */
+export interface GitCallResult {
+  /** The git's own answer, or `null` when it was killed before it answered. */
+  readonly exitCode: number | null;
+  readonly stdOut: readonly Buffer[];
+  readonly stdErr: readonly Buffer[];
+}
+
+/**
+ * The failure a git call raises, from what the call said about itself.
+ *
+ * simple-git wraps the error it is given into one of its own, and the code
+ * above this one knows the runner's errors — a claim that was refused is a
+ * `CommandFailed`, and that is what says so. The failure is built here and
+ * thrown as it is.
+ *
+ * A command that answered has no failure to report, and that is what `undefined`
+ * means here: the handler is called for every task, the successful ones too.
+ */
+export function gitFailure(
+  error: Buffer | Error | undefined,
+  result: GitCallResult,
+  context: {
+    /** Whether the bound was spent and the git was asked to stop. */
+    readonly aborted: boolean;
+    readonly timeoutMs: number;
+    readonly args: readonly string[];
+  },
+): Error | undefined {
+  if (error === undefined && result.exitCode === 0) {
+    return undefined;
+  }
+  const stdout = Buffer.concat(result.stdOut).toString("utf8");
+  const stderr = Buffer.concat(result.stdErr).toString("utf8");
+  if (context.aborted) {
+    // The bound was spent and the git was killed before it answered.
+    return new CommandTimedOut(context.timeoutMs, "git", context.args, stdout, stderr);
+  }
+  if (result.exitCode !== null && result.exitCode !== undefined && result.exitCode !== 0) {
+    // Git itself refused: the exit code is its answer, and what it said on the
+    // error stream is the reason.
+    return new CommandFailed(result.exitCode, "git", context.args, stdout, stderr);
+  }
+  // The process failed before it could answer — it is not there, or it was
+  // killed. Its own error says what happened to it.
+  return error instanceof Error ? error : new CommandFailed(1, "git", context.args, stdout, stderr);
+}
+
+/**
+ * Runs the real `git`, with the bound every command gets.
+ *
+ * The bound is ours as well as the child's: simple-git asks the child to stop
+ * and waits for it, and a child that ignores the request would keep the call
+ * open — and the run waiting on it — for as long as it likes. The run stops
+ * waiting whether the child does or not.
+ */
+export async function runGitWithTimeout(
+  args: readonly string[],
+  options: { readonly cwd: string; readonly input?: string },
+  timeoutMs: number,
+  killGraceMs: number = KILL_GRACE_MS,
+): Promise<string> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  // The failure the git call raised, kept here: simple-git wraps the error it
+  // is given into one of its own, and what the caller catches has to be the
+  // error this file wrote.
+  let failure: Error | undefined;
+  try {
+    const git = simpleGit({
+      baseDir: options.cwd,
+      // The deadline is the runner's: a git that hangs must not hold a run for
+      // ever, and a git that was killed has not answered.
+      abort: controller.signal,
+      // The whole environment, as the child git has always seen it: simple-git
+      // keeps the `GIT_*` keys out of the child unless they are named, and
+      // `GIT_CONFIG_COUNT` carries a credential in CI — a git that cannot see it
+      // cannot authenticate.
+      allowEnvironment: Object.keys(process.env),
+      // The payload of a command that reads its input — `mktag`,
+      // `update-ref --stdin`. A command that reads nothing gets an empty
+      // payload, so its standard input is closed rather than left open.
+      input: () => (options.input === undefined ? Buffer.alloc(0) : options.input),
+      errors: (error, result) => {
+        const raised = gitFailure(error, result, {
+          aborted: controller.signal.aborted,
+          timeoutMs,
+          args,
+        });
+        failure = raised;
+        return raised;
+      },
+    });
+    return await withHardStop(git.raw([...args]), {
+      timeoutMs,
+      killGraceMs,
+      // The git was asked to stop and did not: the run stops waiting, and the
+      // output of a git that never answered is empty.
+      timeoutError: () => new CommandTimedOut(timeoutMs, "git", args, "", ""),
+    });
+  } catch (thrown) {
+    if (failure !== undefined) {
+      throw failure;
+    }
+    throw thrown;
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 /**
  * Kill the command, and the tree it started when it leads one.
@@ -221,9 +346,9 @@ function killTree(child: ChildProcess, group: boolean): void {
 /**
  * Runs a command.
  *
- * `spawn` rather than `execFile`, because `git mktag` reads its payload from
- * stdin, and `execFile` has no way to write to it — the command would wait
- * for input that never comes.
+ * The repository's own gates: `spawn` rather than `execFile`, because a gate
+ * may have to write to the command's standard input, and `execFile` has no way
+ * to write to it — the command would wait for input that never comes.
  */
 export const runCommand: CommandRunner = (spec) =>
   new Promise<string>((resolve, reject) => {
@@ -231,6 +356,10 @@ export const runCommand: CommandRunner = (spec) =>
     const child = spawn(spec.command, [...spec.args], {
       cwd: spec.cwd,
       stdio: ["pipe", "pipe", "pipe"],
+      // The runner's own environment, with the caller's on top of it: a gate
+      // that needs the tools of the checkout it runs in has to be able to
+      // find them.
+      ...(spec.env === undefined ? {} : { env: { ...process.env, ...spec.env } }),
       // The command leads its own process group, when the caller asks for it:
       // a gate that is killed half-way through must take its build with it,
       // or the build keeps writing into the worktree the runner restores and
@@ -549,6 +678,37 @@ export async function hasUnmergedEntries(git: GitRunner, cwd: string): Promise<b
 }
 
 /**
+ * The paths that hold the work, against the base.
+ *
+ * The branch's own commits, measured from the **merge base**: the base's own
+ * changes are not the branch's work, and a branch that started from an older
+ * base would otherwise read as a change of its own. On top of them, the tree's
+ * own changes: the files that are modified and the files that are new.
+ *
+ * Git's own rules decide what counts. An ignored file is the host's business,
+ * not the work.
+ */
+export async function changedPaths(
+  git: GitRunner,
+  cwd: string,
+  base: string,
+): Promise<readonly string[]> {
+  const committed = await git(["diff", "--name-only", `${base}...HEAD`], { cwd });
+  const modified = await git(["diff", "--name-only", "HEAD"], { cwd });
+  const untracked = await git(["ls-files", "--others", "--exclude-standard"], { cwd });
+  const paths = new Set<string>();
+  for (const output of [committed, modified, untracked]) {
+    for (const raw of output.split("\n")) {
+      const path = raw.trim();
+      if (path !== "") {
+        paths.add(path);
+      }
+    }
+  }
+  return [...paths];
+}
+
+/**
  * The full ref of a branch.
  *
  * `git ls-remote` matches the **tail** of a ref, so `main` would also match
@@ -592,6 +752,29 @@ export async function readClaimBase(
     const match = /^[0-9a-f]+\s+refs\/tags\/.*\^\{\}$/.exec(line.trim());
     if (match !== null) {
       return line.trim().split(/\s+/)[0] ?? null;
+    }
+  }
+  return null;
+}
+
+/**
+ * The claim object the remote holds for an issue, or null when it holds none.
+ *
+ * The claim is an annotated tag, so the remote lists it twice: the tag object,
+ * and the commit it peels to. The **tag object** is the claim — it carries the
+ * nonce — and it is what tells two claims apart: two runners that took the same
+ * issue from the same base agree on the commit and differ on the object.
+ */
+export async function readClaimObject(
+  git: GitRunner,
+  cwd: string,
+  options: { readonly remote: string; readonly issueNumber: number },
+): Promise<string | null> {
+  const output = await git(["ls-remote", options.remote, claimRef(options.issueNumber)], { cwd });
+  for (const line of output.trim().split("\n")) {
+    const [sha, ref] = line.trim().split(/\s+/);
+    if (ref === claimRef(options.issueNumber)) {
+      return sha ?? null;
     }
   }
   return null;
@@ -773,13 +956,28 @@ export async function fetchCommit(
   }
 }
 
-/** Bring one ref's objects down from the remote. */
+/** The fetches of this process, one after another. */
+let fetchQueue: Promise<unknown> = Promise.resolve();
+
+/**
+ * Bring one ref's objects down from the remote.
+ *
+ * The fetch of one checkout is **one at a time**. The ref it updates — the
+ * remote-tracking one — belongs to the checkout and not to the run, and two
+ * fetches that want it at the same time make the second one fail with
+ * "cannot lock ref". The workers of one sweep share the checkout, so they
+ * take turns.
+ */
 export async function fetchRef(
   git: GitRunner,
   cwd: string,
   options: { readonly remote: string; readonly ref: string },
 ): Promise<void> {
-  await git(["fetch", options.remote, options.ref], { cwd });
+  const fetch = fetchQueue.then(() => git(["fetch", options.remote, options.ref], { cwd }));
+  // The queue goes on even when a fetch fails: the next one is not this one's
+  // business.
+  fetchQueue = fetch.catch(() => {});
+  await fetch;
 }
 
 /**
@@ -787,8 +985,55 @@ export async function fetchRef(
  *
  * The branch is created here, on the base the claim recorded, so the work
  * starts from exactly the commit the claim was taken against.
+ *
+ * The worktrees of one checkout are made **one at a time**. `git worktree add`
+ * writes the registration before it creates the directory, and `git worktree
+ * prune` — which a finished run calls — removes a registration whose directory
+ * is not there yet. The workers of one sweep share the checkout, so they take
+ * turns.
  */
 export async function addWorktree(
+  git: GitRunner,
+  cwd: string,
+  options: {
+    readonly path: string;
+    readonly branch: string;
+    readonly baseSha: string;
+  },
+): Promise<void> {
+  await alone(() => addWorktreeNow(git, cwd, options));
+}
+
+/**
+ * Put a worktree on a commit, detached.
+ *
+ * The worktrees of one checkout are made **one at a time**, this one included:
+ * it writes the registration before it creates the directory, and a `prune`
+ * from another worker would delete it.
+ */
+export async function addDetachedWorktree(
+  git: GitRunner,
+  cwd: string,
+  options: { readonly path: string; readonly sha: string },
+): Promise<void> {
+  await alone(() =>
+    git(["worktree", "add", "--detach", options.path, options.sha], { cwd }),
+  );
+}
+
+/** The worktree commands of this process, one after another. */
+let worktreeQueue: Promise<unknown> = Promise.resolve();
+
+/** Run a command of the checkout on its own. */
+async function alone<T>(run: () => Promise<T>): Promise<T> {
+  const next = worktreeQueue.then(run);
+  // The queue goes on even when a command fails: the next one is not this one's
+  // business.
+  worktreeQueue = next.catch(() => {});
+  return next;
+}
+
+async function addWorktreeNow(
   git: GitRunner,
   cwd: string,
   options: {
@@ -839,6 +1084,14 @@ export async function addWorktree(
  * its commits alone, so the work a failed run did is durable.
  */
 export async function removeWorktree(
+  git: GitRunner,
+  cwd: string,
+  path: string,
+): Promise<void> {
+  await alone(() => removeWorktreeNow(git, cwd, path));
+}
+
+async function removeWorktreeNow(
   git: GitRunner,
   cwd: string,
   path: string,
@@ -953,4 +1206,160 @@ export async function pushWorkBranch(
     issueNumber: options.issueNumber,
     ...(options.verify === undefined ? {} : { verify: options.verify }),
   });
+}
+
+/**
+ * What the restore of a worktree did.
+ */
+export interface RestoredWorktree {
+  /** The worktree did not come back — why. */
+  readonly problem: string | null;
+  /** The worktree came back, but the repository's setup script did not run in it — why. */
+  readonly unprepared: string | null;
+}
+
+/**
+ * Put the worktree back where the run had it, so a session whose working
+ * directory is that path can read again.
+ *
+ * A worktree that comes back is **prepared**: the repository's own setup
+ * script runs in it, the same way it runs in a worktree the runner makes. A
+ * worktree without it holds tracked files only — no `.env`, no per-worktree
+ * hooks, no private Gradle home — and the gates fail in a way that is not
+ * about the work.
+ *
+ * A worktree that is still there is left as it is: the runner prepared it
+ * when it made it, and preparing it again would be the runner's own step
+ * done twice.
+ */
+export async function restoreWorktree(
+  git: GitRunner,
+  options: {
+    readonly worktreePath: string;
+    readonly branch: string;
+    readonly remote: string;
+    readonly checkout: string;
+  },
+  /**
+   * The repository's own preparation, run in the worktree that came back.
+   *
+   * The caller runs it, so this module does not know which script the
+   * repository has. It answers with the reason it could not run, or null when
+   * it did.
+   */
+  prepare: (worktreePath: string) => Promise<string | null>,
+): Promise<RestoredWorktree> {
+  const targetPath = resolve(options.worktreePath);
+  const prune = async (): Promise<void> => {
+    try {
+      await git(["worktree", "prune"], { cwd: options.checkout });
+    } catch {
+      // The registration is still there. The `worktree add` below says "already
+      // exists", and the retry is what answers it.
+    }
+  };
+  let listError: string | null = null;
+  const registered = async (): Promise<boolean | null> => {
+    try {
+      const list = await git(["worktree", "list", "--porcelain"], { cwd: options.checkout });
+      listError = null;
+      return list.split("\n").some((line) => {
+        if (!line.startsWith("worktree ")) return false;
+        // Git prints absolute paths, so one comparison of resolved paths is
+        // the whole question.
+        return resolve(line.slice("worktree ".length).trim()) === targetPath;
+      });
+    } catch (failure) {
+      listError = errorMessage(failure);
+      return null;
+    }
+  };
+  /**
+   * Forget the worktree: the directory, and the registration of it.
+   *
+   * A directory git does not know makes `worktree add` refuse, and a
+   * registration git still knows makes it refuse too. Both have to go.
+   */
+  const reset = async (): Promise<void> => {
+    try {
+      await rm(targetPath, { recursive: true, force: true });
+    } catch {
+      // The directory is still there. The `worktree add` below says so, and
+      // the retry is what answers it.
+    }
+    await prune();
+  };
+  const add = async (args: readonly string[]): Promise<string | null> => {
+    try {
+      await git(args, { cwd: options.checkout });
+      return null;
+    } catch (failure) {
+      return errorMessage(failure);
+    }
+  };
+  const addBranch = (): Promise<string | null> =>
+    add(["worktree", "add", targetPath, options.branch]);
+  // A review-only run leaves a detached worktree and may have no local branch.
+  // On a single-branch clone the branch also has no remote-tracking ref, so put
+  // the chat on the fetched commit itself.
+  const addDetached = async (): Promise<string | null> => {
+    const tracking = `refs/remotes/${options.remote}/${options.branch}`;
+    await git(["fetch", options.remote, `${options.branch}:${tracking}`], {
+      cwd: options.checkout,
+    }).catch(() => {});
+    return add(["worktree", "add", "--detach", targetPath, tracking]);
+  };
+  /**
+   * The repository's own preparation, run from the worktree's own copy of the
+   * script — the script works on the checkout it lives in.
+   */
+  const prepared = async (): Promise<string | null> => await prepare(targetPath);
+
+  await prune();
+  if (existsSync(targetPath)) {
+    const isRegistered = await registered();
+    if (isRegistered === true) {
+      // It is still there, and the runner prepared it when it made it.
+      return { problem: null, unprepared: null };
+    }
+    if (isRegistered === null) {
+      // The checkout could not say whether the worktree is registered. Do not
+      // remove it: a directory git does not know would make `worktree add`
+      // refuse, but here we cannot tell, and removing it would destroy the
+      // run's work.
+      return {
+        problem: `could not tell whether the worktree is registered (${listError ?? "unknown error"}); left as it was`,
+        unprepared: null,
+      };
+    }
+    // A directory git does not know would make `worktree add` refuse.
+    await reset();
+  }
+  const first = await addBranch();
+  if (first === null) {
+    return { problem: null, unprepared: await prepared() };
+  }
+  if (first.includes("already exists")) {
+    // A registration prune missed: forget the tree and try once more.
+    await reset();
+    const second = await addBranch();
+    if (second === null) {
+      return { problem: null, unprepared: await prepared() };
+    }
+  }
+  const detached = await addDetached();
+  if (detached !== null) {
+    return { problem: detached, unprepared: null };
+  }
+  return { problem: null, unprepared: await prepared() };
+}
+
+/**
+ * The message of a failure.
+ *
+ * The CLI has a copy of this, and it cannot be the same one: the CLI imports
+ * this module, and an import that goes both ways is a cycle.
+ */
+function errorMessage(failure: unknown): string {
+  return failure instanceof Error ? failure.message : String(failure);
 }

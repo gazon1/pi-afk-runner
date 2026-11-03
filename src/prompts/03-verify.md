@@ -1,7 +1,7 @@
 # Check your own work before it is reviewed
 
-You have made the change and the gates have run. Now look at it again with
-fresh eyes, because you wrote it and cannot see it clearly. Activate the
+You have made the change. Now look at it again with fresh eyes, because you
+wrote it and cannot see it clearly. Activate the
 `code-review-pr-workflow` skill (`$code-review-pr-workflow`) — the
 repository's own review skill — and apply its self-review checklist to your
 own diff.
@@ -14,6 +14,8 @@ whose, and the runner does not read it. A stash of your own, for your own
 reasons, is yours to keep; the work is not in it.
 
 1. **Read the diff.** `git diff main...HEAD`. Every line of it is yours now.
+   The code around it is in the tree: the `agent_pack_codebase` tool packs the
+   part the diff touches into one document.
 
 2. **Check it against the brief's acceptance criteria.** One by one. Not "does
    it look right" — does *this* criterion hold, and can you show it?
@@ -25,30 +27,17 @@ reasons, is yours to keep; the work is not in it.
    - Are the tests real? A test that cannot fail proves nothing.
    - Is there a boundary you crossed without being asked to?
 
-4. **Fix what you find.** If the gates found something, it is fixed now, not
-   described. If you find something the gates cannot see, fix it too.
+4. **Fix what you find.** If you find something, it is fixed now, not
+   described. Nothing here is checked by a build, so what you find is what
+   you fix.
 
-5. **Run the gates again.** The gates ran before your fixes, so they have not
-   seen them. If you changed anything, run them again, in this order:
+5. **Do not build, do not compile, do not run the checks.** This run does
+   not gate the tree and does not compile it: the tree is pushed as you leave
+   it, and the repository's own CI judges it. Review by reading — the diff, the
+   code around it, the tests — and not by building.
 
-   ```bash
-   ./check.sh
-   just tcheck-evals
-   just docs-audit
-   ```
-
-   Fix what they report and run them again. A gate that fails is the work not
-   being finished, not an obstacle to work around. If you changed nothing, the
-   run you did in the previous turn still stands.
-
-   A failure the base branch already has is not yours to fix. Name it and move
-   on: do not re-run a gate suite on a stashed tree to attribute a failure to
-   the base. Your time is a share of the run's, and a second run of a long
-   suite spends it.
-
-6. **Report.** Say what you changed and what the gates said. The runner runs
-   the gates itself when you stop, on the tree you leave: a gate that fails
-   there ends the run, and that is where the failure belongs.
+6. **Report.** Say what you changed, and what you did not check — a change
+   that was not compiled is said so, not hidden.
 
 7. **Say why.** If you changed your approach, or left something out, say so
    in the commit message, in one sentence a reader can check.

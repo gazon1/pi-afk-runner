@@ -97,10 +97,18 @@ The set the repository's own review skill names
 (`.agents/skills/code-review-pr-workflow/SKILL.md:40-50`):
 
 ```bash
-./check.sh            # the static gates, the JVM tests, the Android assemble, detekt
+./check.sh --fast      # the fast lane: the checks this change can break
 just tcheck-evals     # the agent workflow evals
 just docs-audit       # frontmatter, doc sizes, dead references, the digest
 ```
+
+**The fast lane, not the full loop.** `./check.sh --fast` compiles the app, runs the test
+classes the change can break, lints the files it touched, and runs the tree-level static
+gates. It skips the slow half — the whole JVM suite, the architecture gates, the ADR and
+desktop suites, the module-wide detekt sweep and the gate-machinery steps — because the
+full loop costs about fifteen minutes (`docs/testing/gate-costs.md`) and most of that is
+spent on what the change did not touch. CI runs the full loop, and so does `./check.sh`
+without `--fast`: what the fast lane skips is judged there, not nowhere.
 
 **Not `just gate`.** It is three steps, and the third runs the Maestro agenda flows on a device
 (`.just/tests/mod.just:190-220`, `docs/decisions/2026-10-04-one-gate-recipe.md`), which an

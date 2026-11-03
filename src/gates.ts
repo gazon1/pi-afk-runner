@@ -1,41 +1,130 @@
 /**
  * The gates the target repository runs, and the runner's own run of them.
  *
- * The list is the **target repository's**, and it is written down **once**:
- * `contract/afk-runner.md` copies it out of the target's own review skill,
- * `GATES` below is the runner's copy of that list, and a test holds the two
- * together. Two lists are two rules that drift apart, and the one that drifts
- * is the one that judges the work.
- *
- * The runner runs the gates itself. An agent that is told to run them is an
- * instruction, and an instruction is followed as often as not — the runner is
- * the one place that cannot forget. The agent still runs them, because it has
- * to fix what they report; the agent's word about them is not what the push
- * rests on.
+ * A run runs **no** gate unless it is asked to: the command line names them
+ * (`--gate "./check.sh --fast"`), or the repository's own file in the root of
+ * the checkout names them (`.afk-runner.json`). The contract still names three
+ * gates, and the machinery that runs them is still here — but nothing runs
+ * them unless somebody says so, and the tree that is pushed is the tree the
+ * agent left.
  *
  * The gates run in the worktree, on the tree the agent left, and the tree they
  * judged is the tree that is pushed.
  */
 
-import { mkdir, rm, stat } from "node:fs/promises";
-import { dirname } from "node:path";
+import { mkdir, readFile, rm, stat } from "node:fs/promises";
+import { dirname, join } from "node:path";
 
 import { CommandFailed, CommandTimedOut, type CommandRunner } from "./git.js";
 
 /**
- * The gates the target repository runs, in the order they run.
+ * The gates a run runs when nothing says otherwise: none.
  *
- * These are the **repository's** gates, not the runner's: the contract names
- * them, and a runner that judged a change by a gate of its own invention
- * would be judging it by a rule the repository does not have.
- *
- * The list is the whole of it. `just gate` is not it: it runs the Maestro
- * flows on a device, and it does not run `docs-audit`.
+ * The runner's speed is the point of a run that is not a gate, and the
+ * repository's own CI still judges the pull request.
  */
-export const GATES = ["./check.sh", "just tcheck-evals", "just docs-audit"] as const;
+export const NO_GATES: readonly string[] = [];
 
-/** One of the target repository's gates. */
-export type Gate = (typeof GATES)[number];
+/**
+ * The settings a repository may carry, in its own root.
+ *
+ * The file is the **repository's**: it says which gates a run on it runs, and
+ * the runner reads it from the checkout it works. A repository with no such
+ * file — or with no gates in it — runs no gates.
+ */
+export const GATE_CONFIG_FILE = ".afk-runner.json";
+
+/** What a repository says about the gates a run on it runs. */
+export interface GateSettings {
+  /** The gates, in the order they run. */
+  readonly gates: readonly string[];
+  /** How long one gate may take, in milliseconds. */
+  readonly gateTimeoutMs: number;
+}
+
+/** The message of a failure, whatever it was thrown as. */
+function failureMessage(failure: unknown): string {
+  return failure instanceof Error ? failure.message : String(failure);
+}
+
+/**
+ * Read the repository's own gate settings, or nothing when it has no file.
+ *
+ * A file that cannot be read is the repository's own mistake and ends the run
+ * where it stands: a runner that quietly falls back to the contract's gates
+ * would judge a tree by a list the repository did not ask for.
+ */
+export async function readGateSettings(
+  checkout: string,
+): Promise<GateSettings | undefined> {
+  const path = join(checkout, GATE_CONFIG_FILE);
+  let raw: string;
+  try {
+    raw = await readFile(path, "utf8");
+  } catch (failure) {
+    if ((failure as NodeJS.ErrnoException).code === "ENOENT") {
+      return undefined;
+    }
+    throw new Error(`${GATE_CONFIG_FILE} could not be read: ${failureMessage(failure)}`);
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (failure) {
+    throw new Error(`${GATE_CONFIG_FILE} is not valid JSON: ${failureMessage(failure)}`);
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error(`${GATE_CONFIG_FILE} must hold an object`);
+  }
+  const settings = parsed as { readonly gates?: unknown; readonly gateTimeoutMs?: unknown };
+
+  if (settings.gates !== undefined && !Array.isArray(settings.gates)) {
+    throw new Error(`${GATE_CONFIG_FILE}: "gates" must be a list of commands`);
+  }
+  const gates = (settings.gates ?? NO_GATES) as readonly unknown[];
+  for (const gate of gates) {
+    if (typeof gate !== "string" || gate.trim() === "") {
+      throw new Error(`${GATE_CONFIG_FILE}: every gate must be a command`);
+    }
+  }
+  if (
+    settings.gateTimeoutMs !== undefined &&
+    (!Number.isInteger(settings.gateTimeoutMs) ||
+      (settings.gateTimeoutMs as number) <= 0)
+  ) {
+    throw new Error(
+      `${GATE_CONFIG_FILE}: "gateTimeoutMs" must be a whole number of milliseconds`,
+    );
+  }
+
+  return {
+    gates: gates.map((gate) => (gate as string).trim()),
+    gateTimeoutMs: (settings.gateTimeoutMs as number | undefined) ?? GATE_TIMEOUT_MS,
+  };
+}
+
+/**
+ * The gates a run runs, and how long each may take.
+ *
+ * The command line wins over the repository's file, and neither of them means
+ * any gate at all: a run that nobody asked to gate runs no gate.
+ */
+export function resolveGateSettings(options: {
+  /** The gates the command line named. */
+  readonly cli?: {
+    readonly gates?: readonly string[];
+    readonly gateTimeoutMs?: number;
+  };
+  /** The settings the repository's own file carried. */
+  readonly repo?: GateSettings | undefined;
+}): GateSettings {
+  const cli = options.cli;
+  const repo = options.repo;
+  const gates = cli?.gates ?? repo?.gates ?? NO_GATES;
+  const gateTimeoutMs = cli?.gateTimeoutMs ?? repo?.gateTimeoutMs ?? GATE_TIMEOUT_MS;
+  return { gates: [...gates], gateTimeoutMs };
+}
 
 /**
  * How long one gate may run before the runner gives up on it.
@@ -70,15 +159,15 @@ export interface GateInvocation {
  * The command that runs a gate.
  *
  * Derived from the gate's own name, so the list stays the only place the
- * gates are written down: a gate named `./check.sh` is run by the shell, and
- * a gate named `just <recipe>` is run by `just`.
+ * gates are written down: a gate named `./check.sh --fast` is run by the
+ * shell with that flag, and a gate named `just <recipe>` is run by `just`.
  */
 export function gateInvocation(gate: string): GateInvocation {
-  if (gate.startsWith("./")) {
-    return { command: "bash", args: [gate] };
+  const [name, ...args] = gate.split(" ");
+  if (name?.startsWith("./")) {
+    return { command: "bash", args: [name, ...args] };
   }
-  const [command, ...args] = gate.split(" ");
-  return { command: command ?? gate, args };
+  return { command: name ?? gate, args };
 }
 
 /**
@@ -156,17 +245,19 @@ function gateFailureMessage(options: {
   if (options.reason === "unfinished") {
     return `the gate ${options.gate} did not finish: ${options.detail ?? "it was killed"}`;
   }
-  const said = firstLine(options.output);
+  const said = lastLine(options.output);
   const how = options.exitCode === undefined ? "failed" : `failed (exit ${options.exitCode})`;
   return said === ""
     ? `the gate ${options.gate} ${how}`
     : `the gate ${options.gate} ${how}: ${said}`;
 }
 
-/** The first line of what a gate printed. */
-function firstLine(text: string): string {
-  for (const line of text.split("\n")) {
-    if (line.trim() !== "") {
+/** The last non-empty line of what a gate printed. */
+function lastLine(text: string): string {
+  const lines = text.split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i];
+    if (line !== undefined && line.trim() !== "") {
       return line.trim();
     }
   }
@@ -180,7 +271,7 @@ function firstLine(text: string): string {
  * apart: a gate that refused the change, a host that cannot run the gate, and
  * a gate that never got to answer.
  */
-async function gateFailure(
+export async function gateFailure(
   gate: string,
   invocation: GateInvocation,
   failure: unknown,
@@ -269,10 +360,36 @@ export async function runGates(options: {
    * of a green build is evidence of nothing.
    */
   readonly outputFile?: string;
+  /**
+   * The gates to run, in the order they run.
+   *
+   * None when it is not given: a run that was not told to run a gate runs no
+   * gate.
+   */
+  readonly gates?: readonly string[];
+  /**
+   * How long one gate may take, in milliseconds.
+   *
+   * The contract's own budget when it is not given.
+   */
+  readonly gateTimeoutMs?: number;
+  /**
+   * The environment the gates run with, over the runner's own.
+   *
+   * The repository's own setup says which PATH its tools live under: the gate
+   * CLI is an editable install of that checkout's own venv, and a gate that
+   * cannot find it never got to answer.
+   */
+  readonly env?: Readonly<Record<string, string>>;
 }): Promise<string> {
+  const gates = options.gates ?? NO_GATES;
+  const gateTimeoutMs = options.gateTimeoutMs ?? GATE_TIMEOUT_MS;
+  if (gates.length === 0) {
+    return "no gates to run";
+  }
   const startedAt = Date.now();
   const passed: string[] = [];
-  for (const gate of GATES) {
+  for (const gate of gates) {
     const invocation = gateInvocation(gate);
     const left = options.budgetMs - (Date.now() - startedAt);
     if (left <= 0) {
@@ -297,7 +414,7 @@ export async function runGates(options: {
         // The gate's own budget, and no more than the run has left: a build
         // that runs long is still the gate's own answer, and a timeout the
         // gate never chose is not a verdict.
-        timeoutMs: Math.min(GATE_TIMEOUT_MS, options.budgetMs, left),
+        timeoutMs: Math.min(gateTimeoutMs, options.budgetMs, left),
         // The tail of the output is the evidence; the rest is noise the
         // runner neither keeps nor records.
         maxOutputBytes: GATE_OUTPUT_LIMIT_BYTES,
@@ -307,6 +424,9 @@ export async function runGates(options: {
         // The whole of it goes to the file, so that the record can quote the
         // tail and still say where the rest of it is.
         ...(outputFile === undefined ? {} : { outputFile }),
+        // The repository's own PATH: the gate's tools live in that checkout's
+        // venv, and a gate that cannot find them never got to answer.
+        ...(options.env === undefined ? {} : { env: options.env }),
       });
     } catch (failure) {
       const failed = await gateFailure(gate, invocation, failure, outputFile);

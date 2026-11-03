@@ -1,7 +1,7 @@
 {
   "name": "pi-afk-runner",
   "version": "0.1.0",
-  "description": "An AFK queue runner for Pi: takes a ready-for-agent issue, works it in an isolated worktree, and opens a reviewed pull request.",
+  "description": "An AFK queue runner: takes a ready-for-agent issue, works it in an isolated worktree, and opens a reviewed pull request.",
   "repository": {
     "type": "git",
     "url": "git+ssh://git@github.com/gazon1/pi-afk-runner.git"
@@ -16,29 +16,19 @@
   },
   "type": "module",
   "keywords": [
-    "pi-package"
+    "afk",
+    "agent",
+    "pull-request"
   ],
-  "exports": {
-    ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
-    }
-  },
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
   "bin": {
     "pi-afk-runner": "./dist/cli.js"
   },
   "files": [
     "dist",
     "skills",
+    "scripts/prune-grammars.mjs",
     "README.md"
   ],
-  "pi": {
-    "extensions": [
-      "./dist/extension.js"
-    ]
-  },
   "engines": {
     "node": ">=22"
   },
@@ -48,22 +38,23 @@
     "lint": "oxlint --deny-warnings src test",
     "test": "vitest run",
     "check": "npm run typecheck && npm run lint && npm run test && npm run build",
+    "postinstall": "node scripts/prune-grammars.mjs",
     "prepublishOnly": "npm run check"
   },
-  "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-tui": "*"
-  },
   "dependencies": {
-    "@gotgenes/pi-permission-system": "42.0.0",
-    "@quintinshaw/pi-dynamic-workflows": "3.15.0",
+    "@ai-sdk/anthropic": "4.0.89",
+    "@mastra/core": "1.81.0",
+    "@mastra/memory": "1.40.0",
+    "@mastra/schema-compat": "1.3.17",
     "chalk": "6.0.0",
-    "pi-queue-steer-factory": "0.17.11",
+    "citty": "^0.2.2",
+    "repomix": "1.18.1",
+    "simple-git": "4.0.2",
     "typebox": "1.3.27",
-    "undici": "8.10.2"
+    "undici": "8.10.2",
+    "yaml": "2.9.0"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "1.4.0",
     "@types/node": "26.6.6",
     "oxlint": "1.90.0",
     "typescript": "^5.6.3",

@@ -91,7 +91,7 @@ on the issue for the next run to read as intake.
 
 ## Links
 
-- `src/workflow.ts` — `FixChangedNothing`, and the `noChange` the review gate comes back with.
+- `src/workflow/errors.ts` — `FixChangedNothing`, and the `noChange` the review gate comes back with.
 - `src/runner.ts` — the head comparison in the fix, the continuation comment, and the cut-off the
   fix raises as the engine's abort error.
 - `test/workflow.test.ts` — the loop stops on a fix that changed nothing.

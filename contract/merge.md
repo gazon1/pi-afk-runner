@@ -56,6 +56,13 @@ pull request stays open.
 - Push `agent/issue-<N>`, and nothing else.
 - Run the repository's gate, `./check.sh`, on a branch that moved.
 - Write its record under `build/diagnostics/merge/pr-<N>/`.
+- Write its journal — the session's lines, written while it works — beside that record, under
+  `build/diagnostics/merge/pr-<N>/`. A merge that is killed leaves the file behind, and the file
+  says what it was doing when it died.
+- Write the journal of the sweep itself, under `build/diagnostics/merge/`, beside the
+  per-pull-request directories. It holds the pull requests the sweep considered, the ones it left
+  alone and why, and the pull request it was working on when it stopped. A sweep that is killed
+  leaves the file behind.
 
 ## What it must never do
 

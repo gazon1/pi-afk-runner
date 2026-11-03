@@ -19,14 +19,14 @@
  * **The rule is a string, not a file.** The CLI's `--append-system-prompt`
  * silently ignores a missing file — measured — so a rule read from disk can
  * vanish without a word. This one is in the code, where it cannot.
+ *
+ * The tools a turn ends on are not here: they are the runner's decision tools,
+ * in `src/decisions/`.
  */
 
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-
-import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
 
 import {
   BRIEF_MARKER,
@@ -40,18 +40,32 @@ import {
   type GhRunner,
   type IssueDetail,
 } from "./gh.js";
+import {
+  createIssueDecisionTool,
+  createRelatedDecisionTool,
+  createScopeDecisionTool,
+  type IssueDecision,
+  type ScopeDecision,
+  type ScopeSubtask,
+} from "./decisions/index.js";
+import { changedPaths, runGit, type GitRunner } from "./git.js";
 import { createLeftoverTool, normaliseTitle } from "./leftovers.js";
+import { createPackTool } from "./packing.js";
+import { type ToolSpec } from "./tools.js";
 import {
   cutOffError,
   runStates,
   runWorkSession,
+  SCOPE_TOKEN,
   stateFailure,
+  TRIAGE_TOKEN,
   WORKFLOW_ACTIONS,
   WORKFLOW_STATES,
   type StateName,
   type StateOutcome,
+  type TriageToken,
   type WorkflowState,
-} from "./workflow.js";
+} from "./workflow/index.js";
 
 /**
  * The rule that keeps an issue body as data.
@@ -103,6 +117,27 @@ export function fenceIssueComments(comments: readonly string[]): string {
 
 /** The marker a brief comment opens with. */
 export { BRIEF_MARKER };
+
+/**
+ * The issue, as data, in one block.
+ *
+ * The body and the comments arrive together, fenced and labelled as untrusted.
+ * The rule that says they are data and not instructions is in the **system
+ * prompt** — the block goes above the turn's instruction, so the instruction
+ * the model reads last is the instruction.
+ *
+ * The brief is inside it: the comment that opens with `## Agent Brief`, or the
+ * body itself when the issue carries no such comment. The system prompt says
+ * which one this issue has.
+ */
+export function issueData(issue: IssueDetail): string {
+  return [
+    "## The issue, as data",
+    "",
+    fenceIssueBody(issue.body),
+    ...(issue.comments.length === 0 ? [] : ["", fenceIssueComments(issue.comments)]),
+  ].join("\n");
+}
 
 /**
  * The brief, fenced as untrusted data.
@@ -313,8 +348,47 @@ export interface TurnMessage {
   readonly errorMessage?: string;
 }
 
+/**
+ * The tokens and the cost of a run, when the provider reported them.
+ *
+ * Absent means the provider reported nothing: a run whose tokens are unknown
+ * must not claim zero tokens, because zero is a number a reader would trust.
+ */
+export interface RunUsage {
+  readonly totalTokens: number;
+  /** The cost, when a provider reported one. */
+  readonly cost?: number;
+}
+
+/**
+ * Two runs' usage, added.
+ *
+ * The cost is added only when one of them reported one: a run whose work
+ * session reported no cost and whose review reported one has a cost, and a
+ * run whose neither reported one has none.
+ */
+export function addUsage(
+  first: RunUsage | undefined,
+  second: RunUsage | undefined,
+): RunUsage | undefined {
+  if (first === undefined) {
+    return second;
+  }
+  if (second === undefined) {
+    return first;
+  }
+  const cost =
+    first.cost === undefined && second.cost === undefined
+      ? undefined
+      : (first.cost ?? 0) + (second.cost ?? 0);
+  return {
+    totalTokens: first.totalTokens + second.totalTokens,
+    ...(cost === undefined ? {} : { cost }),
+  };
+}
+
 /** The error a settled turn ended on, or null. */
-function turnFailure(message: TurnMessage | undefined): Error | null {
+export function turnFailure(message: TurnMessage | undefined): Error | null {
   if (message?.role !== "assistant" || message.stopReason !== "error") {
     return null;
   }
@@ -328,7 +402,7 @@ function turnFailure(message: TurnMessage | undefined): Error | null {
 }
 
 /** The last assistant message, which is the one the turn settled on. */
-function lastAssistant(
+export function lastAssistant(
   messages: readonly TurnMessage[] | undefined,
 ): TurnMessage | undefined {
   if (messages === undefined) {
@@ -352,14 +426,86 @@ export interface AgentSession {
   dispose(): void;
   /** The session's messages, when it keeps them. */
   readonly messages?: readonly TurnMessage[];
+  /**
+   * The model the session runs on — `provider/id`.
+   *
+   * The pool's session knows it, because the pool moves it between models; a
+   * session on a single model may leave it out.
+   */
+  readonly reference?: string | undefined;
+  /**
+   * Move the session onto another model — `provider/id`.
+   *
+   * The pool's session moves between the models of the pool: a model whose
+   * limit is gone is left for the next one, and the conversation the session
+   * has is kept. A session that cannot be moved leaves this out.
+   */
+  setModel?(reference: string): Promise<void>;
+}
+
+/**
+ * What the session tells the model between the steps of a turn.
+ *
+ * A turn that reads the tree does not stop by itself: the model finds one more
+ * file to look at, and one more after that. The engine that can push the model
+ * between its steps says what the turn is for once the model has read enough.
+ */
+export interface TurnFeedback {
+  /** After how many steps the model is told. */
+  readonly afterSteps: number;
+  /** What it is told. */
+  readonly text: string;
 }
 
 /** Creates a session bound to a directory. */
 export type SessionFactory = (options: {
   readonly cwd: string;
   readonly systemPromptSections: Record<string, string>;
+  /**
+   * The model this session runs on — `provider/id`.
+   *
+   * Absent when the run does not name one: the session then runs on the
+   * factory's own model. The pool names one per session, because the pool
+   * picks the model the session starts on.
+   */
+  readonly model?: string;
   /** The tools the session is given — the verdict tool, for a review. */
-  readonly tools?: readonly ToolDefinition[];
+  readonly tools?: readonly ToolSpec[];
+  /**
+   * The tool the turn must end on.
+   *
+   * A turn that reads the tree can go on for as long as it likes: the model
+   * finds something else to look at, and the turn ends when the engine cuts it
+   * off — with nothing decided. The engine that can push the model between its
+   * steps is told which tool ends the turn, and says so when the model has read
+   * enough.
+   */
+  readonly finalTool?: string;
+  /**
+   * What the session tells the model between the steps of a turn.
+   *
+   * The same instrument as `finalTool`, for a turn that ends on nothing: a work
+   * turn makes the change and says what it did, and a model that reads finds one
+   * more file every time.
+   */
+  readonly feedback?: TurnFeedback;
+  /**
+   * Told what a turn cost, when the provider reported it.
+   *
+   * The **events** the session emits carry the usage, and the factory is the
+   * one that sees them: the runner asks for the report here, and the factory
+   * answers with what the events said.
+   */
+  readonly onUsage?: (usage: RunUsage) => void;
+  /**
+   * Told what the agent is doing, as it does it.
+   *
+   * The lines the session writes while it works: the tool calls it makes, and
+   * what it says. The runner hands them to the **journal** — the file beside
+   * the run's record — so a run that is killed leaves behind what it was
+   * doing when it died. The record itself is written when the run ends.
+   */
+  readonly onEvent?: (line: string) => void;
 }) => Promise<AgentSession>;
 
 /** Schedules an action, and returns the way to cancel it. */
@@ -435,35 +581,15 @@ export function cutOffMessage(options: {
 /**
  * The states a session runs.
  *
- * The data goes first, in turns of its own, and is not counted: only the
- * prompts are the prompt array. The prompts run as the states they are
- * declared as — the single state a review or a merge resolution runs.
+ * The prompts run as the states they are declared as — the single state a
+ * review or a merge resolution runs. The issue's own data is not a state: it
+ * travels with the turn that reads it.
  */
 function sessionStates(options: {
   readonly prompts: readonly string[];
   readonly states: readonly StateName[];
-  readonly issueBody?: string;
-  readonly issueComments?: readonly string[];
 }): WorkflowState[] {
   const states: WorkflowState[] = [];
-  if (options.issueBody !== undefined) {
-    states.push({
-      name: "issue-body",
-      phase: "Intake",
-      text: fenceIssueBody(options.issueBody),
-      counts: false,
-      kind: "turn",
-    });
-  }
-  if (options.issueComments !== undefined && options.issueComments.length > 0) {
-    states.push({
-      name: "issue-comments",
-      phase: "Intake",
-      text: fenceIssueComments(options.issueComments),
-      counts: false,
-      kind: "turn",
-    });
-  }
   const names = options.states;
   if (names.length !== options.prompts.length) {
     throw new Error(
@@ -487,10 +613,8 @@ function sessionStates(options: {
 export interface WorkSessionGraphOptions {
   /** The prompt of each turn node, keyed by the node's name. */
   readonly prompts: ReadonlyMap<string, string>;
-  /** The issue's body, fenced as untrusted data. */
-  readonly issueBody?: string;
-  /** The issue's comments, fenced as untrusted data. */
-  readonly issueComments?: readonly string[];
+  /** The issue the session works on — its data travels with the first turn. */
+  readonly issue: IssueDetail;
   /** Whether the optional related-issues turn runs before triage. */
   readonly includeRelated?: boolean;
   /** The related-issues prompt, when the turn runs. */
@@ -503,9 +627,16 @@ export interface WorkSessionGraphOptions {
  * The script is the branch:
  *
  * ```
- * issue-body → issue-comments → triage ─┬─ work ─→ scope ─┬─ fits ─→ brief → implement → verify → next
- *                                       └─ skip ─→ close-skip          └─ split ─→ split
+ * related → triage ─┬─ work ─→ scope ─┬─ fits ─→ brief → implement → verify → next
+ *                    └─ skip ─→ close-skip          └─ split ─→ split
  * ```
+ *
+ * The issue's body and its comments are **data**, not turns: they go above the
+ * first turn's instruction, where the model reads them as what the issue says
+ * rather than as what it is told to do. A turn that carries nothing but the
+ * issue is a turn the model spends on reading the repository instead of on the
+ * work — and the issue it was reading is the first thing the memory drops
+ * when the conversation grows.
  *
  * The two decisions are the session's own turns, and the action nodes are the
  * runner's work — closing an issue, filing smaller ones — so the branch is the
@@ -513,26 +644,6 @@ export interface WorkSessionGraphOptions {
  */
 export function workSessionNodes(options: WorkSessionGraphOptions): WorkflowState[] {
   const nodes: WorkflowState[] = [];
-  const comments = options.issueComments ?? [];
-
-  if (options.issueBody !== undefined) {
-    nodes.push({
-      name: "issue-body",
-      phase: "Intake",
-      text: fenceIssueBody(options.issueBody),
-      counts: false,
-      kind: "turn",
-    });
-  }
-  if (comments.length > 0) {
-    nodes.push({
-      name: "issue-comments",
-      phase: "Intake",
-      text: fenceIssueComments(comments),
-      counts: false,
-      kind: "turn",
-    });
-  }
 
   if (options.includeRelated === true && options.relatedPrompt !== undefined) {
     nodes.push({
@@ -568,16 +679,28 @@ export function workSessionNodes(options: WorkSessionGraphOptions): WorkflowStat
     });
   }
 
+  // The issue's data goes above the first turn's instruction. It is the first
+  // turn that reads the issue, and the data is the oldest thing in the
+  // conversation: the memory drops the oldest messages first, so data that
+  // travels alone is data that is gone by the time the work starts.
+  const first = nodes.findIndex((node) => node.kind === "turn");
+  const firstNode = first === -1 ? undefined : nodes[first];
+  if (firstNode !== undefined) {
+    nodes[first] = {
+      ...firstNode,
+      text: [issueData(options.issue), "", firstNode.text].join("\n"),
+    };
+  }
+
   return nodes;
 }
 
 /**
  * Run the prompt array in one session.
  *
- * The body goes first, on its own, in a turn that carries nothing but data —
- * so that the instruction that follows it is the most recent thing the model
- * has read. Then the prompts, one turn each, each seeing the previous
- * turn's context.
+ * The prompts run one turn each, each seeing the previous turn's context. The
+ * issue's own data travels with the turn that reads it, above that turn's
+ * instruction.
  *
  * The turns are the session's **states**, and the workflow engine runs them:
  * it decides what runs next and in which phase, and the runner's own code
@@ -601,8 +724,6 @@ export async function runPromptArray(options: {
   readonly states?: readonly StateName[];
   /** The nodes to run, when the session has branches. */
   readonly nodes?: readonly WorkflowState[];
-  readonly issueBody?: string;
-  readonly issueComments?: readonly string[];
   readonly deadlineMs: number;
   readonly schedule?: Scheduler;
   /**
@@ -627,6 +748,23 @@ export async function runPromptArray(options: {
    * `skip`, the scope's `fits` or `split`. A turn without one returns `ok`.
    */
   readonly after?: (state: WorkflowState) => string;
+  /**
+   * A state the run says it does not need is not run.
+   *
+   * Asked before each turn: a turn that is only needed when the earlier ones
+   * did not do their job — the second chance a review gets when it stated no
+   * verdict — is skipped when the run says so.
+   */
+  readonly skip?: (state: WorkflowState) => boolean;
+  /**
+   * What is wrong with a turn's result, if anything.
+   *
+   * Asked after the turn, about the turn that has just run: it answers with
+   * what is missing, and the turn is given one more chance to do it — in the
+   * same session, with the same context. A turn that is still missing what it
+   * was asked for fails.
+   */
+  readonly check?: (state: WorkflowState) => Promise<string | null>;
 }): Promise<PromptArrayResult> {
   const schedule = options.schedule ?? defaultScheduler;
   let aborted = false;
@@ -638,14 +776,10 @@ export async function runPromptArray(options: {
     sessionStates({
       prompts: options.prompts ?? [],
       states: options.states ?? [],
-      ...(options.issueBody === undefined ? {} : { issueBody: options.issueBody }),
-      ...(options.issueComments === undefined
-        ? {}
-        : { issueComments: options.issueComments }),
     });
   const branched = options.nodes !== undefined;
-  // The turns the run had to take. The intake turns and the actions are not
-  // counted, exactly as `completed` does not count them.
+  // The turns the run had to take. The actions are not counted, exactly as
+  // `completed` does not count them.
   const total = nodes.filter((node) => node.counts).length;
 
   // The deadline is a promise the run **races**, not a signal the run hopes
@@ -679,6 +813,23 @@ export async function runPromptArray(options: {
     return true;
   };
 
+  /**
+   * Run one prompt in the session, and wait for it — or for the deadline.
+   *
+   * The deadline is the same race the turn itself races: a prompt that settles
+   * after the deadline has won is observed, not awaited.
+   */
+  const prompt = async (text: string): Promise<void> => {
+    const sent = options.session.prompt(text);
+    // The turn may reject after the deadline has already won the race. It is
+    // observed here, so it cannot become an unhandled rejection.
+    void sent.catch(() => {});
+    await Promise.race([sent, deadline]);
+    if (stopped() || aborted) {
+      throw cutOffError("the run was cut off before its next turn");
+    }
+  };
+
   /** Run one node: an action the runner performs, or a turn the agent takes. */
   const run = async (state: WorkflowState): Promise<StateOutcome> => {
     if (stopped()) {
@@ -691,17 +842,10 @@ export async function runPromptArray(options: {
         );
       }
       // The action's failure is a failed turn: it is thrown here and the
-      // engine's runner turns it into the same failure a turn makes.
+      // graph turns it into the same failure a turn makes.
       return { state: "ok", result: await options.action(state) };
     }
-    const sent = options.session.prompt(state.text);
-    // The turn may reject after the deadline has already won the race. It is
-    // observed here, so it cannot become an unhandled rejection.
-    void sent.catch(() => {});
-    await Promise.race([sent, deadline]);
-    if (stopped() || aborted) {
-      throw cutOffError("the run was cut off before its next turn");
-    }
+    await prompt(state.text);
     // A turn whose model call failed settles normally; without this, a session
     // that answered nothing runs the states to their end and the run fails
     // later with whatever the empty work looks like.
@@ -709,19 +853,34 @@ export async function runPromptArray(options: {
     if (failure !== null) {
       return { state: "error", error: failure };
     }
-    // The decision a turn made is the edge the graph takes next. The intake
-    // turns and the work turns return `ok`; only the first two decide.
+    // What is missing from the turn's result, if anything. A turn that did not
+    // do its job is given one more chance: the same session, the same
+    // context, and the model told what is missing.
+    const complaint = (await options.check?.(state)) ?? null;
+    if (complaint !== null) {
+      await prompt(complaint);
+      const again = (await options.check?.(state)) ?? null;
+      if (again !== null) {
+        return { state: "error", error: new Error(again) };
+      }
+    }
+    // The decision a turn made is the edge the graph takes next. The work
+    // turns return `ok`; only the first two decide.
     return { state: "ok", result: options.after?.(state) ?? "ok" };
   };
 
   try {
     const result = branched
       ? await runWorkSession({ nodes, run })
-      : await runStates({ states: nodes, run });
+      : await runStates({
+          states: nodes,
+          run,
+          ...(options.skip === undefined ? {} : { skip: options.skip }),
+        });
     const completed = result.completed.filter((state) => state.counts).length;
     return { completed, total, aborted: aborted || result.aborted, cutReason, abortError };
   } catch (error) {
-    // The engine wraps a failed turn and says which state it failed in. The
+    // The graph wraps a failed turn and says which state it failed in. The
     // failure underneath it is the cause; the caller reads the message.
     const cause = stateFailure(error);
     if (cause === null) {
@@ -732,178 +891,6 @@ export async function runPromptArray(options: {
     cancel();
     options.session.dispose();
   }
-}
-
-/** The name of the tool the triage turn decides with. */
-export const ISSUE_DECISION_TOOL_NAME = "agent_issue_decision";
-
-/** What the triage turn decided. */
-export interface IssueDecision {
-  readonly decision: "work" | "skip";
-  readonly reason: string;
-}
-
-/**
- * The tool the triage turn ends on.
- *
- * It is the graph's first branch, and it is a **value**: the runner closes the
- * issue with the reason when the decision is `skip`, and otherwise carries on
- * to the scope turn. A triage that says nothing does not close anything.
- */
-export function createIssueDecisionTool(holder: { value?: IssueDecision }) {
-  return defineTool({
-    name: ISSUE_DECISION_TOOL_NAME,
-    label: "Decide whether the issue is worked",
-    description:
-      "Decide whether this issue should be worked at all. Call it as your last action of the " +
-      "triage turn: `work` when the brief is still worth doing, `skip` when the issue should be " +
-      "closed with the reason and the runner should move to the next one.",
-    promptSnippet: "Decide whether the issue is worked",
-    promptGuidelines: [
-      `Use ${ISSUE_DECISION_TOOL_NAME} as the triage turn's final action.`,
-      "`skip` closes the issue with the reason; the next issue in the queue is taken instead.",
-    ],
-    parameters: Type.Object({
-      decision: Type.Union([Type.Literal("work"), Type.Literal("skip")], {
-        description: "work to do the brief; skip to close the issue with the reason",
-      }),
-      reason: Type.String({
-        description:
-          "Why — one sentence a human can read. Required when the decision is skip.",
-      }),
-    }),
-    async execute(_toolCallId, params) {
-      const decision: IssueDecision = {
-        decision: params.decision,
-        reason: params.reason.trim(),
-      };
-      holder.value = decision;
-      return {
-        content: [
-          { type: "text", text: `Issue decision recorded: ${decision.decision}` },
-        ],
-        details: decision,
-      };
-    },
-  });
-}
-
-/** The name of the tool the scope turn decides with. */
-export const SCOPE_DECISION_TOOL_NAME = "agent_scope_decision";
-
-/** How many pieces a too-large issue may be split into. */
-export const MAX_SPLIT_SUBTASKS = 8;
-
-/** One piece of a split issue. */
-export interface ScopeSubtask {
-  readonly title: string;
-  /** The subtask's brief. It opens with `## Agent Brief`. */
-  readonly brief: string;
-}
-
-/** What the scope turn decided. */
-export interface ScopeDecision {
-  readonly decision: "fits" | "split";
-  readonly reason: string;
-  readonly subtasks: readonly ScopeSubtask[];
-}
-
-/** A refusal the model sees as a failed call, and why. */
-function scopeRefusal(reason: string): {
-  content: { type: "text"; text: string }[];
-  details: { decision: "fits" | "split"; reason: string; subtasks: ScopeSubtask[] };
-  isError: true;
-} {
-  return {
-    content: [{ type: "text", text: `Not recorded: ${reason}` }],
-    details: { decision: "fits", reason, subtasks: [] },
-    isError: true,
-  };
-}
-
-/**
- * The tool the scope turn ends on.
- *
- * `fits` goes on to the brief. `split` goes to the action that files the pieces
- * as issues, links them from the original and closes it. The bounds are here,
- * not in the agent: two is the smallest split that is a split, and
- * {@link MAX_SPLIT_SUBTASKS} is what keeps one issue from becoming a backlog.
- */
-export function createScopeDecisionTool(holder: { value?: ScopeDecision }) {
-  return defineTool({
-    name: SCOPE_DECISION_TOOL_NAME,
-    label: "Decide whether the issue fits one run",
-    description:
-      "Decide whether this issue fits one run, or has to be split. Call it as your last " +
-      "action of the scope turn. `fits` goes on to the brief; `split` files the subtasks as " +
-      "issues and closes this one.",
-    promptSnippet: "Decide whether the issue fits one run",
-    promptGuidelines: [
-      `Use ${SCOPE_DECISION_TOOL_NAME} as the scope turn's final action.`,
-      "`split` needs at least two and at most eight subtasks, each with a title and a brief that opens with `## Agent Brief`.",
-    ],
-    parameters: Type.Object({
-      decision: Type.Union([Type.Literal("fits"), Type.Literal("split")], {
-        description: "fits when one run can finish it; split when it has to be smaller issues",
-      }),
-      reason: Type.String({
-        description: "Why — one sentence a human can read.",
-      }),
-      subtasks: Type.Optional(
-        Type.Array(
-          Type.Object({
-            title: Type.String({ description: "The subtask's title — one line." }),
-            brief: Type.String({
-              description:
-                "The subtask's brief, in the target repository's format: it opens with " +
-                "`## Agent Brief` and carries the behaviour, the criteria and what is out of scope.",
-            }),
-          }),
-          {
-            description:
-              "For `split`: at least two and at most eight subtasks, in the order they must run.",
-          },
-        ),
-      ),
-    }),
-    async execute(_toolCallId, params) {
-      const subtasks = params.subtasks ?? [];
-      const reason = params.reason.trim();
-      if (params.decision === "split") {
-        if (subtasks.length < 2) {
-          return scopeRefusal("a split needs at least two subtasks");
-        }
-        if (subtasks.length > MAX_SPLIT_SUBTASKS) {
-          return scopeRefusal(
-            `a split is bounded at ${MAX_SPLIT_SUBTASKS} subtasks — this one has ${subtasks.length}`,
-          );
-        }
-        const notABrief = subtasks.find(
-          (task) => !task.brief.trimStart().startsWith(BRIEF_MARKER),
-        );
-        if (notABrief !== undefined) {
-          return scopeRefusal(
-            `the subtask "${notABrief.title}" does not open with \`${BRIEF_MARKER}\``,
-          );
-        }
-        if (subtasks.some((task) => task.title.trim() === "")) {
-          return scopeRefusal("every subtask needs a title");
-        }
-      }
-      const decision: ScopeDecision = {
-        decision: params.decision,
-        reason,
-        subtasks: params.decision === "split" ? subtasks : [],
-      };
-      holder.value = decision;
-      return {
-        content: [
-          { type: "text", text: `Scope decision recorded: ${decision.decision}` },
-        ],
-        details: decision,
-      };
-    },
-  });
 }
 
 /**
@@ -983,7 +970,7 @@ export async function splitIssue(options: {
 /** What a work session decided to do with its issue. */
 export interface WorkSessionResult extends PromptArrayResult {
   /** Whether the issue was worked, closed as not needed, or split. */
-  readonly decision: "work" | "skip" | "split";
+  readonly decision: TriageToken | typeof SCOPE_TOKEN.split;
   /** The reason the triage or scope turn gave. */
   readonly reason: string;
   /**
@@ -994,6 +981,38 @@ export interface WorkSessionResult extends PromptArrayResult {
    */
   readonly issue: IssueDetail;
 }
+
+/**
+ * What the work session tells the model when it has read enough.
+ *
+ * The work session's turns read the tree before they work on it, and a model
+ * that reads finds one more file every time: the turn that implements a change
+ * ends with the model saying what it did, and the change is not in the tree.
+ *
+ * The words point at the turn's own instruction instead of naming a job: the
+ * brief's turn must change nothing, the implement's turn must change the tree,
+ * and a nudge that named the wrong one pushes the wrong turn into editing.
+ *
+ * Twelve steps is enough to read a plan and the code it names, and the turns
+ * before it are shorter: the triage decides in four calls, the scope in three.
+ */
+export const WORK_FEEDBACK: TurnFeedback = {
+  afterSteps: 12,
+  text:
+    "You have read enough. Do not read any more files. Do now what this turn's instruction says: " +
+    "make the change, call the tool this turn ends on, or say what you found.",
+};
+
+/**
+ * What the model is told when the tree is as it was.
+ *
+ * The turn that makes the change ends with the model saying what it did, and
+ * the change is not in the tree. The turn is given one more chance, in the
+ * same session, with the tree in front of it.
+ */
+const TREE_UNCHANGED =
+  "The tree is unchanged: the change you were asked for is not in the worktree. " +
+  "Make the change now, in this turn.";
 
 /**
  * Start the agent: read the prompts, create the session, run the graph.
@@ -1033,12 +1052,21 @@ export async function startAgent(options: {
   };
   /** How the issue is read and written. */
   readonly gh?: GhRunner;
+  /** How the worktree is read — the runner's own git, or the one under test. */
+  readonly git?: GitRunner;
   readonly promptsDirectory?: string;
   readonly batchRelated?: boolean;
   readonly deadlineMs: number;
   /** Whether somebody has stopped the run. */
   readonly stopped?: () => boolean;
   readonly schedule?: Scheduler;
+  /**
+   * Told what a turn cost, when the provider reported it.
+   *
+   * The session's events carry the numbers, and the factory is the one that
+   * sees them: it reports what the events said, and the run adds it up.
+   */
+  readonly onUsage?: (usage: RunUsage) => void;
 }): Promise<WorkSessionResult> {
   const prompts = await readNodePrompts(options.promptsDirectory ?? promptsDirectory());
   const gh = options.gh ?? runGh;
@@ -1071,42 +1099,66 @@ export async function startAgent(options: {
       [BRIEF_SECTION]: briefRule(brief),
       [WORKTREE_SECTION]: worktreeRule(options.worktree),
     },
-    // The three tools the work session carries: the triage's decision, the
-    // scope's decision, and the leftover the fourth turn files. The runner
-    // performs the decisions' effects, not the agent: closing an issue,
-    // splitting one and filing a leftover are the runner's writes, and the
-    // bounds on them are the runner's to hold.
+    // The tools the work session carries: the triage's decision, the scope's
+    // decision, the leftover the fourth turn files, and the pack that hands
+    // the agent the repository as one document. The runner performs the
+    // decisions' effects, not the agent: closing an issue, splitting one and
+    // filing a leftover are the runner's writes, and the bounds on them are
+    // the runner's to hold.
     tools: [
       createIssueDecisionTool(triage),
       createScopeDecisionTool(scope),
       createLeftoverTool({ repo: options.repo, gh }),
+      createPackTool({ cwd: options.cwd }),
       ...(options.batchRelated === true
         ? [createRelatedDecisionTool(related)]
         : []),
     ],
+    // The work session's turns end on nothing: a turn that decides calls its
+    // decision tool, and a turn that works leaves the change in the tree. A
+    // model that reads forever is told, between its steps, that the reading is
+    // over — the same instrument the review ends on.
+    feedback: WORK_FEEDBACK,
+    ...(options.onUsage === undefined ? {} : { onUsage: options.onUsage }),
   });
 
+  const git = options.git ?? runGit;
   const result = await runPromptArray({
     session,
     nodes: workSessionNodes({
       prompts,
-      issueBody: issue.body,
-      issueComments: issue.comments,
+      issue,
       includeRelated: options.batchRelated === true,
       ...(relatedPrompt === undefined ? {} : { relatedPrompt }),
     }),
     deadlineMs: options.deadlineMs,
     ...(options.stopped === undefined ? {} : { stopped: options.stopped }),
     ...(options.schedule === undefined ? {} : { schedule: options.schedule }),
+    // The turn that makes the change is checked: a turn that read the tree and
+    // left it as it was is given one more chance, in the same session.
+    check: async (state) => {
+      if (state.name !== "implement") {
+        return null;
+      }
+      try {
+        const paths = await changedPaths(git, options.cwd, options.worktree.baseSha);
+        return paths.length === 0 ? TREE_UNCHANGED : null;
+      } catch {
+        // The tree could not be read: the check cannot say the work is
+        // missing. The runner's own guard — the paths that changed, before
+        // the push — is the backstop, and it fails the run.
+        return null;
+      }
+    },
     // A decision the model did not make is the safe default: the issue was
     // labelled ready-for-agent, so a triage that said nothing proceeds, and a
     // scope that said nothing treats the issue as one run's work.
     after: (state) => {
       if (state.name === "triage") {
-        return triage.value?.decision ?? "work";
+        return triage.value?.decision ?? TRIAGE_TOKEN.work;
       }
       if (state.name === "scope") {
-        return scope.value?.decision ?? "fits";
+        return scope.value?.decision ?? SCOPE_TOKEN.fits;
       }
       return "ok";
     },
@@ -1139,118 +1191,17 @@ export async function startAgent(options: {
   });
 
   const decision =
-    triage.value?.decision === "skip"
-      ? "skip"
-      : scope.value?.decision === "split"
-        ? "split"
-        : "work";
+    triage.value?.decision === TRIAGE_TOKEN.skip
+      ? TRIAGE_TOKEN.skip
+      : scope.value?.decision === SCOPE_TOKEN.split
+        ? SCOPE_TOKEN.split
+        : TRIAGE_TOKEN.work;
   const reason =
-    triage.value?.decision === "skip"
+    triage.value?.decision === TRIAGE_TOKEN.skip
       ? triage.value.reason
-      : scope.value?.decision === "split"
+      : scope.value?.decision === SCOPE_TOKEN.split
         ? scope.value.reason
         : "";
   return { ...result, decision, reason, issue };
 }
 
-/** The name of the tool the related-issues turn ends on. */
-export const RELATED_DECISION_TOOL_NAME = "agent_related_decision";
-
-/** What the related-issues turn decided to batch. */
-export interface RelatedDecision {
-  readonly batch: readonly number[];
-}
-
-/**
- * The tool the related-issues turn ends on.
- *
- * It names the issues the agent will fold into this run's change. An empty
- * list means the issue stands alone. The runner records the choice; the work
- * itself — addressing every batched issue's criteria in one diff — is the
- * agent's.
- */
-export function createRelatedDecisionTool(holder: { value?: RelatedDecision }) {
-  return defineTool({
-    name: RELATED_DECISION_TOOL_NAME,
-    label: "Decide which related issues to batch",
-    description:
-      "Decide which related ready-for-agent issues this run will work together with the " +
-      "current one. Call it as your last action of the related turn. An empty list means " +
-      "the issue stands alone.",
-    promptSnippet: "Decide which related issues to batch",
-    promptGuidelines: [
-      `Use ${RELATED_DECISION_TOOL_NAME} as the related turn's final action.`,
-      "List only issues whose criteria this run will actually address in the same change.",
-    ],
-    parameters: Type.Object({
-      batch: Type.Array(Type.Number(), {
-        description: "Issue numbers to fold into this run's change. Empty when solo.",
-      }),
-    }),
-    async execute(_toolCallId, params) {
-      const batch = params.batch.filter((n) => Number.isInteger(n) && n > 0);
-      const decision: RelatedDecision = { batch };
-      holder.value = decision;
-      return {
-        content: [{ type: "text", text: `Related decision recorded: ${batch.join(", ") || "solo"}` }],
-        details: decision,
-      };
-    },
-  });
-}
-
-/** The name of the tool the reviewer ends its turn with. */
-export const VERDICT_TOOL_NAME = "agent_review_verdict";
-
-/** What a review says. */
-export interface ReviewVerdict {
-  readonly verdict: "pass" | "fail";
-  readonly findings: readonly string[];
-}
-
-/**
- * The tool a review ends on.
- *
- * It is a **terminating** tool: the turn ends on the call, so the review does
- * not pay for another model turn to say what it already said. The verdict is
- * a value the runner reads, not a sentence it has to parse out of prose.
- */
-export function createVerdictTool(holder: { value?: ReviewVerdict }) {
-  return defineTool({
-    name: VERDICT_TOOL_NAME,
-    label: "Agent review verdict",
-    description:
-      "End the review with its verdict. Use this as your last action: it states whether " +
-      "the review found something that blocks the change, and what it found.",
-    promptSnippet: "End the review with its verdict",
-    promptGuidelines: [
-      `Use ${VERDICT_TOOL_NAME} as your final action, with the verdict you reached.`,
-      "After calling it, do not write another assistant message in the same turn.",
-    ],
-    parameters: Type.Object({
-      verdict: Type.Union([
-        Type.Literal("pass"),
-        Type.Literal("fail"),
-      ], { description: "pass when nothing blocks the change, fail when something does" }),
-      findings: Type.Array(Type.String(), {
-        description: "What the review found, one finding per entry. Empty when it passed.",
-      }),
-    }),
-    async execute(_toolCallId, params) {
-      const verdict: ReviewVerdict = {
-        verdict: params.verdict,
-        findings: params.findings,
-      };
-      holder.value = verdict;
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Review recorded: ${params.verdict}`,
-          },
-        ],
-        details: verdict,
-      };
-    },
-  });
-}

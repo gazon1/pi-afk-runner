@@ -65,6 +65,13 @@ When the target's contract names the gates step, the copy is copied again and th
 The gate list itself is the copy's: `src/gates.ts` holds it, and a test holds that list against the
 copy's own block — one list, in two places, and a test that says the two are the same.
 
+**The copy still describes the runner as a Pi extension.** It does: the runner was a Pi package
+when the copy was taken, and the copy is not edited to match. The runner is a **command** now —
+the door is gone, and nothing is left for Pi to load — see
+[the decision that took it out](../docs/decisions/2026-11-05-the-runner-is-a-command-and-not-a-pi-extension.md).
+The copy is re-copied when the target's contract changes; until then, its "install" section
+describes a way of installing the runner that no longer applies.
+
 ## The merge mode's contract
 
 [`merge.md`](merge.md) is **not a copy**. The target's contract describes the work pipeline, and

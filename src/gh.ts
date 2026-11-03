@@ -21,11 +21,15 @@
  * - **The exclusion is the minus form.** `--search '-label:agent-in-progress'`
  *   excludes; `--search 'no:label:agent-in-progress'` returns nothing at all,
  *   because there is no such thing as an issue with no labels.
+ * - **The queue is read oldest first.** `--search 'sort:created-asc'` sorts the
+ *   issues by when they were created, so the backlog drains in the order it was
+ *   filed and the runner does not keep picking up the issue it filed last.
  */
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
+import { KILL_GRACE_MS, withHardStop } from "./bound.js";
 import { COMMAND_TIMEOUT_MS } from "./git.js";
 
 const execFileAsync = promisify(execFile);
@@ -98,7 +102,7 @@ export function queueArgs(repo: string): string[] {
     "--label",
     QUEUE_LABEL,
     "--search",
-    `-label:${CLAIM_LABEL}`,
+    `-label:${CLAIM_LABEL} sort:created-asc`,
     "--limit",
     String(ISSUE_PAGE_SIZE),
     "--json",
@@ -197,20 +201,15 @@ export function pullRequestArgs(repo: string, branch: string): string[] {
  * deleted, so a merged pull request is still found after the merge mode
  * deleted the branch.
  */
-export function mergedPullRequestArgs(repo: string, branch: string): string[] {
+export function mergedPullRequestArgs(repo: string, issueNumber: number): string[] {
   return [
-    "pr",
-    "list",
+    "issue",
+    "view",
+    String(issueNumber),
     "--repo",
     repo,
-    "--head",
-    branch,
-    "--state",
-    "merged",
-    "--limit",
-    "1",
     "--json",
-    "number",
+    "closedByPullRequestsReferences",
   ];
 }
 
@@ -268,16 +267,6 @@ export class GhCommandTimedOut extends Error {
 export const runGh: GhRunner = (args) => runGhWithTimeout(args, GH_TIMEOUT_MS);
 
 /**
- * The grace a killed `gh` gets before the run stops waiting for it.
- *
- * The child is asked to stop at the bound, and a child that obeys is gone
- * within a moment. A child that ignores the request would keep the call open
- * for as long as it likes — and a call that never settles is the wedge the
- * bound exists to prevent.
- */
-export const GH_KILL_GRACE_MS = 5_000;
-
-/**
  * The failure a `gh` call raises.
  *
  * A child that was killed is a timeout — the bound is the only thing here that
@@ -309,7 +298,7 @@ function ghFailure(
 export async function runGhWithTimeout(
   args: readonly string[],
   timeoutMs: number,
-  killGraceMs: number = GH_KILL_GRACE_MS,
+  killGraceMs: number = KILL_GRACE_MS,
 ): Promise<string> {
   const call = execFileAsync("gh", [...args], {
     encoding: "utf8",
@@ -324,21 +313,11 @@ export async function runGhWithTimeout(
   // stop and waits for it, and a child that ignores the request would keep
   // the call open — and the run waiting on it — for as long as it likes. The
   // run stops waiting whether the child does or not.
-  let hardStop: NodeJS.Timeout | undefined;
-  const stop = new Promise<never>((_resolve, reject) => {
-    hardStop = setTimeout(
-      () => reject(new GhCommandTimedOut(args, timeoutMs)),
-      timeoutMs + killGraceMs,
-    );
-    hardStop.unref();
+  return await withHardStop(call, {
+    timeoutMs,
+    killGraceMs,
+    timeoutError: () => new GhCommandTimedOut(args, timeoutMs),
   });
-  try {
-    return await Promise.race([call, stop]);
-  } finally {
-    if (hardStop !== undefined) {
-      clearTimeout(hardStop);
-    }
-  }
 }
 
 function labelNames(value: unknown): string[] {
@@ -500,14 +479,17 @@ export async function readPullRequest(
  */
 export async function readMergedPullRequest(
   repo: string,
-  branch: string,
+  issueNumber: number,
   gh: GhRunner = runGh,
 ): Promise<number | null> {
-  const parsed: unknown = JSON.parse(await gh(mergedPullRequestArgs(repo, branch)));
-  if (!Array.isArray(parsed) || parsed.length === 0) {
+  const parsed = JSON.parse(await gh(mergedPullRequestArgs(repo, issueNumber))) as {
+    closedByPullRequestsReferences?: Array<{ number?: unknown }>;
+  };
+  const refs = parsed.closedByPullRequestsReferences;
+  if (!Array.isArray(refs) || refs.length === 0) {
     return null;
   }
-  const first = parsed[0] as Record<string, unknown> | null;
+  const first = refs[0];
   return typeof first?.number === "number" ? first.number : null;
 }
 

@@ -14,32 +14,16 @@ a commit that says `wip:` or `the agent's work` is one of them.
    needs it, and say what. The change stays in the tree while you make it
    (step 3): the tree is where the work is.
 
-2. **Run the gates.** The repository's own, in this order:
+2. **Do not build, do not compile, do not run the checks.** This run does
+   not gate the tree and does not compile it: the tree is pushed as you leave
+   it, and the repository's own CI judges it. A build here costs the run
+   minutes in a Gradle daemon and tells you nothing the code does not.
 
-   ```bash
-   ./check.sh
-   just tcheck-evals
-   just docs-audit
-   ```
-
-   Not `just gate`: its third step runs the Maestro flows on a device, and
-   this machine has no device. Fix what the gates report. A gate that fails
-   is the work not being finished, not an obstacle to work around.
-
-   This run is a checkpoint, not the last word. The next turn looks at the
-   change again with fresh eyes, fixes what it finds, and runs the gates again
-   — so a tree you leave red is a tree the run stops on.
-
-   While you work, a small change — a few lines in one module — needs
-   `./check.sh` only: the long evals and the docs audit earn their cost on a
-   change that reaches them, and the runner skips the pre-push hook for a
-   small change for the same reason.
-
-   **The runner runs the whole list again when you stop**, in the worktree,
-   on the tree you leave. That run is the one that counts: a gate that fails
-   there ends the run — the claim is released, nothing is pushed, and the
-   record says which gate failed. Run the gates yourself so that you can fix
-   what they report; a gate you never ran is a gate that ends the run.
+   So judge the change by reading it. Re-read the code you touched, the
+   interfaces it uses and the tests around it, and let the reasoning — not a
+   green build — be what you trust. When that code is several files, the
+   `agent_pack_codebase` tool packs that part of the repository into one
+   document.
 
 3. **Do not commit or push.** The runner commits whatever is left in the
    worktree on your behalf and pushes under its own branch name, so the push
@@ -56,5 +40,4 @@ a commit that says `wip:` or `the agent's work` is one of them.
    nothing will pick up. A stash of your own, for your own reasons, is yours
    to keep — the work is not in it.
 
-4. **Report** what you did, what the gates said, and what you left out and
-   why.
+4. **Report** what you did, what you left out and why.

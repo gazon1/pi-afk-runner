@@ -12,6 +12,10 @@ which one this issue has.
 1. **Read the issue and the repository.** Read `AGENTS.md`, the brief, and the
    code the brief names. The brief is the task; everything else is context.
 
+   When the code the brief names is spread over several files, pack it in one
+   call with the `agent_pack_codebase` tool instead of opening file after
+   file: it answers with that part of the repository at once.
+
 2. **Ask whether the work is still needed.** An issue should not be worked when
    it is already done (the code and the tests say so), when it duplicates an
    open issue, when it is too vague to work without guessing, or when the

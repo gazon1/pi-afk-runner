@@ -93,12 +93,11 @@ stalling the queue.
 - The rule is stricter than "closed". A chain whose parent a human closed by
   hand now waits until somebody merges the pull request that names that
   parent, or takes the dependency line away.
-- A parent whose work landed **outside** the runner's pull request — a human's
-  pull request, or a direct commit to the base branch — keeps the child
-  waiting. The observable is the runner's own branch, and a parent that was
-  never worked by the runner has no pull request on it. Widening the
-  observable to every merged pull request that names the parent is the change
-  that would cover that case, and it costs a read of the whole merged set.
+- A parent whose work landed in any merged pull request that closes that
+  parent — the runner's own, a human's, or one from another branch — settles
+  the dependency. The read is `gh issue view <N> --json
+  closedByPullRequestsReferences`, one read per parent, and a parent with no
+  merged pull request closing it blocks the child.
 - A dependency that names **no issue at all** keeps the child waiting, where
   the old rule let it through: reading an issue that does not exist failed, and
   a failed read was not a block. A number that names nothing is a typo in the
