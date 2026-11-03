@@ -12,8 +12,8 @@ export type NodeKind = "turn" | "action";
  * The work session's turn states, and the prompt file each one runs.
  *
  * The order is the session's order when every branch is taken, and the names
- * are the phases the run is recorded under. The intake turns that come before
- * them are the issue's body and its comments.
+ * are the phases the run is recorded under. The issue's own data is not a
+ * state: it travels with the first turn, above that turn's instruction.
  *
  * The role says what a state is for: a decision picks what follows it, and a
  * work turn is the work itself. The graph reads the roles off this table, so
@@ -50,13 +50,6 @@ export const WORK_STATES: readonly string[] = WORKFLOW_STATES.filter(
   (state) => state.role === "work",
 ).map((state) => state.name);
 
-/** The names the graph runs: the states, and the runner's own work. */
-export const GRAPH_NAMES: readonly string[] = [
-  ...DECISION_STATES,
-  ...WORK_STATES,
-  ...WORKFLOW_ACTIONS.map((action) => action.name),
-];
-
 /**
  * The name and the phase of a state, without its turn.
  *
@@ -77,9 +70,8 @@ export interface WorkflowState extends StateName {
   /**
    * Whether the turn counts towards the run's completed prompts.
    *
-   * The intake turns — the issue's body and its comments — are data, not
-   * prompts: they are not counted, as the prompt array never counted them.
-   * Neither are the action nodes: they are the runner's work, not the model's.
+   * The action nodes are the runner's work, not the model's: they are not
+   * counted.
    */
   readonly counts: boolean;
   /** The kind of node. A turn when it is absent. */
