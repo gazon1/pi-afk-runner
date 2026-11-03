@@ -76,8 +76,9 @@ function usageOf(answer: {
 /**
  * The two listeners, as one.
  *
- * The factory's listener is the run's own — the command's `say`. The session's
- * listener is the run's **journal**. A line goes to both.
+ * The factory's listener is the run's own — the command's `say`: the run's
+ * **log**. The session's listener writes the run's **journal**, the file beside
+ * the record. A line goes to both.
  */
 function mergedEvents(
   factory: ((line: string) => void) | undefined,
@@ -116,8 +117,8 @@ export function mastraSessionFactory(options: {
     const model = await resolveMastraModel(
       sessionOptions.model ?? options.model ?? DEFAULT_MASTRA_MODEL,
     );
-    // The run's own listener and the session's — the journal — both hear
-    // every line.
+    // The run's own listener and the session's — the journal's writer — both
+    // hear every line.
     const onEvent = mergedEvents(options.onEvent, sessionOptions.onEvent);
     return createMastraSession({
       ...options,

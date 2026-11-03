@@ -46,9 +46,10 @@ over it is in `src/mastra/tools.ts`. The tools a turn ends on — the triage's d
 the scope's decision, the related issues to batch, the review's verdict — are in
 `src/decisions/`, one decision per file. The tool that packs the repository for the
 agent is in `src/packing.ts`. The guard's rules are in `src/guard.ts` and the
-engine applies them (`src/mastra/guard.ts`); the journal is in `src/journal.ts`. One
-description, one carrier, one spelling: a rule written twice is a rule whose two copies
-drift.
+engine applies them (`src/mastra/guard.ts`); the run's journal — the file a run writes —
+is in `src/journal.ts`, and the run's log — the lines the reader sees — is in
+`src/mastra/log.ts`. One description, one carrier, one spelling: a rule written twice is a
+rule whose two copies drift.
 
 The **graph** — the states a session moves through — runs on Mastra's workflow engine
 (`@mastra/core/workflows`). It is a set of components in `src/workflow/`: the states,

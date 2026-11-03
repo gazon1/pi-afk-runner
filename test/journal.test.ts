@@ -1,8 +1,8 @@
 /**
- * The lines the runner prints while the agent works, and the file they are
- * written to.
+ * The run's log — the lines the runner prints while the agent works — and the
+ * run's journal — the file they are written to.
  *
- * Under systemd the journal is not a TTY, so chalk emits no colour and every
+ * Under systemd the output is not a TTY, so chalk emits no colour and every
  * line is the same shape on the page. The marker is then the only thing that
  * says whether a line came from the agent or from the runner, and the tool
  * calls have to carry one too.
@@ -79,8 +79,8 @@ describe("the lines the runner prints", () => {
   });
 
   it("writes nothing when no one is listening", () => {
-    // A turn with no journal writes nothing at all — the run may not want a
-    // journal, and asking for one must not break the turn.
+    // A turn with no listener writes nothing at all — the run may not want the
+    // lines at all, and asking for them must not break the turn.
     expect(() => logTurn(answerWith(undefined, "done"))).not.toThrow();
   });
 });

@@ -1,6 +1,6 @@
 /**
- * The run's journal: the lines a reader sees while the agent works, and the
- * file they are written to.
+ * The run's journal: the file a run writes while it works, and the spelling
+ * of the lines it holds.
  *
  * The session writes the lines: the adapter reads them off the engine's answer
  * and hands them here, so a line is spelled the same way whoever reads it.
@@ -10,6 +10,9 @@
  * journal and a rule written twice is a rule whose two copies drift. A
  * pipeline that writes a journal names what the run was about; this module
  * says what the file looks like.
+ *
+ * The lines a reader sees are the run's log, and the adapter's log module
+ * prints them (`src/mastra/log.ts`).
  */
 
 import { appendFileSync } from "node:fs";
@@ -73,7 +76,7 @@ export function journalPath(directory: string, runId: string): string {
 }
 
 /**
- * The journal of a run: the session's lines, written while the run works.
+ * The journal file of a run: the session's lines, written while the run works.
  *
  * The factory is wrapped, so every session the run opens — the work session,
  * the review, the fixes — writes to the same file. The lines are appended as
@@ -96,9 +99,9 @@ export function journalFactory(factory: SessionFactory, path: string): SessionFa
 /**
  * One line about a tool call: the tool, and the command when there is one.
  *
- * It is the run's journal, and a journal reads one fact per line: the tool's
+ * It is a line of the run's log, and a log reads one fact per line: the tool's
  * name, and the command when the call carried one. A long command is cut —
- * the whole of it is in the engine's own log.
+ * the whole of it is in the engine's own record.
  */
 export function describeToolCall(event: { toolName: string; input?: unknown }): string {
   const input = event.input;
@@ -117,11 +120,11 @@ export function describeToolCall(event: { toolName: string; input?: unknown }): 
 }
 
 /**
- * The lines an assistant text block contributes to the run stream.
+ * The lines an assistant text block contributes to the run's log.
  *
  * A text block can hold several lines — the final summary usually does — and
- * every one of them is tagged, so no line of the stream reads as runner
- * output. A blank line carries nothing and is dropped.
+ * every one of them is tagged, so no line of the log reads as the runner's
+ * own output. A blank line carries nothing and is dropped.
  */
 export function assistantTextLines(text: string): string[] {
   const lines: string[] = [];
