@@ -41,6 +41,13 @@
  * to the conversation the turn is made of. Above {@link MAX_PACK_TOKENS} the
  * tool refuses and says why: the agent packs less — one directory, or the
  * tree alone.
+ *
+ * **The patterns are bounded too.** The `include` and the `ignore` are the
+ * agent's own strings, and they are what the matcher parses. A pattern that
+ * is long, that names too many path segments, or that expands into too many
+ * alternatives makes the matcher work — and the work is the runner's own, on
+ * the runner's host, in the run, with the run's privileges. The bound is
+ * where the runner says no.
  */
 
 import { existsSync } from "node:fs";
@@ -115,6 +122,123 @@ function tooBig(tokens: number, maxTokens: number): string {
 }
 
 /**
+ * The bound a pattern holds.
+ *
+ * The matcher is the runner's own: the patterns the agent names are what it
+ * parses, and a pattern that asks for too much makes it work — quadratic in
+ * the parts of a pattern, and multiplied by the files every pattern is
+ * matched against. The bound is the runner's own, and it is the same
+ * wherever the patterns are read.
+ */
+
+/** The most characters a pattern may hold. */
+const MAX_PATTERN_LENGTH = 512;
+
+/** The most path segments a pattern may name. */
+const MAX_PATTERN_SEGMENTS = 64;
+
+/** The most alternatives the braces of a pattern may hold, summed over its groups. */
+const MAX_PATTERN_ALTERNATIVES = 6;
+
+/** The most patterns a list may hold. */
+const MAX_PATTERNS = 32;
+
+/** The most patterns a list may expand into. */
+const MAX_EXPANSIONS = 256;
+
+/**
+ * Split a pattern list the way the packer reads it.
+ *
+ * The patterns are comma-separated, and a comma inside braces belongs to the
+ * braces: `{a,b}` is one pattern and not two.
+ */
+function splitPatterns(patterns: string): string[] {
+  const result: string[] = [];
+  let current = "";
+  let depth = 0;
+  for (const char of patterns) {
+    if (char === "{") {
+      depth += 1;
+      current += char;
+    } else if (char === "}") {
+      depth = Math.max(0, depth - 1);
+      current += char;
+    } else if (char === "," && depth === 0) {
+      if (current.trim() !== "") {
+        result.push(current.trim());
+      }
+      current = "";
+    } else {
+      current += char;
+    }
+  }
+  if (current.trim() !== "") {
+    result.push(current.trim());
+  }
+  return result;
+}
+
+/**
+ * The alternatives the braces of a pattern hold.
+ *
+ * A group holds as many alternatives as it has commas, and the groups of a
+ * pattern multiply: `{a,b}{c,d}` is four patterns. The count is the sum over
+ * the groups, which is what bounds the multiplication — a pattern with six
+ * alternatives expands into at most sixty-four patterns.
+ */
+function countAlternatives(pattern: string): number {
+  const commas: number[] = [];
+  let total = 0;
+  for (const char of pattern) {
+    if (char === "{") {
+      commas.push(0);
+    } else if (char === "}") {
+      const held = commas.pop();
+      if (held !== undefined) {
+        total += held + 1;
+      }
+    } else if (char === "," && commas.length > 0) {
+      const held = commas[commas.length - 1] ?? 0;
+      commas[commas.length - 1] = held + 1;
+    }
+  }
+  return total;
+}
+
+/**
+ * Whether a pattern stays within the bound.
+ *
+ * The pattern is what the matcher parses, and a pattern that is long, that
+ * names too many path segments, or that expands into too many alternatives
+ * makes the matcher run away.
+ */
+export function patternIsBounded(pattern: string): boolean {
+  if (pattern.length > MAX_PATTERN_LENGTH) {
+    return false;
+  }
+  if (pattern.split("/").length > MAX_PATTERN_SEGMENTS) {
+    return false;
+  }
+  return countAlternatives(pattern) <= MAX_PATTERN_ALTERNATIVES;
+}
+
+/**
+ * Whether the patterns stay within the bound — how many there are, and each
+ * one of them.
+ */
+export function patternsAreBounded(patterns: string): boolean {
+  const list = splitPatterns(patterns);
+  if (list.length > MAX_PATTERNS) {
+    return false;
+  }
+  if (!list.every(patternIsBounded)) {
+    return false;
+  }
+  const expansions = list.reduce((sum, pattern) => sum + 2 ** countAlternatives(pattern), 0);
+  return expansions <= MAX_EXPANSIONS;
+}
+
+/**
  * Pack with repomix.
  *
  * The library, not the command: the runner holds the options, and the command
@@ -129,6 +253,14 @@ function tooBig(tokens: number, maxTokens: number): string {
  */
 export const packWithRepomix: Packer = async (request) => {
   const { runCli } = await import("repomix");
+  // The patterns are the agent's own, and the matcher is the runner's own: a
+  // pattern that asks for too much is refused before the matcher sees it.
+  const unbounded = [request.include, request.ignore].some(
+    (patterns) => patterns !== undefined && !splitPatterns(patterns).every(patternIsBounded),
+  );
+  if (unbounded) {
+    throw new Error("a pattern is more than the matcher takes");
+  }
   const directory = await mkdtemp(join(tmpdir(), "afk-pack-"));
   const output = join(directory, "pack.xml");
   try {
@@ -225,8 +357,9 @@ function refusal(reason: string, path: string): {
  * It is a working tool, not a decision: it packs what the agent names and
  * answers with the document. What it will not do is pack the machine — a path
  * outside the worktree, or a path that is not here at all, is refused — hand
- * over the files the policy refuses, or pack more than the model's context
- * holds, which is refused too, with the narrower pack the agent should try.
+ * over the files the policy refuses, pack more than the model's context
+ * holds, or take a pattern the matcher cannot match quickly: those are
+ * refused too, with the narrower pack the agent should try.
  */
 export function createPackTool(options: {
   /** The worktree the agent works in. */
@@ -297,6 +430,21 @@ export function createPackTool(options: {
       // here, and the runner does not fetch anything the model names.
       if (!existsSync(resolve(options.cwd, path))) {
         return refusal(`there is no ${path} in the repository`, path);
+      }
+      // The patterns are the agent's own, and the matcher is the runner's own.
+      // A pattern that asks for too much is refused here, before the pack is
+      // made: the matcher never sees it.
+      if (params.include !== undefined && !patternsAreBounded(params.include)) {
+        return refusal(
+          "the include pattern is more than the matcher takes — name fewer patterns, or shorter ones",
+          path,
+        );
+      }
+      if (params.ignore !== undefined && !patternsAreBounded(params.ignore)) {
+        return refusal(
+          "the ignore pattern is more than the matcher takes — name fewer patterns, or shorter ones",
+          path,
+        );
       }
       const request: PackRequest = {
         cwd: options.cwd,
