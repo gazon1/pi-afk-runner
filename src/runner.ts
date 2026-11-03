@@ -2161,6 +2161,11 @@ export function verifyPush(options: {
  *
  * The identity is passed on the command line: the repository the runner works
  * in is not the runner's own, and a commit with no author is not a commit.
+ *
+ * Safe to run at the same time as another worker's commit: the index and the
+ * `HEAD` it touches are the worktree's own, the branch it moves is the
+ * issue's own, and the objects it writes are content-addressed. The rule for
+ * the shared checkout is written down in `src/git.ts`.
  */
 export async function commitAll(
   git: GitRunner,
