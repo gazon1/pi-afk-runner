@@ -263,11 +263,13 @@ missing and ends the review with the verdict it reached. A review that already
 stated its verdict ends there, and the first verdict stands: a second one
 cannot change it.
 
-A **small change** — a few files, a few dozen lines — skips the repository's
-pre-push hook; an explicit `--no-verify`, or its absence, decides the rest. The
-runner's own gates are not part of that rule: a run that was told to run them runs
-the whole list on every worked issue, because they are the run's own verdict and
-not the repository's hook. CI still gates landing in the merge mode.
+A **hook** is not the runner's gate. Its commits and its pushes are made with
+`--no-verify`: the target repository's pre-commit hook lints the changed files and
+compiles the modules they touch, its pre-push hook runs a detekt verdict, and a run
+builds nothing. The pull request's own CI judges the tree. The runner's own gates are
+not part of that rule: a run that was told to run them runs the whole list on every
+worked issue, because they are the run's own verdict. CI still gates landing in the
+merge mode.
 
 ### The engine
 

@@ -112,13 +112,10 @@ import {
   UNCLAIMED,
   RunFailed,
   blockedReason,
-  changedSize,
   computeDocumentsDigest,
   deriveState,
   fixPrompt,
   fixWorktree,
-  isSmallChange,
-  verifyPush,
   ensureRegistryEntry,
   linkBatchedIssues,
   workedBatch,
@@ -7715,33 +7712,6 @@ describe("the dependencies an issue declares", () => {
       "--json",
       "closedByPullRequestsReferences",
     ]);
-  });
-});
-
-describe("a small change", () => {
-  it("is read from the diff, and skips the long pre-push checks", async () => {
-    const git = async (args: readonly string[]): Promise<string> =>
-      args.includes("--numstat")
-        ? "10\t5\tsrc/a.ts\n-\t-\tassets/logo.png\n"
-        : "";
-
-    const size = await changedSize(git, "/tmp/does-not-matter", {
-      base: "a",
-      head: "b",
-    });
-    // The binary file counts as a file and adds no lines.
-    expect(size).toEqual({ files: 2, lines: 15 });
-    expect(isSmallChange(size)).toBe(true);
-    expect(isSmallChange({ files: 4, lines: 15 })).toBe(false);
-    expect(isSmallChange({ files: 2, lines: 61 })).toBe(false);
-
-    // A small change skips the hook; a larger one runs it; an explicit request
-    // wins either way.
-    expect(verifyPush({ size })).toBe(false);
-    expect(verifyPush({ verifyPushes: true, size })).toBe(true);
-    expect(verifyPush({ verifyPushes: false, size: { files: 9, lines: 900 } })).toBe(
-      false,
-    );
   });
 });
 

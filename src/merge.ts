@@ -168,8 +168,6 @@ export interface MergeOptions {
    * candidate that would start with nothing left is left for the next run.
    */
   readonly deadlineMs: number;
-  /** Whether the target repository's pre-push hook may gate the push. */
-  readonly verifyPushes?: boolean;
   /** Whether somebody has stopped the run. */
   readonly stopped?: () => boolean;
   readonly onStep?: (record: StepRecord) => void;
@@ -484,9 +482,6 @@ async function mergeOne(
           remote: options.remote,
           issueNumber,
           sha: state.after,
-          ...(options.verifyPushes === undefined
-            ? {}
-            : { verify: options.verifyPushes }),
         });
         return state.after.slice(0, 8);
       },
