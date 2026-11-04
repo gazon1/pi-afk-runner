@@ -15,6 +15,8 @@ for the rule that the copies follow.
 
 | Decision | What it settles |
 |---|---|
+| `2026-11-15-the-batch-travels-with-the-change.md` | the batch travels with the change: the batched issues' briefs reach the scope turn and the plan, read once, and they travel to the review and the fix, the record names the batch, and the batched issues are linked to the run that worked them |
+| `2026-11-14-the-related-issues-are-fetched-not-searched.md` | the related issues are fetched, not searched for: the runner reads the queue once and hands the turn the number and the title of each candidate, the batch may only name an issue that was fetched, and the batched issues' briefs reach the plan |
 | `2026-11-14-the-reminder-says-the-same-thing-in-different-words.md` | the reminder says the same thing in different words: the first reminder explains, the repeats say it in fewer words and come round again, the counter of the reminders belongs to the turn, and the behaviour — the reminder on every step past the threshold — is unchanged and measured in [#380](https://github.com/gazon1/pi-afk-runner/issues/380) |
 | `2026-11-13-the-gateway-gives-the-engines-own-message-the-reasoning.md` | a reasoning model wants the reasoning of every assistant message back: the gateway gives the engine's own message — the feedback between the steps — the last reasoning the model wrote, or a placeholder when the model wrote none before it, and a model that does not reason is left alone |
 | `2026-11-12-the-packers-patterns-are-bounded.md` | the packer's patterns are bounded: the matcher is pinned to the fixed minimatch, and the `include` and the `ignore` are refused when they are too long, name too many path segments, or expand into too many alternatives |

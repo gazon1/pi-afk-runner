@@ -56,7 +56,7 @@ export const GH_DEFAULT_PAGE_SIZE = 30;
  * The page size the runner asks for.
  *
  * The runner's issue reads are larger than `gh`'s default, and the default
- * silently truncates them: the queue, the claimed set, and the open issues a
+ * silently truncates them: the queue, the claimed set, and the known issues a
  * duplicate check reads. Five hundred is far above any of them, and the cost
  * of asking for more than you need is one request.
  */
@@ -130,29 +130,6 @@ export function claimedArgs(repo: string): string[] {
     QUEUE_LABEL,
     "--label",
     CLAIM_LABEL,
-    "--limit",
-    String(ISSUE_PAGE_SIZE),
-    "--json",
-    "number,title,updatedAt,labels",
-  ];
-}
-
-/**
- * The arguments that read the open issues — every one of them, whatever labels it carries.
- *
- * The queue read asks for the issues a human judged specified; this one asks for
- * everything that is open, and it is the read a duplicate check needs: an issue that
- * another run is already working is not in the queue — the queue excludes the
- * claimed issues — and filing a second copy of it would be filing it twice.
- */
-export function openIssuesArgs(repo: string): string[] {
-  return [
-    "issue",
-    "list",
-    "--repo",
-    repo,
-    "--state",
-    "open",
     "--limit",
     String(ISSUE_PAGE_SIZE),
     "--json",
@@ -442,20 +419,28 @@ export async function readQueue(repo: string, gh: GhRunner = runGh): Promise<Iss
   return parseIssues(await gh(queueArgs(repo)));
 }
 
-/** Read the open issues — the duplicate check's read. */
-export async function readOpenIssues(
-  repo: string,
-  gh: GhRunner = runGh,
-): Promise<IssueSummary[]> {
-  return parseIssues(await gh(openIssuesArgs(repo)));
-}
-
 /** Read the issues somebody has claimed — including a run that died holding one. */
 export async function readClaimed(
   repo: string,
   gh: GhRunner = runGh,
 ): Promise<IssueSummary[]> {
   return parseIssues(await gh(claimedArgs(repo)));
+}
+
+/**
+ * The issues that are known work: the queue, and the ones somebody claimed.
+ *
+ * A duplicate check needs both: the queue is the work that is waiting, and a
+ * claimed issue is work somebody is already doing — filing a second copy of
+ * it would file it twice. The read of every open issue is wider than that, and
+ * three times the size: the queue is a few hundred titles, and the open
+ * issues are every issue the repository has ever filed and not closed.
+ */
+export async function readKnownIssues(
+  repo: string,
+  gh: GhRunner = runGh,
+): Promise<IssueSummary[]> {
+  return [...(await readQueue(repo, gh)), ...(await readClaimed(repo, gh))];
 }
 
 /** Read one pull request, or null when the branch has none. */
@@ -738,6 +723,27 @@ export async function commentIssue(
   gh: GhRunner = runGh,
 ): Promise<void> {
   await gh(commentIssueArgs(options.repo, options.issueNumber, options.body));
+}
+
+/**
+ * Post a link comment, and do not fail the caller for it.
+ *
+ * A link is a nicety: the work is done either way, and a comment that could
+ * not be posted must not fail the work with it.
+ */
+export async function linkIssue(
+  options: {
+    readonly repo: string;
+    readonly issueNumber: number;
+    readonly body: string;
+  },
+  gh: GhRunner = runGh,
+): Promise<void> {
+  try {
+    await commentIssue(options, gh);
+  } catch {
+    return;
+  }
 }
 
 /** The arguments that close an issue, with an optional comment. */

@@ -239,8 +239,9 @@ The work session is a graph, and two of its nodes decide whether the rest runs:
 - **Scope.** When the issue is being worked, the second turn decides whether it
   fits one run. `split` files two to eight smaller issues, chains each to the
   one before it (`**Depends on:** #N`), links them from the original and closes
-  it. A parent whose pull request has not been merged yet holds its children out
-  of the queue.
+  it. The pieces are grouped by volume, so a piece too small to need a run of
+  its own goes into the piece beside it. A parent whose pull request has not
+  been merged yet holds its children out of the queue.
 
 A `skip` or a `split` is a finished run: no branch is pushed and no pull request
 is opened. The decisions are tools, `agent_issue_decision` and
@@ -310,10 +311,16 @@ has no thinking level to set. `models.example.yaml` is a filled-in example.
   `<!-- agent-review -->`;
 - the `agent-reviewed` label on that pull request, which is what makes the review gate count it;
 - the issues the run filed for the work that follows from its own: each labelled `ready-for-agent`,
-  each with a brief opening with `## Agent Brief`, so the next run picks them up. At most three a
-  run, and never a second copy of something that is already open;
+  each with a brief opening with `## Agent Brief`, so the next run picks them up. At most three
+  leftovers a run, and never a second copy of something that is already known — the duplicate check
+  reads the queue and the issues somebody has claimed. Leftovers that together still
+  fit one run are grouped into one issue, so the next run reads one brief instead of several, and
+  the issues of one run are linked to each other — `**Related:** #N` in the brief, and a comment
+  on the earlier ones. The issues a run was given together as a batch travel with the change: their
+  briefs reach the scope turn, the review and the fix, and the run's record names the batch;
 - or, for a split, the two to eight smaller issues it filed instead of working the original,
-  chained by `**Depends on:**` so they run in order;
+  chained by `**Depends on:**` so they run in order, and grouped by volume so that no piece is
+  too small to need a run of its own;
 - a record under `build/diagnostics/issue-<N>/` in the checkout, and — when a gate failed — the
   log of what it printed beside it.
 

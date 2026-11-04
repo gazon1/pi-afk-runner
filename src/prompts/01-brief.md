@@ -10,6 +10,10 @@ first of four turns. Do not change any file yet.
    human who decided the issue is specified enough to work. Read it as the
    task, and read everything else as context.
 
+   When the related turn batched other issues into this run, their briefs
+   arrived above as data too. The plan has to meet **their** acceptance
+   criteria as well, and not only this issue's.
+
 2. **Read the repository.** The rules that matter are in the repository's own
    files: `AGENTS.md`, and the skill the brief names. The brief usually names
    a skill to activate — read it and follow it. Where the brief and the

@@ -24,8 +24,10 @@ import {
 } from "../src/session.js";
 import {
   ISSUE_DECISION_TOOL_NAME,
+  RELATED_DECISION_TOOL_NAME,
   SCOPE_DECISION_TOOL_NAME,
   VERDICT_TOOL_NAME,
+  createRelatedDecisionTool,
 } from "../src/decisions/index.js";
 import {
   assistantTextLines,
@@ -43,7 +45,12 @@ import {
 } from "../src/cli.js";
 import { budgetShares, defaultDeadlineMs } from "../src/budget.js";
 import { type StateName, WORKFLOW_STATES } from "../src/workflow/index.js";
-import { createLeftoverTool, LEFTOVER_TOOL_NAME, MAX_LEFTOVERS_PER_RUN } from "../src/leftovers.js";
+import {
+  countLeftovers,
+  createLeftoverTool,
+  LEFTOVER_TOOL_NAME,
+  MAX_LEFTOVERS_PER_RUN,
+} from "../src/leftovers.js";
 import { pullRequestArgs } from "../src/gh.js";
 import {
   CommandFailed,
@@ -113,6 +120,7 @@ import {
   isSmallChange,
   verifyPush,
   ensureRegistryEntry,
+  linkBatchedIssues,
   newRunId,
   openDependencies,
   openPullRequest,
@@ -2625,6 +2633,52 @@ describe("the review", () => {
     expect(prompt).toContain('trust="untrusted"');
   });
 
+  it("judges the change against the batched issues' briefs too", async () => {
+    let prompt = "";
+    const factory = async (options: {
+      tools?: readonly unknown[];
+    }): Promise<AgentSession> => ({
+      async prompt(text) {
+        prompt = text;
+        const tool = options.tools?.[0] as {
+          execute: (id: string, params: unknown) => Promise<unknown>;
+        };
+        await tool.execute("call-1", { verdict: "pass", findings: [] });
+      },
+      async abort() {},
+      dispose() {},
+    });
+
+    await reviewPullRequest({
+      repo: "gazon1/sing",
+      pullRequest: 1040,
+      cwd: "/tmp/does-not-matter",
+      factory: factory as never,
+      gh: async () => "",
+      run: async () => "",
+      git: stubGit(),
+      deadlineMs: 60_000,
+      // The change covers more than one issue, and the reviewer judges the
+      // whole diff against all of them.
+      batch: [
+        {
+          number: 101,
+          issue: {
+            title: "the other issue",
+            body: "## Agent Brief\n\nThe other button must stay disabled.",
+            comments: [],
+            labels: [],
+            updatedAt: "",
+            state: "OPEN",
+          },
+        },
+      ],
+    });
+
+    expect(prompt).toContain("The other button must stay disabled.");
+    expect(prompt).toContain('trust="untrusted"');
+  });
+
   it("carries the brief into the fix prompt", () => {
     const prompt = fixPrompt(["the guard does not fire"], {
       title: "an issue",
@@ -2637,6 +2691,32 @@ describe("the review", () => {
 
     expect(prompt).toContain("the guard does not fire");
     expect(prompt).toContain("Keep the button disabled.");
+    expect(prompt).toContain('trust="untrusted"');
+  });
+
+  it("carries the batched briefs into the fix prompt", () => {
+    // A fix that answers the review and breaks another issue's criteria is
+    // not a fix: the batched briefs travel with the findings.
+    const prompt = fixPrompt(
+      ["the guard does not fire"],
+      undefined,
+      [
+        {
+          number: 101,
+          issue: {
+            title: "the other issue",
+            body: "## Agent Brief\n\nKeep the other button disabled.",
+            comments: [],
+            labels: [],
+            updatedAt: "",
+            state: "OPEN",
+          },
+        },
+      ],
+    );
+
+    expect(prompt).toContain("the guard does not fire");
+    expect(prompt).toContain("Keep the other button disabled.");
     expect(prompt).toContain('trust="untrusted"');
   });
 
@@ -2964,6 +3044,27 @@ describe("the failure path and the record", () => {
       expect(record).toContain("8 file(s), 8345 tokens");
       expect(record).toContain("the review packed `src`");
       expect(record).toContain("41 file(s), 21400 tokens");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("test_the_record_names_the_batch_the_run_worked", async () => {
+    const root = await mkdtemp(join(tmpdir(), "afk-batch-record-"));
+    try {
+      const outcome = await runSteps({
+        issue: 42,
+        runId: "2026-11-15T09-00-00-000Z-abcdef12",
+        root,
+        steps: [{ name: "session", run: async () => "3 turns" }],
+        // The issues the change covered: the record has to say which, or the
+        // diff is judged against a contract nobody can name.
+        batch: [{ number: 101, title: "the other issue" }],
+      });
+
+      const record = await readFile(outcome.record, "utf8");
+      expect(record).toContain("## The batch");
+      expect(record).toContain("#101 the other issue");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -6770,8 +6871,12 @@ describe("the leftovers a run files", () => {
   function fakeTarget(open: readonly TargetIssue[] = []): {
     gh: (args: readonly string[]) => Promise<string>;
     created: TargetIssue[];
+    comments: { number: number; body: string }[];
+    lists: string[][];
   } {
     const created: TargetIssue[] = [];
+    const comments: { number: number; body: string }[] = [];
+    const lists: string[][] = [];
     const gh = async (args: readonly string[]): Promise<string> => {
       if (args[0] === "issue" && args[1] === "view") {
         return JSON.stringify({
@@ -6784,6 +6889,7 @@ describe("the leftovers a run files", () => {
         });
       }
       if (args[0] === "issue" && args[1] === "list") {
+        lists.push([...args]);
         const labels = valuesAfter(args, "--label");
         const all = [...open, ...created];
         return JSON.stringify(
@@ -6807,15 +6913,24 @@ describe("the leftovers a run files", () => {
         created.push(issue);
         return `https://github.com/gazon1/sing/issues/${issue.number}\n`;
       }
+      if (args[0] === "issue" && args[1] === "comment") {
+        comments.push({ number: Number(args[2]), body: valueAfter(args, "--body") });
+        return "";
+      }
       return "[]";
     };
-    return { gh, created };
+    return { gh, created, comments, lists };
   }
 
   /** The tool's own call, without the SDK's arguments around it. */
   async function file(
     tool: ReturnType<typeof createLeftoverTool>,
-    params: { readonly title: string; readonly brief: string },
+    params: {
+      readonly title: string;
+      readonly brief: string;
+      /** How many leftovers the brief carries — what the model says it is. */
+      readonly leftovers?: number;
+    },
   ): Promise<{
     content: { readonly type: string; readonly text: string }[];
     details: { readonly filed: boolean; readonly number: number; readonly reason: string };
@@ -6823,13 +6938,18 @@ describe("the leftovers a run files", () => {
   }> {
     const execute = tool.execute as unknown as (
       id: string,
-      params: { readonly title: string; readonly brief: string },
+      params: { readonly title: string; readonly brief: string; readonly leftovers: number },
     ) => Promise<{
       content: { readonly type: string; readonly text: string }[];
       details: { readonly filed: boolean; readonly number: number; readonly reason: string };
       isError?: boolean;
     }>;
-    return await execute("call-1", params);
+    return await execute("call-1", {
+      ...params,
+      // The model states the count; the brief says it too. The tests that care
+      // about the disagreement say so themselves.
+      leftovers: params.leftovers ?? countLeftovers(params.brief),
+    });
   }
 
   it("test_the_prompt_array_asks_what_follows_the_work", async () => {
@@ -6976,6 +7096,67 @@ describe("the leftovers a run files", () => {
     expect(target.created).toHaveLength(MAX_LEFTOVERS_PER_RUN);
   });
 
+  it("test_the_bound_counts_the_leftovers_and_not_the_issues", async () => {
+    const target = fakeTarget();
+    const tool = createLeftoverTool({ repo: "gazon1/sing", gh: target.gh });
+
+    // One issue that carries two leftovers uses two of the three: the bound
+    // is about the work, not about the issues it is written down in.
+    const grouped = [
+      "## Agent Brief",
+      "",
+      "**Summary:** the first leftover",
+      "",
+      "### The second leftover",
+      "",
+      "**Summary:** the second leftover",
+    ].join("\n");
+    const first = await file(tool, { title: "the grouped leftovers", brief: grouped });
+    expect(first.details.filed).toBe(true);
+
+    // One more leftover fits — the third of the three.
+    const second = await file(tool, { title: "one more leftover", brief: BRIEF });
+    expect(second.details.filed).toBe(true);
+
+    // The fourth does not, however few issues it is written down in.
+    const refused = await file(tool, { title: "one too many", brief: BRIEF });
+    expect(refused.isError).toBe(true);
+    expect(target.created).toHaveLength(2);
+  });
+
+  it("test_a_brief_that_names_no_leftover_is_refused", async () => {
+    const target = fakeTarget();
+    const tool = createLeftoverTool({ repo: "gazon1/sing", gh: target.gh });
+
+    // Without a `**Summary:**` line the runner cannot count the leftovers, and
+    // a bound it cannot count is not a bound.
+    const result = await file(tool, {
+      title: "the nameless leftover",
+      brief: "## Agent Brief\n\n**Category:** enhancement\n",
+    });
+    expect(result.isError).toBe(true);
+    expect(target.created).toHaveLength(0);
+  });
+
+  it("test_the_issues_of_one_run_are_linked_to_each_other", async () => {
+    const target = fakeTarget();
+    const tool = createLeftoverTool({ repo: "gazon1/sing", gh: target.gh });
+
+    await file(tool, { title: "the first leftover", brief: BRIEF });
+    await file(tool, { title: "the second leftover", brief: BRIEF });
+
+    const first = target.created[0];
+    const second = target.created[1];
+
+    // The second issue names the first one in its brief, and the first one
+    // carries the link back: the issues of one run are one piece of work, and
+    // a reader of the queue has to see that without reading every body.
+    expect(second?.body).toContain(`**Related:** #${first?.number}`);
+    expect(target.comments).toHaveLength(1);
+    expect(target.comments[0]?.number).toBe(first?.number);
+    expect(target.comments[0]?.body).toContain(`#${second?.number}`);
+  });
+
   it("test_a_leftover_that_is_already_open_is_not_filed_again", async () => {
     const target = fakeTarget([
       {
@@ -6991,6 +7172,59 @@ describe("the leftovers a run files", () => {
 
     expect(result.isError).toBe(true);
     expect(result.details.filed).toBe(false);
+    expect(target.created).toHaveLength(0);
+  });
+
+  it("test_the_duplicate_check_reads_the_queue_and_the_claimed_issues", async () => {
+    const target = fakeTarget();
+    const tool = createLeftoverTool({ repo: "gazon1/sing", gh: target.gh });
+
+    await file(tool, { title: "the leftover", brief: BRIEF });
+
+    // Every read asks for labels: the queue and the claimed issues, and not
+    // every open issue in the repository — three times the size for the same
+    // answer.
+    expect(target.lists.length).toBeGreaterThan(0);
+    for (const args of target.lists) {
+      expect(valuesAfter(args, "--label").length).toBeGreaterThan(0);
+    }
+  });
+
+  it("test_a_leftover_is_filed_even_when_an_unrelated_issue_carries_the_title", async () => {
+    // The issue is open, but it is not the queue's: it is not work the next
+    // run would take, and refusing the leftover for it grows nothing.
+    const target = fakeTarget([
+      {
+        number: 7,
+        title: "The name does not say what it holds",
+        body: BRIEF,
+        labels: [],
+      },
+    ]);
+    const tool = createLeftoverTool({ repo: "gazon1/sing", gh: target.gh });
+
+    const result = await file(tool, { title: "The name does not say what it holds", brief: BRIEF });
+
+    expect(result.details.filed).toBe(true);
+    expect(target.created).toHaveLength(1);
+  });
+
+  it("test_a_brief_whose_count_does_not_match_is_refused", async () => {
+    const target = fakeTarget();
+    const tool = createLeftoverTool({ repo: "gazon1/sing", gh: target.gh });
+
+    // The model says three, the brief carries one summary: a brief that
+    // groups three leftovers under one summary would count as one, and the
+    // bound would not be the bound the prompt promises.
+    const result = await file(tool, {
+      title: "the grouped leftovers",
+      brief: BRIEF,
+      leftovers: 3,
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.details.filed).toBe(false);
+    expect(result.details.reason).toContain("carries 1");
     expect(target.created).toHaveLength(0);
   });
 
@@ -7027,6 +7261,286 @@ describe("the leftovers a run files", () => {
     expect(result.isError).toBe(true);
     expect(result.details.filed).toBe(false);
     expect(target.created).toHaveLength(0);
+  });
+});
+
+describe("the related issues the runner fetches", () => {
+  /** The target repository, with the issues the related turn chooses from. */
+  function fakeRelated(): {
+    gh: (args: readonly string[]) => Promise<string>;
+    /** The issues that were read, by number. */
+    views: number[];
+  } {
+    const views: number[] = [];
+    const gh = async (args: readonly string[]): Promise<string> => {
+      if (args[0] === "issue" && args[1] === "view") {
+        const number = args[2];
+        views.push(Number(number));
+        if (number === "101") {
+          return JSON.stringify({
+            body:
+              "## Agent Brief\n\n**Summary:** the batched issue's brief\n\n" +
+              "**Acceptance criteria:**\n- [ ] the acceptance criterion of the batched issue\n",
+            comments: [],
+            title: "the other issue",
+            labels: [],
+            updatedAt: "",
+            state: "OPEN",
+          });
+        }
+        return JSON.stringify({
+          body: "## Agent Brief\n\n**Summary:** the issue in hand\n",
+          comments: [],
+          title: "the issue in hand",
+          labels: [],
+          updatedAt: "",
+          state: "OPEN",
+        });
+      }
+      if (args[0] === "issue" && args[1] === "list") {
+        return JSON.stringify([
+          { number: 42, title: "the issue in hand", updatedAt: "", labels: [] },
+          { number: 101, title: "the other issue", updatedAt: "", labels: [] },
+        ]);
+      }
+      return "[]";
+    };
+    return { gh, views };
+  }
+
+  it("test_the_related_issues_are_fetched_and_given_to_the_turn", async () => {
+    const turns: string[] = [];
+    const factory: SessionFactory = async () => ({
+      async prompt(text) {
+        turns.push(text);
+      },
+      async abort() {},
+      dispose() {},
+    });
+
+    await startAgent({
+      factory,
+      cwd: process.cwd(),
+      repo: "gazon1/sing",
+      issueNumber: 42,
+      worktree: fakeWorktree(42),
+      gh: fakeRelated().gh,
+      batchRelated: true,
+      deadlineMs: 60_000,
+    });
+
+    // The turn is given the fetched issues — the queue's titles — and the
+    // issue in hand is not among them.
+    const related = turns[0] ?? "";
+    expect(related).toContain("#101 the other issue");
+    expect(related).not.toContain("#42 the issue in hand");
+  });
+
+  it("test_the_related_issues_are_the_ones_nobody_has_claimed", async () => {
+    // The pool is the queue: the open `ready-for-agent` issues nobody has
+    // claimed. An issue another run is working is not a candidate.
+    const turns: string[] = [];
+    const factory: SessionFactory = async () => ({
+      async prompt(text) {
+        turns.push(text);
+      },
+      async abort() {},
+      dispose() {},
+    });
+
+    await startAgent({
+      factory,
+      cwd: process.cwd(),
+      repo: "gazon1/sing",
+      issueNumber: 42,
+      worktree: fakeWorktree(42),
+      gh: fakeRelated().gh,
+      batchRelated: true,
+      deadlineMs: 60_000,
+    });
+
+    const related = turns[0] ?? "";
+    expect(related).toContain("nobody has claimed");
+  });
+
+  it("test_the_batched_issues_briefs_reach_the_plan", async () => {
+    // The related turn decides; the runner reads the briefs of the issues it
+    // batched, and hands them to the plan.
+    const turns: string[] = [];
+    const factory: SessionFactory = async (options) => ({
+      async prompt(text) {
+        turns.push(text);
+        // The model ends the related turn on its decision tool.
+        const decision = options.tools?.find((tool) => tool.name === RELATED_DECISION_TOOL_NAME);
+        if (decision !== undefined && turns.length === 1) {
+          await decision.execute("call-1", { batch: [101] });
+        }
+      },
+      async abort() {},
+      dispose() {},
+    });
+
+    await startAgent({
+      factory,
+      cwd: process.cwd(),
+      repo: "gazon1/sing",
+      issueNumber: 42,
+      worktree: fakeWorktree(42),
+      gh: fakeRelated().gh,
+      batchRelated: true,
+      deadlineMs: 60_000,
+    });
+
+    // The brief of the batched issue arrives above the plan's instruction, as
+    // data: the plan has to meet its acceptance criteria too.
+    const plan = turns.find((text) => text.includes("Read the issue, and work out")) ?? "";
+    expect(plan).toContain("the batched issue's brief");
+    expect(plan).toContain("the acceptance criterion of the batched issue");
+  });
+
+  it("test_the_batched_issues_briefs_reach_the_scope_turn_too", async () => {
+    // The scope turn judges whether the work fits one run, and the run's work
+    // is the issue in hand and the batched ones together.
+    const turns: string[] = [];
+    const factory: SessionFactory = async (options) => ({
+      async prompt(text) {
+        turns.push(text);
+        const decision = options.tools?.find((tool) => tool.name === RELATED_DECISION_TOOL_NAME);
+        if (decision !== undefined && turns.length === 1) {
+          await decision.execute("call-1", { batch: [101] });
+        }
+      },
+      async abort() {},
+      dispose() {},
+    });
+
+    await startAgent({
+      factory,
+      cwd: process.cwd(),
+      repo: "gazon1/sing",
+      issueNumber: 42,
+      worktree: fakeWorktree(42),
+      gh: fakeRelated().gh,
+      batchRelated: true,
+      deadlineMs: 60_000,
+    });
+
+    const scope = turns.find((text) => text.includes("Decide whether the issue fits one run")) ?? "";
+    expect(scope).toContain("the batched issue's brief");
+    expect(scope).toContain("the acceptance criterion of the batched issue");
+  });
+
+  it("test_the_batched_issues_briefs_are_read_once", async () => {
+    // The scope turn asks for the briefs and the plan's turn asks again: a
+    // brief read twice is a brief read twice.
+    const target = fakeRelated();
+    const factory: SessionFactory = async (options) => ({
+      async prompt() {
+        const decision = options.tools?.find((tool) => tool.name === RELATED_DECISION_TOOL_NAME);
+        if (decision !== undefined && target.views.length === 1) {
+          await decision.execute("call-1", { batch: [101] });
+        }
+      },
+      async abort() {},
+      dispose() {},
+    });
+
+    await startAgent({
+      factory,
+      cwd: process.cwd(),
+      repo: "gazon1/sing",
+      issueNumber: 42,
+      worktree: fakeWorktree(42),
+      gh: target.gh,
+      batchRelated: true,
+      deadlineMs: 60_000,
+    });
+
+    expect(target.views.filter((number) => number === 101)).toHaveLength(1);
+  });
+
+  it("test_the_batched_issues_travel_with_the_session_s_result", async () => {
+    // The review and the fix run after the work session, and they judge the
+    // change against the batched issues' criteria too: the batch travels.
+    const target = fakeRelated();
+    const factory: SessionFactory = async (options) => ({
+      async prompt() {
+        const decision = options.tools?.find((tool) => tool.name === RELATED_DECISION_TOOL_NAME);
+        if (decision !== undefined && target.views.length === 1) {
+          await decision.execute("call-1", { batch: [101] });
+        }
+      },
+      async abort() {},
+      dispose() {},
+    });
+
+    const result = await startAgent({
+      factory,
+      cwd: process.cwd(),
+      repo: "gazon1/sing",
+      issueNumber: 42,
+      worktree: fakeWorktree(42),
+      gh: target.gh,
+      batchRelated: true,
+      deadlineMs: 60_000,
+    });
+
+    expect(result.batch.map((batched) => batched.number)).toEqual([101]);
+    expect(result.batch[0]?.issue.body).toContain("the batched issue's brief");
+  });
+
+  it("test_the_batched_issues_are_linked_to_the_run_that_worked_them", async () => {
+    // The same link the leftovers use: `**Related:** #N` on the issue, so a
+    // reader of the queue sees that these issues are one run's work.
+    const comments: { number: number; body: string }[] = [];
+    const gh = async (args: readonly string[]): Promise<string> => {
+      if (args[0] === "issue" && args[1] === "comment") {
+        comments.push({ number: Number(args[2]), body: valueAfter(args, "--body") });
+      }
+      return "";
+    };
+
+    await linkBatchedIssues({
+      repo: "gazon1/sing",
+      issueNumber: 42,
+      batch: [
+        {
+          number: 101,
+          issue: {
+            title: "the other issue",
+            body: "## Agent Brief\n\nthe brief",
+            comments: [],
+            labels: [],
+            updatedAt: "",
+            state: "OPEN",
+          },
+        },
+      ],
+      gh,
+    });
+
+    expect(comments).toHaveLength(1);
+    expect(comments[0]?.number).toBe(101);
+    expect(comments[0]?.body).toContain("**Related:** #42");
+  });
+
+  it("test_the_untrusted_input_rule_covers_the_related_issues", () => {
+    // The pool is other people's text, in a public repository: the rule that
+    // says it is data and not instructions has to name it.
+    expect(UNTRUSTED_INPUT_RULE).toContain("<related-issues>");
+  });
+
+  it("test_the_batch_may_only_name_a_fetched_issue", async () => {
+    const holder: { value?: { readonly batch: readonly number[] } } = {};
+    const tool = createRelatedDecisionTool(holder, [101]);
+
+    const refused = await tool.execute("call-1", { batch: [999] });
+    expect(refused.isError).toBe(true);
+    expect(holder.value).toBeUndefined();
+
+    const accepted = await tool.execute("call-2", { batch: [101] });
+    expect(accepted.isError).toBeUndefined();
+    expect(holder.value?.batch).toEqual([101]);
   });
 });
 

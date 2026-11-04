@@ -12,7 +12,7 @@
  * a shell command, and then nothing would bound the queue: three leftovers a
  * run is a promise, and a promise the agent can break with one command is not a
  * promise. So the leftovers go through this tool, which holds the bounds — at
- * most {@link MAX_LEFTOVERS_PER_RUN} a run, and nothing that is already open
+ * most {@link MAX_LEFTOVERS_PER_RUN} a run, and nothing that is already known
  * in the repository, which is also what stops the same title twice.
  *
  * The brief goes in the issue's **body**, not in a comment. The target
@@ -29,7 +29,8 @@ import {
   BRIEF_MARKER,
   QUEUE_LABEL,
   createIssue,
-  readOpenIssues,
+  linkIssue,
+  readKnownIssues,
   type GhRunner,
 } from "./gh.js";
 import { defineTool, type AnyToolSpec } from "./tools.js";
@@ -54,6 +55,19 @@ export const LEFTOVER_TOOL_NAME = "agent_leftover";
  */
 export function normaliseTitle(title: string): string {
   return title.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+/**
+ * How many leftovers a brief carries.
+ *
+ * A brief carries one `**Summary:**` line per leftover: one leftover is one
+ * brief, and a grouped one has a summary and an acceptance criterion list
+ * under a heading for each of the leftovers it carries. The count is what the
+ * bound is about — the queue is bounded by the **work**, not by the number of
+ * issues that work is written down in.
+ */
+export function countLeftovers(brief: string): number {
+  return brief.split("\n").filter((line) => /^\*\*Summary:\*\*/i.test(line.trim())).length;
 }
 
 /** What one filing did. */
@@ -85,10 +99,14 @@ function refusal(title: string, reason: string): {
  * The tool the fourth turn files a leftover with.
  *
  * It holds the bounds the queue needs: at most `limit` leftovers a run, and
- * nothing that is already open in the repository — an issue this run filed is
- * open, so that one read is also what stops the same title twice. The brief it
+ * nothing that is already known in the repository — an issue this run filed is
+ * known, so that one read is also what stops the same title twice. The brief it
  * writes must open with `## Agent Brief`, because that is where the next run
  * looks for it.
+ *
+ * The issues it files are linked to each other: the issues of one run are one
+ * piece of work the run saw, and a reader of the queue should see that without
+ * reading every body.
  */
 export function createLeftoverTool(options: {
   /** The repository the issue lives in — `owner/name`. */
@@ -99,10 +117,14 @@ export function createLeftoverTool(options: {
   readonly limit?: number;
 }): AnyToolSpec {
   const limit = options.limit ?? MAX_LEFTOVERS_PER_RUN;
-  // How many this run has filed. The titles are not kept: an issue this run
+  // The issues this run has filed. The titles are not kept: an issue this run
   // filed is open, and the read below finds it — one answer to "is this
-  // already known?", not two.
-  let filed = 0;
+  // already known?", not two. The numbers are kept, because the issues of one
+  // run are one piece of work and are linked to each other.
+  const filed: { readonly number: number; readonly title: string }[] = [];
+  // How many leftovers this run has filed. The issues are not the unit: one
+  // issue may carry several leftovers, and the bound is about the work.
+  let filedLeftovers = 0;
 
   return defineTool({
     name: LEFTOVER_TOOL_NAME,
@@ -116,7 +138,9 @@ export function createLeftoverTool(options: {
     promptGuidelines: [
       `Use ${LEFTOVER_TOOL_NAME} to file a leftover, not \`gh issue create\`.`,
       "The brief is the issue's body, and it opens with `## Agent Brief`.",
-      "At most three leftovers a run. The tool refuses the fourth, and refuses a title that is already open.",
+      "Leftovers that together still fit one run are one issue, with one brief.",
+      "The brief carries one `**Summary:**` line per leftover, and `leftovers` says how many — the runner counts the leftovers, not the issues.",
+      "At most three leftovers a run. The tool refuses the fourth, and refuses a title that is already known.",
     ],
     parameters: Type.Object({
       title: Type.String({
@@ -127,6 +151,11 @@ export function createLeftoverTool(options: {
           "The brief, in the target repository's own format: it opens with `## Agent Brief` " +
           "and carries the category, the summary, the current and the desired behaviour, the " +
           "key interfaces, the acceptance criteria and what is out of scope.",
+      }),
+      leftovers: Type.Integer({
+        description:
+          "How many leftovers this brief carries. It is the number of `**Summary:**` lines in " +
+          "the brief — one per leftover — and the runner refuses a brief whose two disagree.",
       }),
     }),
     async execute(_toolCallId, params) {
@@ -140,35 +169,84 @@ export function createLeftoverTool(options: {
           `the brief must open with \`${BRIEF_MARKER}\` — that is where the next run looks for it`,
         );
       }
-      if (filed >= limit) {
+      // The leftovers are counted twice: the model says how many the brief
+      // carries, and the brief says it too — one `**Summary:**` line each. The
+      // two have to agree, or the count is a guess: a brief that groups three
+      // leftovers under one summary would count as one, and the bound would
+      // not be the bound the prompt promises.
+      const shown = countLeftovers(params.brief);
+      if (shown === 0) {
         return refusal(
           title,
-          `this run has already filed ${filed} leftovers — the queue is bounded at ${limit}`,
+          "the brief carries no `**Summary:**` line — one per leftover, so the runner can count them",
+        );
+      }
+      const stated = params.leftovers;
+      if (!Number.isInteger(stated) || stated < 1) {
+        return refusal(title, "say how many leftovers the brief carries");
+      }
+      if (stated !== shown) {
+        return refusal(
+          title,
+          `the brief carries ${shown} leftover(s) — one \`**Summary:**\` line each — and you say ${stated}`,
+        );
+      }
+      if (filedLeftovers + stated > limit) {
+        return refusal(
+          title,
+          `this run has already filed ${filedLeftovers} leftovers, and this brief carries ` +
+            `${stated} — the queue is bounded at ${limit}`,
         );
       }
       const key = normaliseTitle(title);
 
-      // Search first: an issue that is already open is work that is already
+      // Search first: an issue that is already known is work that is already
       // known, and a second copy of it is a queue that grows for nothing. The
-      // open issues are read rather than the queue, because the queue excludes
-      // the claimed ones — and an issue another run is working is exactly the
-      // one a second copy would be filed against.
-      const open = await readOpenIssues(options.repo, options.gh);
-      const existing = open.find((issue) => normaliseTitle(issue.title) === key);
+      // read is the queue and the claimed issues — an issue another run is
+      // working is exactly the one a second copy would be filed against, and
+      // the read of every open issue is three times the size for the same
+      // answer.
+      const known = await readKnownIssues(options.repo, options.gh);
+      const existing = known.find((issue) => normaliseTitle(issue.title) === key);
       if (existing !== undefined) {
         return refusal(title, `issue #${existing.number} is already open with that title`);
       }
+
+      // The issues of one run are one piece of work the run saw. The brief
+      // names the ones already filed, so the link is in the body every run
+      // already reads.
+      const body =
+        filed.length === 0
+          ? params.brief.trim()
+          : `${params.brief.trim()}\n\n**Related:** ${filed
+              .map((issue) => `#${issue.number}`)
+              .join(", ")}\n`;
 
       const number = await createIssue(
         {
           repo: options.repo,
           title,
-          body: params.brief.trim(),
+          body,
           labels: [QUEUE_LABEL],
         },
         options.gh,
       );
-      filed += 1;
+
+      // And the earlier issues learn about this one, so the link runs both
+      // ways.
+      for (const issue of filed) {
+        await linkIssue(
+          {
+            repo: options.repo,
+            issueNumber: issue.number,
+            body: `Filed in the same run as this issue: #${number} — ${title}`,
+          },
+          options.gh,
+        );
+      }
+
+      filed.push({ number, title });
+      filedLeftovers += stated;
 
       return {
         content: [

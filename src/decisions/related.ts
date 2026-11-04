@@ -19,8 +19,18 @@ export interface RelatedDecision {
   readonly batch: readonly number[];
 }
 
-/** The tool the related-issues turn ends on. */
-export function createRelatedDecisionTool(holder: { value?: RelatedDecision }) {
+/**
+ * The tool the related-issues turn ends on.
+ *
+ * @param holder Where the decision is kept.
+ * @param candidates The numbers the runner fetched for the turn to choose from.
+ *   When it is given, the turn may only name one of them: a number nobody
+ *   fetched is nobody's issue, and the record is what the run is judged by.
+ */
+export function createRelatedDecisionTool(
+  holder: { value?: RelatedDecision },
+  candidates?: readonly number[],
+) {
   return defineTool({
     name: RELATED_DECISION_TOOL_NAME,
     label: "Decide which related issues to batch",
@@ -40,6 +50,23 @@ export function createRelatedDecisionTool(holder: { value?: RelatedDecision }) {
     }),
     async execute(_toolCallId, params) {
       const batch = params.batch.filter((n) => Number.isInteger(n) && n > 0);
+      if (candidates !== undefined) {
+        const unknown = batch.filter((n) => !candidates.includes(n));
+        if (unknown.length > 0) {
+          return {
+            content: [
+              {
+                type: "text",
+                text:
+                  `Not among the fetched issues: ${unknown.join(", ")} — ` +
+                  "the decision lists the issues the runner fetched for this turn.",
+              },
+            ],
+            details: { batch: [] },
+            isError: true,
+          };
+        }
+      }
       const decision: RelatedDecision = { batch };
       holder.value = decision;
       return {

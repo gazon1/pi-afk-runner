@@ -5,6 +5,12 @@ run**, or has to become smaller issues. Do not change any file yet.
 
 Read the brief's acceptance criteria and the code they touch.
 
+**The run may cover more than one issue.** When the related turn batched other
+issues into this run, their briefs arrived above this instruction, as data.
+The run's change has to meet their criteria too, so judge the volume of the
+**whole** change — this issue's work and theirs together — and not only this
+issue's.
+
 The `agent_pack_codebase` tool packs the code you name into one document:
 use it when the criteria touch several files, and read the single file with
 the workspace's own tools when they touch one.
@@ -55,6 +61,12 @@ second piece, and it is not a reason to split.
    piece to the one before it, links them from this issue, and closes this
    issue. A later piece does not start until the earlier one's pull request
    is merged.
+
+   **The pieces are grouped by volume.** Each piece is a run of its own — a
+   fresh context, a fresh read of the repository — so a piece too small to
+   need a whole run goes into the piece beside it, and no piece is so big that
+   it would not fit one run. Group the work by size first, then order the
+   groups.
 
 The brief you write is what the next run reads. Describe behaviour and
 acceptance criteria, not file paths and line numbers.
