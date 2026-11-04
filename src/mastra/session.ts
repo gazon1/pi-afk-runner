@@ -47,6 +47,55 @@ const MAX_STEPS = 40;
  */
 const FINAL_TOOL_AFTER_STEPS = 8;
 
+/**
+ * The words a reminder is made of.
+ *
+ * The first is said once; the repeats are said in turn and come round again
+ * after the last. A model that reads forever is told again and again, and the
+ * same sentence over and over reads as a stuck loop — a model that sees a
+ * stuck loop argues with the loop instead of doing the work.
+ */
+interface ReminderWords {
+  readonly first: string;
+  readonly repeats: readonly string[];
+}
+
+/**
+ * The words the engine tells a turn that has to end on a tool.
+ *
+ * The first one explains; the ones after it say the same thing in fewer
+ * words, and they come round again after the last.
+ */
+function finalToolWords(tool: string): ReminderWords {
+  return {
+    first:
+      `You have read enough. Stop exploring and call the ${tool} tool now, ` +
+      "with the verdict you reached and the findings you found.",
+    repeats: [
+      `Stop exploring and call the ${tool} tool now, with the verdict you reached and the findings you found.`,
+      `Call the ${tool} tool now, with the verdict you reached and the findings you found.`,
+      `Call the ${tool} tool now.`,
+    ],
+  };
+}
+
+/**
+ * The words of the n-th reminder of a turn.
+ *
+ * The first reminder is the one that explains; the ones after it come from
+ * the repeats, in turn, and come round again after the last. A caller that
+ * names no repeats gets the same words every time — the one that says them
+ * is the caller, and the engine only says what it is given.
+ */
+function reminderWords(words: ReminderWords, said: number): string {
+  if (said === 0) {
+    return words.first;
+  }
+  const repeats = words.repeats.length === 0 ? [words.first] : words.repeats;
+  const index = (said - 1) % repeats.length;
+  return repeats[index] ?? words.first;
+}
+
 /** The message a failed turn leaves behind. */
 function failedTurn(failure: unknown): TurnMessage {
   return {
@@ -198,11 +247,18 @@ export async function createMastraSession(options: {
   // step hook sees one iteration at a time, so the answer is carried here.
   let finalToolCalled = false;
 
+  // How many reminders this turn has already said. A turn that reads forever
+  // is told again and again, and the words change with every telling: the
+  // same sentence over and over reads as a stuck loop, and a model that sees
+  // a stuck loop argues with the loop instead of doing the work.
+  let remindersSaid = 0;
+
   return {
     async prompt(text: string): Promise<void> {
       const controller = new AbortController();
       running = controller;
       finalToolCalled = false;
+      remindersSaid = 0;
       // The calls this turn hands over while it runs. The engine gives a call
       // over when the model makes it — before the tool answers — so a tool
       // that runs for minutes does not look like a run that stopped.
@@ -269,17 +325,26 @@ export async function createMastraSession(options: {
                   }
                   // What the model is told, and the step it is told it at: the
                   // verdict tool's own words, or the session's feedback.
-                  const text =
+                  const words: ReminderWords | undefined =
                     final !== undefined
-                      ? `You have read enough. Stop exploring and call the ${final} ` +
-                        "tool now, with the verdict you reached and the findings you found."
-                      : options.feedback?.text;
+                      ? finalToolWords(final)
+                      : options.feedback === undefined
+                        ? undefined
+                        : {
+                            first: options.feedback.text,
+                            repeats: options.feedback.repeats ?? [],
+                          };
                   const afterSteps =
                     final !== undefined ? FINAL_TOOL_AFTER_STEPS : options.feedback?.afterSteps;
-                  if (text === undefined || afterSteps === undefined) {
+                  if (words === undefined || afterSteps === undefined) {
                     return undefined;
                   }
-                  return context.iteration >= afterSteps ? { feedback: text } : undefined;
+                  if (context.iteration < afterSteps) {
+                    return undefined;
+                  }
+                  const text = reminderWords(words, remindersSaid);
+                  remindersSaid += 1;
+                  return { feedback: text };
                 },
               }),
         });

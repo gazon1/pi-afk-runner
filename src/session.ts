@@ -455,6 +455,16 @@ export interface TurnFeedback {
   readonly afterSteps: number;
   /** What it is told. */
   readonly text: string;
+  /**
+   * What it is told when it has already been told.
+   *
+   * The reminder comes on every step past the threshold, and the same
+   * sentence over and over reads as a stuck loop — a model that sees a stuck
+   * loop argues with the loop instead of doing the work. The words after the
+   * first say the same thing in fewer words; they come round again after the
+   * last. A caller that names none gets the same words every time.
+   */
+  readonly repeats?: readonly string[];
 }
 
 /** Creates a session bound to a directory. */
@@ -1001,6 +1011,13 @@ export const WORK_FEEDBACK: TurnFeedback = {
   text:
     "You have read enough. Do not read any more files. Do now what this turn's instruction says: " +
     "make the change, call the tool this turn ends on, or say what you found.",
+  repeats: [
+    "Do not read any more files. Do now what this turn's instruction says: " +
+      "make the change, call the tool this turn ends on, or say what you found.",
+    "Do now what this turn's instruction says: make the change, call the tool this turn ends on, " +
+      "or say what you found.",
+    "Do now what this turn's instruction says.",
+  ],
 };
 
 /**
