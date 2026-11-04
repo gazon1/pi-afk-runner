@@ -111,6 +111,30 @@ export function queueArgs(repo: string): string[] {
 }
 
 /**
+ * The arguments that read every open issue of the queue — the claimed ones too.
+ *
+ * The queue's own read skips the claimed issues: the queue is the work that is
+ * waiting. A duplicate check needs the other half as well, and the label alone
+ * is the whole set — the waiting ones and the claimed ones, in one answer.
+ */
+export function knownIssuesArgs(repo: string): string[] {
+  return [
+    "issue",
+    "list",
+    "--repo",
+    repo,
+    "--state",
+    "open",
+    "--label",
+    QUEUE_LABEL,
+    "--limit",
+    String(ISSUE_PAGE_SIZE),
+    "--json",
+    "number,title,updatedAt,labels",
+  ];
+}
+
+/**
  * The arguments that read the claimed issues.
  *
  * This is a **separate read** from the queue, and it has to be: the queue
@@ -428,19 +452,18 @@ export async function readClaimed(
 }
 
 /**
- * The issues that are known work: the queue, and the ones somebody claimed.
+ * The issues that are known work: every open issue of the queue.
  *
- * A duplicate check needs both: the queue is the work that is waiting, and a
- * claimed issue is work somebody is already doing — filing a second copy of
- * it would file it twice. The read of every open issue is wider than that, and
- * three times the size: the queue is a few hundred titles, and the open
- * issues are every issue the repository has ever filed and not closed.
+ * A duplicate check needs all of them: the queue is the work that is waiting,
+ * and a claimed issue is work somebody is already doing — filing a second copy
+ * of either would file it twice. The read of every open issue of the
+ * repository is wider than that and three times the size.
  */
 export async function readKnownIssues(
   repo: string,
   gh: GhRunner = runGh,
 ): Promise<IssueSummary[]> {
-  return [...(await readQueue(repo, gh)), ...(await readClaimed(repo, gh))];
+  return parseIssues(await gh(knownIssuesArgs(repo)));
 }
 
 /** Read one pull request, or null when the branch has none. */

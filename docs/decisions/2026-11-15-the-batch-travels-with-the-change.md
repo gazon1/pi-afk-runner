@@ -53,11 +53,16 @@ travels.
 
 **The record names the batch.** A section of its own: the issues the change
 covered, by number and title. The diff alone cannot say what a change was
-for.
+for. And only a run that worked names a batch: a split files smaller issues
+and works none, so a record that named the batch there would claim a coverage
+the run did not have.
 
-**The batched issues are linked to the run.** The same `**Related:**` the
-leftovers use, in a comment on the batched issue: one spelling of the link,
-one meaning. A link that cannot be posted does not fail the run.
+**The batched issues are linked to the run.** The same link the leftovers use,
+in the leftovers' own words: a comment that says the issues were filed in the
+same run. The `**Related:**` marker lives in the **body** of an issue the
+runner files — a batched issue's body belongs to somebody else, so the comment
+carries the relation alone. One relation, one spelling. A link that cannot be
+posted does not fail the run.
 
 ## Rationale
 
@@ -91,7 +96,7 @@ too.
 - The briefs are read once, whichever turns ask for them: the run pays for
   the batch once.
 - The record names the batch, so a run that worked several issues can be read
-  without the transcript.
+  without the transcript. A run that worked none names no batch.
 - The batched issues carry a link to the run that worked them, so a reader
   of the queue sees that they belong together.
 - A brief that cannot be read does not stop the run: the turn is written

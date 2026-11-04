@@ -121,6 +121,7 @@ import {
   verifyPush,
   ensureRegistryEntry,
   linkBatchedIssues,
+  workedBatch,
   newRunId,
   openDependencies,
   openPullRequest,
@@ -3068,6 +3069,29 @@ describe("the failure path and the record", () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+  });
+
+  it("test_the_record_names_no_batch_when_the_run_worked_none", () => {
+    // A split files smaller issues and works none of them: the batched
+    // issues' criteria were not met, so the record must not say the change
+    // covered them.
+    const batch = [
+      {
+        number: 101,
+        issue: {
+          title: "the other issue",
+          body: "## Agent Brief\n\nthe brief",
+          comments: [],
+          labels: [],
+          updatedAt: "",
+          state: "OPEN" as const,
+        },
+      },
+    ];
+
+    expect(workedBatch("work", batch)).toHaveLength(1);
+    expect(workedBatch("split", batch)).toHaveLength(0);
+    expect(workedBatch("skip", batch)).toHaveLength(0);
   });
 
   it("test_the_record_quotes_at_least_as_much_as_it_says_it_quotes", () => {
@@ -6862,7 +6886,10 @@ describe("the leftovers a run files", () => {
    *
    * The label filter is honoured, because the claim that a filed issue is
    * picked up by the next run is a claim about the **queue** read — and a stub
-   * that ignored the label would prove nothing.
+   * that ignored the label would prove nothing. The search is honoured too:
+   * `gh` drops the issues a `-label:` search excludes, and a stub that kept
+   * them would make the queue's read and the duplicate check's read the same
+   * read — which is exactly what they are not.
    *
    * The issues this stub files come back in its reads, the way a real
    * repository answers: an issue that is open is in the list, so filing the
@@ -6891,10 +6918,18 @@ describe("the leftovers a run files", () => {
       if (args[0] === "issue" && args[1] === "list") {
         lists.push([...args]);
         const labels = valuesAfter(args, "--label");
+        // The search says what to leave out: `-label:agent-in-progress` drops
+        // the claimed issues from the queue's read.
+        const search = valuesAfter(args, "--search").join(" ");
+        const excluded = search.includes(`-label:${CLAIM_LABEL}`) ? [CLAIM_LABEL] : [];
         const all = [...open, ...created];
         return JSON.stringify(
           all
-            .filter((issue) => labels.every((label) => issue.labels.includes(label)))
+            .filter(
+              (issue) =>
+                labels.every((label) => issue.labels.includes(label)) &&
+                !excluded.some((label) => issue.labels.includes(label)),
+            )
             .map((issue) => ({
               number: issue.number,
               title: issue.title,
@@ -7175,19 +7210,39 @@ describe("the leftovers a run files", () => {
     expect(target.created).toHaveLength(0);
   });
 
-  it("test_the_duplicate_check_reads_the_queue_and_the_claimed_issues", async () => {
+  it("test_the_duplicate_check_reads_every_open_issue_of_the_queue", async () => {
     const target = fakeTarget();
     const tool = createLeftoverTool({ repo: "gazon1/sing", gh: target.gh });
 
     await file(tool, { title: "the leftover", brief: BRIEF });
 
-    // Every read asks for labels: the queue and the claimed issues, and not
-    // every open issue in the repository — three times the size for the same
+    // One read, and it asks for the queue's label alone: the waiting issues
+    // and the claimed ones are one set of known work, and the read of every
+    // open issue in the repository is three times the size for the same
     // answer.
-    expect(target.lists.length).toBeGreaterThan(0);
-    for (const args of target.lists) {
-      expect(valuesAfter(args, "--label").length).toBeGreaterThan(0);
-    }
+    expect(target.lists).toHaveLength(1);
+    expect(valuesAfter(target.lists[0] as string[], "--label")).toEqual([QUEUE_LABEL]);
+    expect(target.lists[0] as string[]).not.toContain("--search");
+  });
+
+  it("test_a_leftover_a_claimed_issue_carries_is_not_filed", async () => {
+    // The issue is in the queue and somebody's run is working it: filing a
+    // second copy of it would file it twice.
+    const target = fakeTarget([
+      {
+        number: 77,
+        title: "the leftover",
+        body: BRIEF,
+        labels: [QUEUE_LABEL, CLAIM_LABEL],
+      },
+    ]);
+    const tool = createLeftoverTool({ repo: "gazon1/sing", gh: target.gh });
+
+    const result = await file(tool, { title: "the leftover", brief: BRIEF });
+
+    expect(result.details.filed).toBe(false);
+    expect(result.details.reason).toContain("#77");
+    expect(target.created).toHaveLength(0);
   });
 
   it("test_a_leftover_is_filed_even_when_an_unrelated_issue_carries_the_title", async () => {
@@ -7490,8 +7545,8 @@ describe("the related issues the runner fetches", () => {
   });
 
   it("test_the_batched_issues_are_linked_to_the_run_that_worked_them", async () => {
-    // The same link the leftovers use: `**Related:** #N` on the issue, so a
-    // reader of the queue sees that these issues are one run's work.
+    // The same link the leftovers use, in the same words, so a reader of the
+    // queue sees that these issues are one run's work.
     const comments: { number: number; body: string }[] = [];
     const gh = async (args: readonly string[]): Promise<string> => {
       if (args[0] === "issue" && args[1] === "comment") {
@@ -7503,6 +7558,7 @@ describe("the related issues the runner fetches", () => {
     await linkBatchedIssues({
       repo: "gazon1/sing",
       issueNumber: 42,
+      issueTitle: "the issue the run works",
       batch: [
         {
           number: 101,
@@ -7521,7 +7577,12 @@ describe("the related issues the runner fetches", () => {
 
     expect(comments).toHaveLength(1);
     expect(comments[0]?.number).toBe(101);
-    expect(comments[0]?.body).toContain("**Related:** #42");
+    // The leftovers' own words: one relation, one spelling. The `**Related:**`
+    // marker lives in the body of an issue the runner files — a batched issue's
+    // body belongs to somebody else.
+    expect(comments[0]?.body).toBe(
+      "Filed in the same run as this issue: #42 — the issue the run works",
+    );
   });
 
   it("test_the_untrusted_input_rule_covers_the_related_issues", () => {
