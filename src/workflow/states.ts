@@ -63,10 +63,20 @@ export interface StateName {
   readonly phase: string;
 }
 
+/**
+ * The text of a turn.
+ *
+ * A plain string is the text. A **function** is text that is only known when
+ * the turn runs: the batched issues' briefs, for instance, exist only after
+ * the related turn has decided which issues to batch, and they are read from
+ * the repository at that moment.
+ */
+export type StateText = string | (() => string | Promise<string>);
+
 /** A state of a session's workflow: one turn or action. */
 export interface WorkflowState extends StateName {
   /** The text of the turn. An action node has no text. */
-  readonly text: string;
+  readonly text: StateText;
   /**
    * Whether the turn counts towards the run's completed prompts.
    *
@@ -93,6 +103,17 @@ export type StateOutcome =
 
 /** Runs one state's turn or action. */
 export type TurnRunner = (state: WorkflowState) => Promise<StateOutcome>;
+
+/**
+ * The text of a state, resolved when the turn runs.
+ *
+ * A state that carries its text as a function is asked for it at the moment
+ * the turn starts, and not before: the text may depend on what an earlier
+ * turn decided.
+ */
+export async function stateText(state: WorkflowState): Promise<string> {
+  return typeof state.text === "function" ? await state.text() : state.text;
+}
 
 /** What a run of the states did. */
 export interface StatesResult {

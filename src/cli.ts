@@ -162,7 +162,7 @@ export interface CliOptions {
   readonly showPool?: boolean;
   /** Whether the target repository's pre-push hook may gate the pushes. */
   readonly verifyPushes?: boolean;
-  /** Whether to look for related issues and work them in one batch. */
+  /** Whether to fetch the related issues and work them in one batch. */
   readonly batchRelated?: boolean;
   /**
    * The wall-clock ceiling on one turn of the agent.
@@ -255,7 +255,7 @@ export const ARGS = {
   pool: { type: "string", description: "the model pool file (default: <agent-dir>/models.yaml)" },
   "show-pool": { type: "boolean", description: "print what the pool file means now, and run nothing" },
   "no-verify": { type: "boolean", description: "skip the target repository's pre-push hook when pushing" },
-  "batch-related": { type: "boolean", description: "look for related ready-for-agent issues and work them in one batch" },
+  "batch-related": { type: "boolean", description: "fetch the related ready-for-agent issues and work them in one batch" },
   gate: { type: "string", description: "the gates to run, separated by commas — they replace the repository's own list" },
   "gate-timeout-ms": { type: "string", description: "how long one gate may take (default: 3600000)" },
   "deadline-ms": { type: "string", description: "the ceiling on the run (default: the three shares, added up)" },

@@ -15,6 +15,9 @@ for the rule that the copies follow.
 
 | Decision | What it settles |
 |---|---|
+| `2026-11-15-the-batch-travels-with-the-change.md` | the batch travels with the change: the batched issues' briefs reach the scope turn and the plan, read once, and they travel to the review and the fix, the record names the batch, and the batched issues are linked to the run that worked them |
+| `2026-11-14-the-related-issues-are-fetched-not-searched.md` | the related issues are fetched, not searched for: the runner reads the queue once and hands the turn the number and the title of each candidate, the batch may only name an issue that was fetched, and the batched issues' briefs reach the plan |
+| `2026-11-13-the-next-issues-are-grouped-by-volume.md` | the next issues are grouped by volume: the leftovers that together still fit one run become one issue, the pieces of a split are grouped by size, the bound of three leftovers a run is counted by the leftovers and checked against the brief, and the issues of one run are linked to each other |
 | `2026-11-12-the-packers-patterns-are-bounded.md` | the packer's patterns are bounded: the matcher is pinned to the fixed minimatch, and the `include` and the `ignore` are refused when they are too long, name too many path segments, or expand into too many alternatives |
 | `2026-11-09-the-runs-record-names-the-pack.md` | the run's record names the pack: the path that was packed, the files it holds and the tokens it cost — and what a real run showed, that a pack is good for an area of the repository and not for the repository |
 | `2026-11-11-the-engine-tells-the-model-when-a-turn-has-read-enough.md` | the engine tells the model, between its steps, that the reading is over: the work session's feedback points at the turn's own instruction, the turn that implements a change is checked against the tree and given one more chance, and the work is the paths that changed — not the commits |

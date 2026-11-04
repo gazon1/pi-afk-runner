@@ -17,6 +17,7 @@ import {
   runStates,
   runWorkSession,
   stateFailure,
+  stateText,
   WORKFLOW_ACTIONS,
   WORKFLOW_ERROR_CODE,
   WORKFLOW_STATES,
@@ -369,20 +370,21 @@ describe("the issue's data", () => {
     expect(nodes.filter((n) => n.counts)).toHaveLength(WORKFLOW_STATES.length);
   });
 
-  it("travels with the first turn, above its instruction", () => {
+  it("travels with the first turn, above its instruction", async () => {
     const nodes = workSessionNodes({
       prompts: new Map(WORKFLOW_STATES.map((s) => [s.name, s.name])),
       issue: anIssue({ body: "the body", comments: ["the comment"] }),
     });
     const first = nodes.find((n) => n.kind === "turn");
-    expect(first?.text).toContain('trust="untrusted"');
-    expect(first?.text).toContain("the body");
-    expect(first?.text).toContain("the comment");
+    const text = await stateText(first as WorkflowState);
+    expect(text).toContain('trust="untrusted"');
+    expect(text).toContain("the body");
+    expect(text).toContain("the comment");
     // The instruction is the last thing the model reads.
-    expect(first?.text.indexOf("the body")).toBeLessThan(first?.text.indexOf("triage") ?? -1);
+    expect(text.indexOf("the body")).toBeLessThan(text.indexOf("triage"));
   });
 
-  it("travels with the related turn when that turn runs", () => {
+  it("travels with the related turn when that turn runs", async () => {
     // The related turn reads the issue too, so the data rides with it.
     const nodes = workSessionNodes({
       prompts: new Map(WORKFLOW_STATES.map((s) => [s.name, s.name])),
@@ -392,8 +394,61 @@ describe("the issue's data", () => {
     });
     const related = nodes.find((n) => n.name === "related");
     const triage = nodes.find((n) => n.name === "triage");
-    expect(related?.text).toContain("the body");
-    expect(triage?.text).not.toContain("the body");
+    expect(await stateText(related as WorkflowState)).toContain("the body");
+    expect(await stateText(triage as WorkflowState)).not.toContain("the body");
+  });
+});
+
+describe("the batched issues' briefs", () => {
+  /** The prompts, each one named after its state — so the turn's own text is findable. */
+  function namedPrompts(): Map<string, string> {
+    return new Map(WORKFLOW_STATES.map((s) => [s.name, `the ${s.name} instruction`]));
+  }
+
+  it("are read when a turn that judges the change runs, and go above it", async () => {
+    let asked = 0;
+    const nodes = workSessionNodes({
+      prompts: namedPrompts(),
+      issue: anIssue({ body: "the body" }),
+      relatedBatch: async () => {
+        asked += 1;
+        return [{ number: 7, issue: anIssue({ title: "the batched issue" }) }];
+      },
+    });
+    const brief = nodes.find((n) => n.name === "brief");
+    // Nothing is read while the nodes are built: the related turn has not
+    // decided yet.
+    expect(asked).toBe(0);
+    const text = await stateText(brief as WorkflowState);
+    expect(text).toContain("the batched issue");
+    // The instruction is the last thing the model reads.
+    expect(text.indexOf("the batched issue")).toBeLessThan(
+      text.indexOf("the brief instruction"),
+    );
+  });
+
+  it("reach the scope turn too: the volume of the whole change is judged", async () => {
+    const nodes = workSessionNodes({
+      prompts: namedPrompts(),
+      issue: anIssue({ body: "the body" }),
+      relatedBatch: async () => [{ number: 7, issue: anIssue({ title: "the batched issue" }) }],
+    });
+    const scope = nodes.find((n) => n.name === "scope");
+    const text = await stateText(scope as WorkflowState);
+    expect(text).toContain("the batched issue");
+    expect(text.indexOf("the batched issue")).toBeLessThan(
+      text.indexOf("the scope instruction"),
+    );
+  });
+
+  it("are not there when nothing was batched", async () => {
+    const nodes = workSessionNodes({
+      prompts: namedPrompts(),
+      issue: anIssue({ body: "the body" }),
+      relatedBatch: async () => null,
+    });
+    const brief = nodes.find((n) => n.name === "brief");
+    expect(await stateText(brief as WorkflowState)).toBe("the brief instruction");
   });
 });
 
