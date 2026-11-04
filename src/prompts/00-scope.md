@@ -56,5 +56,11 @@ second piece, and it is not a reason to split.
    issue. A later piece does not start until the earlier one's pull request
    is merged.
 
+   **The pieces are grouped by volume.** Each piece is a run of its own — a
+   fresh context, a fresh read of the repository — so a piece too small to
+   need a whole run goes into the piece beside it, and no piece is so big that
+   it would not fit one run. Group the work by size first, then order the
+   groups.
+
 The brief you write is what the next run reads. Describe behaviour and
 acceptance criteria, not file paths and line numbers.

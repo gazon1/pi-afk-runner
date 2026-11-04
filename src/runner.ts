@@ -1856,7 +1856,7 @@ export interface RunOptions {
    * with this change — and it is therefore explicit.
    */
   readonly verifyPushes?: boolean;
-  /** Whether to look for related issues and work them in one batch. */
+  /** Whether to fetch the related issues and work them in one batch. */
   readonly batchRelated?: boolean;
   /**
    * The gates to run, in the order they run.

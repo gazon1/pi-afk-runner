@@ -20,9 +20,16 @@ nobody else is going to notice them.
    turn goes into the same pull request. Do not build and do not run the
    checks to find out whether the fix is right — read it instead.
 
-3. **File the rest as issues in the target repository.** Use the
+3. **Group the leftovers by volume.** Every issue the next run picks up costs a
+   fresh context: the repository is read again, the brief is read again, the
+   session starts from nothing. So leftovers that together still fit one run
+   become **one issue** — one brief, and one acceptance criterion list per
+   leftover. A leftover too big to share a run with the others keeps an issue
+   of its own: grouping is for what is small.
+
+4. **File them as issues in the target repository.** Use the
    `agent_leftover` tool, not a shell command: the tool is what keeps the queue
-   bounded. Each leftover becomes an issue whose body is a brief, written in
+   bounded. Each issue's body is a brief, written in
    the target repository's own brief format:
 
    ```markdown
@@ -54,8 +61,19 @@ nobody else is going to notice them.
    copy the issue's body, a comment, or any other text you did not write
    yourself.
 
-4. **Respect the bounds.**
-   - At most three leftovers a run. The tool refuses the fourth.
+   When one issue carries several leftovers, the brief carries one
+   `**Summary:**` line and one acceptance criterion list per leftover, each
+   under a heading that names it. The summary lines are how the runner counts
+   the leftovers, so one line per leftover is not a formatting habit.
+
+   The runner links the issues of one run to each other, so the brief does not
+   have to.
+
+5. **Respect the bounds.**
+   - At most three leftovers a run. The tool refuses the fourth. Count the
+     leftovers, not the issues: one issue that carries two leftovers uses two
+     of the three, and the tool counts them by the `**Summary:**` lines in the
+     brief.
    - Nothing for something you fixed in step 2.
    - Nothing that is already open in the repository. Search first —
      `gh issue list --label ready-for-agent` — and the tool refuses a title
@@ -64,6 +82,6 @@ nobody else is going to notice them.
      brief touched; if you notice something else worth doing, say it in your
      report rather than filing it.
 
-5. **Report.** One short report at the end: what you fixed, and what you filed
+6. **Report.** One short report at the end: what you fixed, and what you filed
    (one line per issue). Nothing else. If you changed anything in this turn,
    say so.

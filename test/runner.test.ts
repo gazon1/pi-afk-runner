@@ -24,8 +24,10 @@ import {
 } from "../src/session.js";
 import {
   ISSUE_DECISION_TOOL_NAME,
+  RELATED_DECISION_TOOL_NAME,
   SCOPE_DECISION_TOOL_NAME,
   VERDICT_TOOL_NAME,
+  createRelatedDecisionTool,
 } from "../src/decisions/index.js";
 import {
   assistantTextLines,
@@ -6770,8 +6772,10 @@ describe("the leftovers a run files", () => {
   function fakeTarget(open: readonly TargetIssue[] = []): {
     gh: (args: readonly string[]) => Promise<string>;
     created: TargetIssue[];
+    comments: { number: number; body: string }[];
   } {
     const created: TargetIssue[] = [];
+    const comments: { number: number; body: string }[] = [];
     const gh = async (args: readonly string[]): Promise<string> => {
       if (args[0] === "issue" && args[1] === "view") {
         return JSON.stringify({
@@ -6807,9 +6811,13 @@ describe("the leftovers a run files", () => {
         created.push(issue);
         return `https://github.com/gazon1/sing/issues/${issue.number}\n`;
       }
+      if (args[0] === "issue" && args[1] === "comment") {
+        comments.push({ number: Number(args[2]), body: valueAfter(args, "--body") });
+        return "";
+      }
       return "[]";
     };
-    return { gh, created };
+    return { gh, created, comments };
   }
 
   /** The tool's own call, without the SDK's arguments around it. */
@@ -6976,6 +6984,67 @@ describe("the leftovers a run files", () => {
     expect(target.created).toHaveLength(MAX_LEFTOVERS_PER_RUN);
   });
 
+  it("test_the_bound_counts_the_leftovers_and_not_the_issues", async () => {
+    const target = fakeTarget();
+    const tool = createLeftoverTool({ repo: "gazon1/sing", gh: target.gh });
+
+    // One issue that carries two leftovers uses two of the three: the bound
+    // is about the work, not about the issues it is written down in.
+    const grouped = [
+      "## Agent Brief",
+      "",
+      "**Summary:** the first leftover",
+      "",
+      "### The second leftover",
+      "",
+      "**Summary:** the second leftover",
+    ].join("\n");
+    const first = await file(tool, { title: "the grouped leftovers", brief: grouped });
+    expect(first.details.filed).toBe(true);
+
+    // One more leftover fits — the third of the three.
+    const second = await file(tool, { title: "one more leftover", brief: BRIEF });
+    expect(second.details.filed).toBe(true);
+
+    // The fourth does not, however few issues it is written down in.
+    const refused = await file(tool, { title: "one too many", brief: BRIEF });
+    expect(refused.isError).toBe(true);
+    expect(target.created).toHaveLength(2);
+  });
+
+  it("test_a_brief_that_names_no_leftover_is_refused", async () => {
+    const target = fakeTarget();
+    const tool = createLeftoverTool({ repo: "gazon1/sing", gh: target.gh });
+
+    // Without a `**Summary:**` line the runner cannot count the leftovers, and
+    // a bound it cannot count is not a bound.
+    const result = await file(tool, {
+      title: "the nameless leftover",
+      brief: "## Agent Brief\n\n**Category:** enhancement\n",
+    });
+    expect(result.isError).toBe(true);
+    expect(target.created).toHaveLength(0);
+  });
+
+  it("test_the_issues_of_one_run_are_linked_to_each_other", async () => {
+    const target = fakeTarget();
+    const tool = createLeftoverTool({ repo: "gazon1/sing", gh: target.gh });
+
+    await file(tool, { title: "the first leftover", brief: BRIEF });
+    await file(tool, { title: "the second leftover", brief: BRIEF });
+
+    const first = target.created[0];
+    const second = target.created[1];
+
+    // The second issue names the first one in its brief, and the first one
+    // carries the link back: the issues of one run are one piece of work, and
+    // a reader of the queue has to see that without reading every body.
+    expect(second?.body).toContain(`**Related:** #${first?.number}`);
+    expect(target.comments).toHaveLength(1);
+    expect(target.comments[0]?.number).toBe(first?.number);
+    expect(target.comments[0]?.body).toContain(`#${second?.number}`);
+  });
+
   it("test_a_leftover_that_is_already_open_is_not_filed_again", async () => {
     const target = fakeTarget([
       {
@@ -7027,6 +7096,154 @@ describe("the leftovers a run files", () => {
     expect(result.isError).toBe(true);
     expect(result.details.filed).toBe(false);
     expect(target.created).toHaveLength(0);
+  });
+});
+
+describe("the related issues the runner fetches", () => {
+  /** The target repository, with the issues the related turn chooses from. */
+  function fakeRelated(): { gh: (args: readonly string[]) => Promise<string> } {
+    const gh = async (args: readonly string[]): Promise<string> => {
+      if (args[0] === "issue" && args[1] === "view") {
+        const number = args[2];
+        if (number === "101") {
+          return JSON.stringify({
+            body:
+              "## Agent Brief\n\n**Summary:** the batched issue's brief\n\n" +
+              "**Acceptance criteria:**\n- [ ] the acceptance criterion of the batched issue\n",
+            comments: [],
+            title: "the other issue",
+            labels: [],
+            updatedAt: "",
+            state: "OPEN",
+          });
+        }
+        return JSON.stringify({
+          body: "## Agent Brief\n\n**Summary:** the issue in hand\n",
+          comments: [],
+          title: "the issue in hand",
+          labels: [],
+          updatedAt: "",
+          state: "OPEN",
+        });
+      }
+      if (args[0] === "issue" && args[1] === "list") {
+        return JSON.stringify([
+          { number: 42, title: "the issue in hand", updatedAt: "", labels: [] },
+          { number: 101, title: "the other issue", updatedAt: "", labels: [] },
+        ]);
+      }
+      return "[]";
+    };
+    return { gh };
+  }
+
+  it("test_the_related_issues_are_fetched_and_given_to_the_turn", async () => {
+    const turns: string[] = [];
+    const factory: SessionFactory = async () => ({
+      async prompt(text) {
+        turns.push(text);
+      },
+      async abort() {},
+      dispose() {},
+    });
+
+    await startAgent({
+      factory,
+      cwd: process.cwd(),
+      repo: "gazon1/sing",
+      issueNumber: 42,
+      worktree: fakeWorktree(42),
+      gh: fakeRelated().gh,
+      batchRelated: true,
+      deadlineMs: 60_000,
+    });
+
+    // The turn is given the fetched issues — the queue's titles — and the
+    // issue in hand is not among them.
+    const related = turns[0] ?? "";
+    expect(related).toContain("#101 the other issue");
+    expect(related).not.toContain("#42 the issue in hand");
+  });
+
+  it("test_the_related_issues_are_the_ones_nobody_has_claimed", async () => {
+    // The pool is the queue: the open `ready-for-agent` issues nobody has
+    // claimed. An issue another run is working is not a candidate.
+    const turns: string[] = [];
+    const factory: SessionFactory = async () => ({
+      async prompt(text) {
+        turns.push(text);
+      },
+      async abort() {},
+      dispose() {},
+    });
+
+    await startAgent({
+      factory,
+      cwd: process.cwd(),
+      repo: "gazon1/sing",
+      issueNumber: 42,
+      worktree: fakeWorktree(42),
+      gh: fakeRelated().gh,
+      batchRelated: true,
+      deadlineMs: 60_000,
+    });
+
+    const related = turns[0] ?? "";
+    expect(related).toContain("nobody has claimed");
+  });
+
+  it("test_the_batched_issues_briefs_reach_the_plan", async () => {
+    // The related turn decides; the runner reads the briefs of the issues it
+    // batched, and hands them to the plan.
+    const turns: string[] = [];
+    const factory: SessionFactory = async (options) => ({
+      async prompt(text) {
+        turns.push(text);
+        // The model ends the related turn on its decision tool.
+        const decision = options.tools?.find((tool) => tool.name === RELATED_DECISION_TOOL_NAME);
+        if (decision !== undefined && turns.length === 1) {
+          await decision.execute("call-1", { batch: [101] });
+        }
+      },
+      async abort() {},
+      dispose() {},
+    });
+
+    await startAgent({
+      factory,
+      cwd: process.cwd(),
+      repo: "gazon1/sing",
+      issueNumber: 42,
+      worktree: fakeWorktree(42),
+      gh: fakeRelated().gh,
+      batchRelated: true,
+      deadlineMs: 60_000,
+    });
+
+    // The brief of the batched issue arrives above the plan's instruction, as
+    // data: the plan has to meet its acceptance criteria too.
+    const plan = turns.find((text) => text.includes("Read the issue, and work out")) ?? "";
+    expect(plan).toContain("the batched issue's brief");
+    expect(plan).toContain("the acceptance criterion of the batched issue");
+  });
+
+  it("test_the_untrusted_input_rule_covers_the_related_issues", () => {
+    // The pool is other people's text, in a public repository: the rule that
+    // says it is data and not instructions has to name it.
+    expect(UNTRUSTED_INPUT_RULE).toContain("<related-issues>");
+  });
+
+  it("test_the_batch_may_only_name_a_fetched_issue", async () => {
+    const holder: { value?: { readonly batch: readonly number[] } } = {};
+    const tool = createRelatedDecisionTool(holder, [101]);
+
+    const refused = await tool.execute("call-1", { batch: [999] });
+    expect(refused.isError).toBe(true);
+    expect(holder.value).toBeUndefined();
+
+    const accepted = await tool.execute("call-2", { batch: [101] });
+    expect(accepted.isError).toBeUndefined();
+    expect(holder.value?.batch).toEqual([101]);
   });
 });
 
