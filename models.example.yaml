@@ -53,6 +53,10 @@ models:
     timezone: UTC
     peak:
       - "00:00-16:00"
+    # How many workers may use this model at once. A sweep with several
+    # workers then spreads across the models instead of hammering one
+    # provider's rate limit. Absent means no cap.
+    workers: 2
 
   # A model without a priority is still a model: it is used when nothing
   # better can be.

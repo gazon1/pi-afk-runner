@@ -69,6 +69,15 @@ export interface PoolModel {
   readonly peak: readonly string[];
   /** The timezone the peak hours are counted in — the host's own when it is absent. */
   readonly timezone?: string;
+  /**
+   * How many workers may use this model at once.
+   *
+   * Absent when the file does not say: the model is then available to any
+   * number of workers, the way it always was. A number here caps the workers
+   * that may run on this model, so a sweep does not hammer one provider's
+   * rate limit.
+   */
+  readonly workers?: number;
 }
 
 /** The pool: the models, and how often it is looked at again. */
@@ -120,11 +129,13 @@ export class NoModelAvailable extends Error {
 export interface PoolState {
   /** The models whose limit is gone. */
   readonly exhausted: Set<string>;
+  /** How many workers are on each model right now. */
+  readonly inUse: Map<string, number>;
 }
 
 /** The pool's memory of a run that has just started. */
 export function newPoolState(): PoolState {
-  return { exhausted: new Set<string>() };
+  return { exhausted: new Set<string>(), inUse: new Map<string, number>() };
 }
 
 /** The pool file in the agent's directory. */
@@ -225,8 +236,8 @@ function parseModel(entry: unknown, index: number, source: string): PoolModel {
   if (!isRecord(entry)) {
     throw new Error(`${source}: model ${index} is not a mapping`);
   }
-  for (const key of Object.keys(entry)) {
-    if (!["model", "priority", "proxy", "peak", "timezone", "effort"].includes(key)) {
+   for (const key of Object.keys(entry)) {
+    if (!["model", "priority", "proxy", "peak", "timezone", "effort", "workers"].includes(key)) {
       throw new Error(`${source}: model ${index} has a key the pool does not know: ${key}`);
     }
   }
@@ -243,7 +254,8 @@ function parseModel(entry: unknown, index: number, source: string): PoolModel {
     // A window that cannot be read would be a peak that never comes.
     parseWindow(window, source);
   }
-  const timezone = timezoneOf(entry.timezone, index, source);
+   const timezone = timezoneOf(entry.timezone, index, source);
+  const workers = workersOf(entry.workers, index, source);
   return {
     reference,
     priority,
@@ -251,6 +263,7 @@ function parseModel(entry: unknown, index: number, source: string): PoolModel {
     proxy,
     peak,
     ...(timezone === undefined ? {} : { timezone }),
+    ...(workers === undefined ? {} : { workers }),
   };
 }
 
@@ -315,6 +328,22 @@ function timezoneOf(value: unknown, index: number, source: string): string | und
     throw new Error(`${source}: model ${index} timezone is not a timezone — got ${zone}`);
   }
   return zone;
+}
+
+/**
+ * How many workers may use one model at once.
+ *
+ * Absent when the file does not say. A number that is not a positive integer
+ * is refused when the file is read.
+ */
+function workersOf(value: unknown, index: number, source: string): number | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
+    throw new Error(`${source}: model ${index} workers must be a positive integer — got ${value}`);
+  }
+  return value;
 }
 
 /** The peak hours of one model: a list, however the file wrote them. */
@@ -451,6 +480,8 @@ export interface PoolChoice {
   readonly now?: Date;
   /** Whether the model can be reached at all. */
   readonly usable?: (model: PoolModel) => boolean;
+  /** How many workers are on each model right now. */
+  readonly workersInUse?: ReadonlyMap<string, number>;
 }
 
 /**
@@ -472,22 +503,64 @@ export function pickPoolModel(pool: Pool, choice: PoolChoice = {}): PoolModel | 
   const now = choice.now ?? new Date();
   const exhausted = choice.exhausted ?? new Set<string>();
   const proxyConfigured = choice.proxyConfigured ?? true;
-  for (const model of orderedModels(pool)) {
-    if (exhausted.has(model.reference)) {
-      continue;
+  const workersInUse = choice.workersInUse ?? new Map<string, number>();
+  // Per-provider cap: a provider's limit is the sum of its models' caps, so
+  // two models of one provider do not together exceed what one provider allows.
+  const providerCap = new Map<string, number>();
+  const providerUsage = new Map<string, number>();
+  for (const model of pool.models) {
+    const provider = splitReference(model.reference, "the pool's model").provider;
+    if (model.workers !== undefined) {
+      providerCap.set(provider, (providerCap.get(provider) ?? 0) + model.workers);
     }
-    if (isPeak(model, now)) {
-      continue;
+    if (model.workers !== undefined) {
+      providerUsage.set(
+        provider,
+        (providerUsage.get(provider) ?? 0) + (workersInUse.get(model.reference) ?? 0),
+      );
     }
-    if (model.proxy === true && !proxyConfigured) {
-      continue;
-    }
-    if (choice.usable !== undefined && !choice.usable(model)) {
-      continue;
-    }
-    return model;
   }
-  return undefined;
+  const usableModels = (respectCaps: boolean): PoolModel[] => {
+    const result: PoolModel[] = [];
+    for (const model of orderedModels(pool)) {
+      if (exhausted.has(model.reference)) continue;
+      if (isPeak(model, now)) continue;
+      if (model.proxy === true && !proxyConfigured) continue;
+      if (choice.usable !== undefined && !choice.usable(model)) continue;
+      if (respectCaps && model.workers !== undefined) {
+        const used = workersInUse.get(model.reference) ?? 0;
+        if (used >= model.workers) continue;
+      }
+      if (respectCaps && model.workers !== undefined) {
+        const provider = splitReference(model.reference, "the pool's model").provider;
+        const cap = providerCap.get(provider);
+        if (cap !== undefined) {
+          const used = providerUsage.get(provider) ?? 0;
+          if (used >= cap) continue;
+        }
+      }
+      result.push(model);
+    }
+    return result;
+  };
+  const capped = usableModels(true);
+  if (capped.length > 0) {
+    return capped[0];
+  }
+  // Fallback: every capped slot is full, so spill over to the least-loaded
+  // model rather than stopping the sweep.
+  const fallback = usableModels(false);
+  if (fallback.length === 0) {
+    return undefined;
+  }
+  return fallback.reduce((best, model) => {
+    const bestUsed = workersInUse.get(best.reference) ?? 0;
+    const modelUsed = workersInUse.get(model.reference) ?? 0;
+    if (modelUsed !== bestUsed) {
+      return modelUsed < bestUsed ? model : best;
+    }
+    return model.priority > best.priority ? model : best;
+  });
 }
 
 /**
@@ -527,7 +600,8 @@ export function describePool(pool: Pool, choice: PoolChoice = {}): readonly stri
           ? "it would not be used"
           : reasons.join(", ");
     const effort = model.effort === undefined ? "" : ` — effort ${model.effort}`;
-    lines.push(`${model.reference} — priority ${model.priority}${effort} — ${why}`);
+    const workers = model.workers === undefined ? "" : ` — workers ${model.workers}`;
+    lines.push(`${model.reference} — priority ${model.priority}${effort}${workers} — ${why}`);
   }
   if (chosen === undefined) {
     lines.push("no model can be used right now");
