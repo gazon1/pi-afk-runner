@@ -17,7 +17,9 @@
  * the journal of the merge — the session's lines, written while it works — is
  * the file beside that record. The sweep has a journal of its own, under
  * `build/diagnostics/merge/` beside those directories: the pull requests it
- * considered, the ones it left alone and why, and where it stopped.
+ * considered, the ones it left alone and why, and where it stopped. It has a
+ * record of its own beside that journal — what it landed, what it left alone
+ * and why, and what stopped — and the record is written when the sweep ends.
  */
 
 import { dirname, join } from "node:path";
@@ -44,6 +46,7 @@ import {
   pullRequestSubject,
   sweepJournalDirectory,
   sweepJournalHeader,
+  sweepSubject,
 } from "./journal.js";
 import {
   CommandFailed,
@@ -66,6 +69,7 @@ import {
   readCiOutcome,
   reviewPullRequest,
   runSteps,
+  writeRunRecord,
   type Step,
   type StepRecord,
 } from "./runner.js";
@@ -242,22 +246,31 @@ export async function mergeReviewedPullRequests(
   const skipped: { pullRequest: number; reason: string }[] = [];
   const failed: { pullRequest: number; step: string; message: string }[] = [];
   /**
-   * The pull requests the sweep left alone, counted for the sweep's own
-   * summary.
+   * The pull requests the sweep left alone, and why.
    *
    * A pull request whose branch is not ours is left alone too, and it is not
    * a candidate the result names — so the count the summary says is the count
-   * of the lines the journal holds, not the length of the result's list.
+   * of this list, not the length of the result's own. The list is what the
+   * sweep's record holds: every pull request it read and did not land.
    */
-  let leftAlone = 0;
+  const leftAlone: { pullRequest: number; reason: string }[] = [];
   const leaveAlone = (pullRequest: number, reason: string): void => {
-    leftAlone += 1;
+    leftAlone.push({ pullRequest, reason });
     write(`left #${pullRequest} alone — ${reason}`);
   };
+
+  /**
+   * Whether a human stopped the sweep before it read every candidate.
+   *
+   * The record says so: a sweep that was stopped did not finish its work, and
+   * a reader has to see that its record is not the whole of the sweep.
+   */
+  let stopped = false;
 
   for (const candidate of candidates) {
     if (options.stopped?.() === true) {
       write("the sweep was stopped");
+      stopped = true;
       break;
     }
     const issueNumber = issueNumberFromBranch(candidate.headRefName);
@@ -312,8 +325,45 @@ export async function mergeReviewedPullRequests(
   }
 
   write(
-    `the sweep ended — ${merged.length} landed, ${leftAlone} left alone, ${failed.length} stopped`,
+    `the sweep ended — ${merged.length} landed, ${leftAlone.length} left alone, ${failed.length} stopped`,
   );
+
+  /**
+   * The sweep's own record: what it landed, what it left alone and why, and
+   * what stopped.
+   *
+   * It is written when the sweep ends, and a sweep that is killed writes none
+   * — the rule the per-pull-request record follows. It sits beside the
+   * sweep's journal, under `build/diagnostics/merge/`, so a reader who opens
+   * one finds the other in the same place.
+   */
+  await writeRunRecord({
+    root: options.checkout,
+    runId,
+    outcome: failed.length > 0 || stopped ? "failed" : "completed",
+    subject: sweepSubject(),
+    heading: "# Merge sweep",
+    hasJournal: true,
+    sections: [
+      {
+        title: "Landed",
+        lines: merged.map((pullRequest) => `- #${pullRequest}`),
+      },
+      {
+        title: "Left alone",
+        lines: leftAlone.map((entry) => `- #${entry.pullRequest} — ${entry.reason}`),
+      },
+      {
+        title: "Stopped",
+        lines: [
+          ...failed.map(
+            (entry) => `- #${entry.pullRequest} — stopped at the ${entry.step} step — ${entry.message}`,
+          ),
+          ...(stopped ? ["- the sweep was stopped before it read every candidate"] : []),
+        ],
+      },
+    ],
+  });
 
   return { merged, skipped, failed };
 }

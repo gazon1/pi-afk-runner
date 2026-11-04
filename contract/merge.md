@@ -63,6 +63,11 @@ pull request stays open.
   per-pull-request directories. It holds the pull requests the sweep considered, the ones it left
   alone and why, and the pull request it was working on when it stopped. A sweep that is killed
   leaves the file behind.
+- Write the record of the sweep itself, under `build/diagnostics/merge/`, beside that journal.
+  It holds the pull requests the sweep landed, the ones it left alone and why, and the ones that
+  stopped and at which step. The sweep works on pull requests and is not one of them, so the
+  record names the run by what it was about and by no number. The record is written when the
+  sweep ends, so a sweep that is killed leaves the journal behind and no record.
 
 ## What it must never do
 
