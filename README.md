@@ -312,10 +312,12 @@ has no thinking level to set. `models.example.yaml` is a filled-in example.
 - the `agent-reviewed` label on that pull request, which is what makes the review gate count it;
 - the issues the run filed for the work that follows from its own: each labelled `ready-for-agent`,
   each with a brief opening with `## Agent Brief`, so the next run picks them up. At most three
-  leftovers a run, and never a second copy of something that is already open. Leftovers that together still
+  leftovers a run, and never a second copy of something that is already known — the duplicate check
+  reads the queue and the issues somebody has claimed. Leftovers that together still
   fit one run are grouped into one issue, so the next run reads one brief instead of several, and
   the issues of one run are linked to each other — `**Related:** #N` in the brief, and a comment
-  on the earlier ones;
+  on the earlier ones. The issues a run was given together as a batch travel with the change: their
+  briefs reach the scope turn, the review and the fix, and the run's record names the batch;
 - or, for a split, the two to eight smaller issues it filed instead of working the original,
   chained by `**Depends on:**` so they run in order, and grouped by volume so that no piece is
   too small to need a run of its own;

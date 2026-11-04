@@ -16,7 +16,8 @@ doing.
    - `batch: [#A, #B, ...]` — when the issues are one change and working them
      together is smaller than working them apart. Then carry on to the triage
      turn. The runner reads the batched issues' briefs and hands them to the
-     plan, so the change meets their acceptance criteria too.
+     scope turn, the plan, the review and the fix, so the change meets their
+     acceptance criteria too.
    - `batch: []` — when the issue stands alone, or the related ones are not
      ready, or batching would only make the diff harder to review. Then carry
      on to the triage turn for this issue alone.
@@ -25,7 +26,8 @@ doing.
    refused, because nobody fetched it.
 
 3. **Do not file, close or label anything here.** This turn only decides. The
-   runner keeps the choice in the record.
+   runner keeps the choice in the record, and links the batched issues to the
+   run that worked them.
 
 A batch is not a licence to widen the change: every issue in it still has to
 meet its own acceptance criteria, and the review still reads the whole diff.

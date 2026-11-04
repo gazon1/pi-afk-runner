@@ -51,10 +51,12 @@ import {
   UNTRUSTED_INPUT_SECTION,
   WORK_FEEDBACK,
   addUsage,
+  batchData,
   briefFence,
   cutOffMessage,
   runPromptArray,
   startAgent,
+  type BatchedIssue,
   type PromptArrayResult,
   type RunUsage,
   type Scheduler,
@@ -91,6 +93,7 @@ import {
   commentIssue,
   createPullRequest,
   dependencyNumbers,
+  linkIssue,
   newestReviewVerdict,
   postCommentArgs,
   pullRequestBody,
@@ -803,6 +806,14 @@ export async function reviewPullRequest(options: {
    * travels with the prompt, fenced as untrusted data.
    */
   readonly issue?: IssueDetail;
+  /**
+   * The issues the change covers, when the related turn batched any.
+   *
+   * The change is judged against every issue in the batch, not only the one
+   * in hand: their briefs travel with the prompt, fenced as untrusted data,
+   * and the reviewer reads the whole diff against all of them.
+   */
+  readonly batch?: readonly BatchedIssue[];
 }): Promise<ReviewOutcome> {
   const holder: { value?: ReviewVerdict } = {};
   // What the review cost, when the provider said: the session's events carry
@@ -847,16 +858,17 @@ export async function reviewPullRequest(options: {
   });
 
   const fence = options.issue === undefined ? "" : briefFence(options.issue);
-  const prompt =
-    fence === ""
-      ? REVIEW_PROMPT
-      : [
-          REVIEW_PROMPT,
-          "",
-          "## The brief this change is judged against",
-          "",
-          fence,
-        ].join("\n");
+  const batch = options.batch ?? [];
+  const sections = [REVIEW_PROMPT];
+  if (fence !== "") {
+    sections.push("", "## The brief this change is judged against", "", fence);
+  }
+  if (batch.length > 0) {
+    // The batch is judged with the same diff: the change covers every issue
+    // in it, so every issue's criteria are what the reviewer holds it to.
+    sections.push("", batchData(batch));
+  }
+  const prompt = sections.join("\n");
 
   // The session belongs to `runPromptArray` once it is given one: it disposes
   // of it when the run is over. A second owner would make the session's life
@@ -1022,13 +1034,49 @@ export async function addRecountLabel(options: {
 }
 
 /**
+ * Tell the batched issues that they were batched into this run.
+ *
+ * The link is the one the leftovers use: `**Related:** #N` on the issue, so a
+ * reader of the queue sees that these issues are one run's work. The link is a
+ * nicety — one that cannot be posted does not fail the run.
+ */
+export async function linkBatchedIssues(options: {
+  readonly repo: string;
+  /** The issue the run works — the one the batch was made for. */
+  readonly issueNumber: number;
+  readonly batch: readonly BatchedIssue[];
+  readonly gh: GhRunner;
+}): Promise<void> {
+  for (const batched of options.batch) {
+    await linkIssue(
+      {
+        repo: options.repo,
+        issueNumber: batched.number,
+        body:
+          `**Related:** #${options.issueNumber} — this issue was batched into the same ` +
+          `run as #${options.issueNumber}.`,
+      },
+      options.gh,
+    );
+  }
+}
+
+/**
  * The prompt a fix turn is given.
  *
  * It is the reviewer's findings, verbatim: the fix is about what the review
  * found, and a summary of them is a second reading of the diff by somebody who
  * did not review it. The gates are the same the implementing turn ran.
+ *
+ * The briefs travel with it — the issue's and, when the run batched others,
+ * theirs: a fix that answers the review and breaks another issue's criteria
+ * is not a fix.
  */
-export function fixPrompt(findings: readonly string[], issue?: IssueDetail): string {
+export function fixPrompt(
+  findings: readonly string[],
+  issue?: IssueDetail,
+  batch: readonly BatchedIssue[] = [],
+): string {
   const fence = issue === undefined ? "" : briefFence(issue);
   return [
     "The reviewer of this pull request did not pass it. Fix what it found.",
@@ -1046,6 +1094,7 @@ export function fixPrompt(findings: readonly string[], issue?: IssueDetail): str
           "",
           fence,
         ]),
+    ...(batch.length === 0 ? [] : ["", batchData(batch)]),
     "",
     "1. Address every finding. Where a finding is wrong, make the code say why it is wrong.",
     "",
@@ -1133,6 +1182,8 @@ export async function fixWorktree(options: {
   readonly schedule?: Scheduler;
   /** The issue whose brief the fix must not break. */
   readonly issue?: IssueDetail;
+  /** The issues the change covers, when the run batched any. */
+  readonly batch?: readonly BatchedIssue[];
 }): Promise<void> {
   const session = await options.factory({
     cwd: options.cwd,
@@ -1143,7 +1194,7 @@ export async function fixWorktree(options: {
   });
   const result = await runPromptArray({
     session,
-    prompts: [fixPrompt(options.findings, options.issue)],
+    prompts: [fixPrompt(options.findings, options.issue, options.batch ?? [])],
     // The fix is one state: the findings, addressed in one turn.
     states: [{ name: "fix", phase: "Fix" }],
     deadlineMs: options.deadlineMs,
@@ -1493,6 +1544,8 @@ function renderRecord(options: {
   readonly pool?: readonly string[];
   /** The packs the run made, when it made any. */
   readonly packs?: readonly PackReport[];
+  /** The issues the change covered, when the run batched any. */
+  readonly batch?: readonly { readonly number: number; readonly title: string }[];
   /** Whether this run wrote a journal beside the record. */
   readonly hasJournal?: boolean;
 }): string {
@@ -1537,6 +1590,16 @@ function renderRecord(options: {
     }
   }
   lines.push("");
+  // The issues the change covered. A run that worked more than one issue is a
+  // run that did one piece of work for several contracts, and the record has
+  // to say which: the diff alone cannot.
+  if (options.batch !== undefined && options.batch.length > 0) {
+    lines.push("## The batch", "");
+    for (const issue of options.batch) {
+      lines.push(`- #${issue.number} ${issue.title}`);
+    }
+    lines.push("");
+  }
   // The packs the run made. The pack is a document the agent read, and it cost
   // the context tokens: a record that says a run worked the issue, and not
   // what it read to do it, cannot answer what the run cost.
@@ -1581,6 +1644,8 @@ export async function writeRunRecord(options: {
   readonly pool?: readonly string[];
   /** The packs the run made, when it made any. */
   readonly packs?: readonly PackReport[];
+  /** The issues the change covered, when the run batched any. */
+  readonly batch?: readonly { readonly number: number; readonly title: string }[];
   /** Whether this run wrote a journal beside the record. */
   readonly hasJournal?: boolean;
 }): Promise<string> {
@@ -1601,6 +1666,7 @@ export async function writeRunRecord(options: {
       subject,
       ...(options.pool === undefined ? {} : { pool: options.pool }),
       ...(options.packs === undefined ? {} : { packs: options.packs }),
+      ...(options.batch === undefined ? {} : { batch: options.batch }),
       ...(options.hasJournal === undefined ? {} : { hasJournal: options.hasJournal }),
     }),
     "utf8",
@@ -1673,6 +1739,13 @@ export async function runSteps(options: {
    * land here, and the record is written with what they left.
    */
   readonly packs?: PackReport[];
+  /**
+   * The issues the change covered, when the run batched any.
+   *
+   * The record names them, so a reader can see what the change was for and
+   * not only what it changed.
+   */
+  readonly batch?: readonly { readonly number: number; readonly title: string }[];
   /** Whether this run wrote a journal beside the record. */
   readonly hasJournal?: boolean;
   /** What a failure releases: the claim, the worktree, the ref. */
@@ -1767,6 +1840,7 @@ export async function runSteps(options: {
       ...(options.subject === undefined ? {} : { subject: options.subject }),
       ...(options.pool === undefined ? {} : { pool: options.pool }),
       ...(options.packs === undefined ? {} : { packs: options.packs }),
+      ...(options.batch === undefined ? {} : { batch: options.batch }),
       ...(options.hasJournal === undefined ? {} : { hasJournal: options.hasJournal }),
     });
   } catch (recordError) {
@@ -2697,6 +2771,8 @@ async function runPlan(
     usage: undefined as RunUsage | undefined,
     /** The issue, once the work session read it; a resume reads it itself. */
     issue: plan.issueDetail ?? (null as IssueDetail | null),
+    /** The issues the change covers, when the related turn batched any. */
+    batch: [] as readonly BatchedIssue[],
     /** What the work session decided to do with the issue. */
     decision: "work" as "work" | "skip" | "split",
     /** Why it decided that. */
@@ -2944,6 +3020,15 @@ async function runPlan(
         state.decision = result.decision;
         state.reason = result.reason;
         state.issue = result.issue;
+        state.batch = result.batch;
+        if (result.decision === "work" && result.batch.length > 0) {
+          await linkBatchedIssues({
+            repo: options.repo,
+            issueNumber: issue.number,
+            batch: result.batch,
+            gh: options.gh,
+          });
+        }
         if (result.decision !== "work") {
           // The branch closed the issue (skip) or replaced it with smaller ones
           // (split). There is no work to commit, push or review: the run ends
@@ -3152,6 +3237,7 @@ async function runPlan(
               deadlineMs: budget,
               ...(options.stopped === undefined ? {} : { stopped: options.stopped }),
               issue: detail,
+              batch: state.batch,
               onPack: (details) => {
                 packs.push({
                   session: "review",
@@ -3186,6 +3272,7 @@ async function runPlan(
               deadlineMs: budget,
               ...(options.stopped === undefined ? {} : { stopped: options.stopped }),
               issue: detail,
+              batch: state.batch,
             });
             await commitAll(
               options.git,
@@ -3358,6 +3445,11 @@ async function runPlan(
     steps,
     // The packs the run made, for the record to name.
     packs,
+    // The issues the change covered, for the record to name.
+    batch: state.batch.map((batched) => ({
+      number: batched.number,
+      title: batched.issue.title,
+    })),
     // The run wrote a journal beside the record, so the record names it: the
     // record is the file a reader is sent to.
     hasJournal: true,

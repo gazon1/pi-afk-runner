@@ -66,6 +66,11 @@ nobody else is going to notice them.
    under a heading that names it. The summary lines are how the runner counts
    the leftovers, so one line per leftover is not a formatting habit.
 
+   The tool takes `leftovers` as well: how many the brief carries. It is the
+   number of `**Summary:**` lines, and the tool refuses a brief whose two
+   disagree — a brief that groups three leftovers under one summary would say
+   one, and the bound would not be the bound this step promises.
+
    The runner links the issues of one run to each other, so the brief does not
    have to.
 
@@ -75,7 +80,8 @@ nobody else is going to notice them.
      of the three, and the tool counts them by the `**Summary:**` lines in the
      brief.
    - Nothing for something you fixed in step 2.
-   - Nothing that is already open in the repository. Search first —
+   - Nothing that is already known in the repository: the queue, and the
+     issues somebody has claimed. Search first —
      `gh issue list --label ready-for-agent` — and the tool refuses a title
      that is already there anyway.
    - Nothing outside the brief's scope. A leftover is about the code this

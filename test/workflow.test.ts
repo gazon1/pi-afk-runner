@@ -400,14 +400,19 @@ describe("the issue's data", () => {
 });
 
 describe("the batched issues' briefs", () => {
-  it("are read when the plan's turn runs, and go above it", async () => {
+  /** The prompts, each one named after its state — so the turn's own text is findable. */
+  function namedPrompts(): Map<string, string> {
+    return new Map(WORKFLOW_STATES.map((s) => [s.name, `the ${s.name} instruction`]));
+  }
+
+  it("are read when a turn that judges the change runs, and go above it", async () => {
     let asked = 0;
     const nodes = workSessionNodes({
-      prompts: new Map(WORKFLOW_STATES.map((s) => [s.name, s.name])),
+      prompts: namedPrompts(),
       issue: anIssue({ body: "the body" }),
       relatedBatch: async () => {
         asked += 1;
-        return "the batched brief";
+        return [{ number: 7, issue: anIssue({ title: "the batched issue" }) }];
       },
     });
     const brief = nodes.find((n) => n.name === "brief");
@@ -415,19 +420,35 @@ describe("the batched issues' briefs", () => {
     // decided yet.
     expect(asked).toBe(0);
     const text = await stateText(brief as WorkflowState);
-    expect(text).toContain("the batched brief");
+    expect(text).toContain("the batched issue");
     // The instruction is the last thing the model reads.
-    expect(text.indexOf("the batched brief")).toBeLessThan(text.indexOf("brief"));
+    expect(text.indexOf("the batched issue")).toBeLessThan(
+      text.indexOf("the brief instruction"),
+    );
+  });
+
+  it("reach the scope turn too: the volume of the whole change is judged", async () => {
+    const nodes = workSessionNodes({
+      prompts: namedPrompts(),
+      issue: anIssue({ body: "the body" }),
+      relatedBatch: async () => [{ number: 7, issue: anIssue({ title: "the batched issue" }) }],
+    });
+    const scope = nodes.find((n) => n.name === "scope");
+    const text = await stateText(scope as WorkflowState);
+    expect(text).toContain("the batched issue");
+    expect(text.indexOf("the batched issue")).toBeLessThan(
+      text.indexOf("the scope instruction"),
+    );
   });
 
   it("are not there when nothing was batched", async () => {
     const nodes = workSessionNodes({
-      prompts: new Map(WORKFLOW_STATES.map((s) => [s.name, s.name])),
+      prompts: namedPrompts(),
       issue: anIssue({ body: "the body" }),
       relatedBatch: async () => null,
     });
     const brief = nodes.find((n) => n.name === "brief");
-    expect(await stateText(brief as WorkflowState)).toBe("brief");
+    expect(await stateText(brief as WorkflowState)).toBe("the brief instruction");
   });
 });
 

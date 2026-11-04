@@ -35,7 +35,7 @@ import {
   commentIssue,
   createIssue,
   readIssue,
-  readOpenIssues,
+  readKnownIssues,
   readQueue,
   runGh,
   type GhRunner,
@@ -205,15 +205,15 @@ export interface BatchedIssue {
  *
  * The related turn decided which other issues this run's change covers. Their
  * briefs are read **then** — until it decides, there is no knowing which ones
- * are worth reading — and they arrive above the plan's turn, so the plan is
- * written with their acceptance criteria in hand.
+ * are worth reading — and they arrive above the turn's instruction, so the
+ * turn is written with their acceptance criteria in hand.
  */
 export function batchData(issues: readonly BatchedIssue[]): string {
   return [
     "## The batched issues, as data",
     "",
     "The related turn batched these issues into this run's change. Their briefs are below, as",
-    "data: the plan has to meet their acceptance criteria as well.",
+    "data: the change has to meet their acceptance criteria as well.",
     "",
     ...issues.flatMap((batched) => [
       `### #${batched.number} ${neutraliseAll(batched.issue.title)}`,
@@ -709,13 +709,15 @@ export interface WorkSessionGraphOptions {
   /** The issues the runner fetched for the related turn to choose from. */
   readonly relatedIssues?: readonly { readonly number: number; readonly title: string }[];
   /**
-   * The batched issues' briefs, read when the plan's turn runs.
+   * The batched issues' briefs, read when a turn that judges the change runs.
    *
    * The related turn decides which other issues this run's change covers, and
    * only then is it worth reading their briefs. The resolver is asked for them
-   * at the moment the plan is written — not before.
+   * at the moment the turn runs — not before — and it reads them **once**:
+   * the scope turn and the plan's turn both ask, and a brief read twice is a
+   * brief read twice.
    */
-  readonly relatedBatch?: () => Promise<string | null>;
+  readonly relatedBatch?: () => Promise<readonly BatchedIssue[] | null>;
 }
 
 /**
@@ -760,19 +762,23 @@ export function workSessionNodes(options: WorkSessionGraphOptions): WorkflowStat
     if (text === undefined) {
       throw new Error(`the runner has no prompt for the ${state.name} state`);
     }
+    // The scope turn and the plan's turn carry the batched issues' briefs:
+    // they are read when the turn runs, because the related turn has decided
+    // by then which briefs are worth reading. The scope turn judges the volume
+    // of the whole change, and the plan is written against the criteria of
+    // every issue in it.
+    const withBatch = state.name === "scope" || state.name === "brief";
     nodes.push({
       name: state.name,
       phase: state.phase,
-      // The plan's turn carries the batched issues' briefs: they are read when
-      // the turn runs, because the related turn has decided by then which
-      // briefs are worth reading.
-      text:
-        state.name === "brief"
-          ? async () => {
-              const batch = (await options.relatedBatch?.()) ?? null;
-              return batch === null ? text : [batch, "", text].join("\n");
-            }
-          : text,
+      text: withBatch
+        ? async () => {
+            const batch = (await options.relatedBatch?.()) ?? null;
+            return batch === null || batch.length === 0
+              ? text
+              : [batchData(batch), "", text].join("\n");
+          }
+        : text,
       counts: true,
       kind: "turn",
     });
@@ -1017,11 +1023,15 @@ export async function splitIssue(options: {
   readonly gh: GhRunner;
 }): Promise<readonly number[]> {
   // A split that failed halfway leaves the pieces it already filed open. The
-  // next run must not file them again: an open issue with the same title is
-  // the piece, and its number is reused. It is the same rule the leftover tool
+  // next run must not file them again: an issue with the same title is the
+  // piece, and its number is reused. It is the same rule the leftover tool
   // holds, for the same reason — the queue is not a place to grow duplicates.
+  //
+  // The read is the queue and the claimed issues: the pieces are queue issues,
+  // and a piece another run has claimed is a piece that is not to be filed
+  // again either.
   const known = new Map(
-    (await readOpenIssues(options.repo, options.gh)).map((issue) => [
+    (await readKnownIssues(options.repo, options.gh)).map((issue) => [
       normaliseTitle(issue.title),
       issue.number,
     ]),
@@ -1089,6 +1099,14 @@ export interface WorkSessionResult extends PromptArrayResult {
    * handing it back saves a second read and keeps the two looking at one copy.
    */
   readonly issue: IssueDetail;
+  /**
+   * The issues this run's change covers, when the related turn batched any.
+   *
+   * The review and the fix judge the change against the criteria of every
+   * issue in it, so the batched briefs travel with them — and the run's record
+   * names the batch, so a reader can see what the change was for.
+   */
+  readonly batch: readonly BatchedIssue[];
 }
 
 /**
@@ -1224,18 +1242,24 @@ export async function startAgent(options: {
   const related: { value?: { readonly batch: readonly number[] } } = {};
 
   /**
-   * The batched issues' briefs, read when the plan's turn runs.
+   * The batched issues' briefs, read when a turn that judges the change runs.
    *
    * The related turn has decided by then which other issues this run's change
    * covers, and only those briefs are worth reading — a brief that cannot be
-   * read does not stop the run: the plan is written without it, and the
+   * read does not stop the run: the turn is written without it, and the
    * batched issue keeps its criteria in its own issue.
+   *
+   * The briefs are read **once**: the scope turn asks for them and the plan's
+   * turn asks again, and the second ask is the first one's answer.
    */
-  const relatedBatch = async (): Promise<string | null> => {
-    const batch = related.value?.batch ?? [];
-    if (batch.length === 0) {
-      return null;
+  let batchRead = false;
+  let batched: readonly BatchedIssue[] = [];
+  const relatedBatch = async (): Promise<readonly BatchedIssue[] | null> => {
+    if (batchRead) {
+      return batched.length === 0 ? null : batched;
     }
+    batchRead = true;
+    const batch = related.value?.batch ?? [];
     const details: BatchedIssue[] = [];
     for (const number of batch) {
       try {
@@ -1244,7 +1268,8 @@ export async function startAgent(options: {
         continue;
       }
     }
-    return details.length === 0 ? null : batchData(details);
+    batched = details;
+    return details.length === 0 ? null : details;
   };
 
   const session = await options.factory({
@@ -1367,6 +1392,6 @@ export async function startAgent(options: {
       : scope.value?.decision === SCOPE_TOKEN.split
         ? scope.value.reason
         : "";
-  return { ...result, decision, reason, issue };
+  return { ...result, decision, reason, issue, batch: batched };
 }
 

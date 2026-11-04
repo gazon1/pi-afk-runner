@@ -48,10 +48,18 @@ run. The pieces keep their order, so the dependency chain is unchanged.
 
 **The bounds stay, and the tool counts them.** At most three leftovers a run,
 counted by the leftovers and not by the issues: one issue that carries two
-leftovers uses two of the three. The tool counts them by the brief's
-`**Summary:**` lines — one per leftover — so the bound it holds is the bound
-the prompt promises. A brief that names no leftover is refused: a bound that
-cannot be counted is not a bound.
+leftovers uses two of the three. The count is stated twice — the model says
+how many the brief carries, and the brief says it with one `**Summary:**`
+line per leftover — and the tool refuses a brief whose two disagree. A brief
+that groups three leftovers under one summary would count as one, and the
+bound would not be the bound the prompt promises. A brief that names no
+leftover is refused: a bound that cannot be counted is not a bound.
+
+**Nothing that is already known is filed twice.** The duplicate check reads
+the queue and the claimed issues: the work that is waiting, and the work
+somebody is already doing. It does not read every open issue in the
+repository — that read is three times the size for the same answer, and an
+issue outside the queue is not work the next run would take.
 
 **No new tool and no new field.** A grouped issue is an ordinary issue with an
 ordinary brief; the runner files it, labels it `ready-for-agent`, and the next
@@ -90,6 +98,9 @@ uses everywhere else.
 - The bound of three leftovers a run is now a bound on the work filed, not on
   the issues filed: one issue of three leftovers is at the bound, and the tool
   refuses the fourth leftover however few issues carry them.
+- The count is stated by the model and checked against the brief: a brief
+  whose summaries and whose stated count disagree is refused, so a grouped
+  brief cannot quietly under-count the work it carries.
 - A leftover too big to share a run keeps its own issue — grouping is for what
   is small, and a merged issue that does not fit a run buys nothing.
 - The issues of one run carry each other's numbers, so a reader of the queue

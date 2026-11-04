@@ -5,6 +5,12 @@ run**, or has to become smaller issues. Do not change any file yet.
 
 Read the brief's acceptance criteria and the code they touch.
 
+**The run may cover more than one issue.** When the related turn batched other
+issues into this run, their briefs arrived above this instruction, as data.
+The run's change has to meet their criteria too, so judge the volume of the
+**whole** change — this issue's work and theirs together — and not only this
+issue's.
+
 The `agent_pack_codebase` tool packs the code you name into one document:
 use it when the criteria touch several files, and read the single file with
 the workspace's own tools when they touch one.
