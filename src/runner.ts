@@ -1945,14 +1945,6 @@ export interface RunOptions {
    * enough that a killed run does not hold it for ever.
    */
   readonly staleAfterMs: number;
-  /**
-   * Whether the target repository's pre-push hook may gate the pushes.
-   *
-   * The hook is the repository's rule. Skipping it is a decision about the
-   * repository's state — its gate is red for a reason that has nothing to do
-   * with this change — and it is therefore explicit.
-   */
-  readonly verifyPushes?: boolean;
   /** Whether to fetch the related issues and work them in one batch. */
   readonly batchRelated?: boolean;
   /**
@@ -2142,24 +2134,6 @@ export async function headSha(git: GitRunner, cwd: string): Promise<string> {
   return (await git(["rev-parse", "HEAD"], { cwd })).trim();
 }
 
-/**
- * A change at or below this many files is small.
- *
- * The long checks — the repository's pre-push hook, whose detekt verdict over
- * one module takes minutes — earn their cost on a change that reaches them. A
- * handful of files in one module does not, and the run's own gate (the
- * review) still reads it.
- */
-export const SMALL_CHANGE_MAX_FILES = 3;
-
-/**
- * A change at or below this many changed lines is small.
- *
- * It is the second half of the size rule: a one-file change that rewrites
- * three hundred lines is not small, whatever its file count says.
- */
-export const SMALL_CHANGE_MAX_LINES = 60;
-
 /** How many times the review may fail and be fixed in one run. */
 export const MAX_FIX_ITERATIONS = 3;
 
@@ -2173,85 +2147,16 @@ export const MAX_FIX_ITERATIONS = 3;
  */
 export const GATE_FIX_ATTEMPTS = 2;
 
-/** How big a change is. */
-export interface ChangeSize {
-  /** The files the diff touches. */
-  readonly files: number;
-  /** The lines it adds and removes. Binary files count as zero lines. */
-  readonly lines: number;
-}
-
-/**
- * The size of the diff between two commits.
- *
- * `--numstat` is the form git writes for machines: one line per file, the
- * additions, the deletions and the path. `-` in either count is a binary file,
- * which has no line count; it still counts as a file.
- */
-export async function changedSize(
-  git: GitRunner,
-  cwd: string,
-  options: { readonly base: string; readonly head: string },
-): Promise<ChangeSize> {
-  const output = await git(
-    ["diff", "--numstat", `${options.base}...${options.head}`],
-    { cwd },
-  );
-  let files = 0;
-  let lines = 0;
-  for (const raw of output.split("\n")) {
-    const line = raw.trim();
-    if (line === "") {
-      continue;
-    }
-    const [added, removed] = line.split("\t");
-    if (added === undefined || removed === undefined) {
-      continue;
-    }
-    files += 1;
-    const additions = Number(added);
-    const deletions = Number(removed);
-    if (Number.isFinite(additions)) {
-      lines += additions;
-    }
-    if (Number.isFinite(deletions)) {
-      lines += deletions;
-    }
-  }
-  return { files, lines };
-}
-
-/** Whether a change is small enough to skip the long pre-push checks. */
-export function isSmallChange(size: ChangeSize): boolean {
-  return (
-    size.files > 0 &&
-    size.files <= SMALL_CHANGE_MAX_FILES &&
-    size.lines <= SMALL_CHANGE_MAX_LINES
-  );
-}
-
-/**
- * Whether a push may skip the repository's pre-push hook.
- *
- * An explicit request wins; otherwise a small change skips the hook and a
- * larger one does not. The hook is the repository's rule, and the skip is a
- * decision about the repository's state, so the default is the cautious one
- * everywhere except where the size makes the hook's cost larger than its
- * value.
- */
-export function verifyPush(options: {
-  readonly verifyPushes?: boolean | undefined;
-  readonly size: ChangeSize;
-}): boolean {
-  return options.verifyPushes ?? !isSmallChange(options.size);
-}
-
-
 /**
  * Commit what the runner itself wrote.
  *
  * The identity is passed on the command line: the repository the runner works
  * in is not the runner's own, and a commit with no author is not a commit.
+ *
+ * The commit runs **no hook**. The repository's pre-commit hook is a lint and a
+ * compile, and a run builds nothing: a hook that refused this commit failed the
+ * run that was about to push the work, and the work went with the worktree. The
+ * pull request's own CI judges the tree.
  */
 export async function commitAll(
   git: GitRunner,
@@ -2279,6 +2184,7 @@ export async function commitAll(
       "user.email=afk-runner@localhost",
       "commit",
       "-q",
+      "--no-verify",
       "-m",
       message,
     ],
@@ -3129,20 +3035,12 @@ async function runPlan(
           return "skipped — the issue was not worked";
         }
         const sha = await headSha(options.git, state.worktreePath);
-        const size = await changedSize(options.git, state.worktreePath, {
-          base: state.base,
-          head: sha,
-        });
-        const small = isSmallChange(size);
         await pushWorkBranch(options.git, state.worktreePath, {
           remote: options.remote,
           issueNumber: issue.number,
           sha,
-          verify: verifyPush({ verifyPushes: options.verifyPushes, size }),
         });
-        return small
-          ? `${sha.slice(0, 8)} (small change — the long checks are skipped)`
-          : sha.slice(0, 8);
+        return sha.slice(0, 8);
       },
     });
   } else {
@@ -3325,15 +3223,10 @@ async function runPlan(
             // away, and the next commit is what it keeps out of.
             await runTheGates();
             const sha = await headSha(options.git, state.worktreePath);
-            const size = await changedSize(options.git, state.worktreePath, {
-              base: state.base,
-              head: sha,
-            });
             await pushWorkBranch(options.git, state.worktreePath, {
               remote: options.remote,
               issueNumber: issue.number,
               sha,
-              verify: verifyPush({ verifyPushes: options.verifyPushes, size }),
             });
           },
         }).catch((error: unknown) => {
@@ -3452,15 +3345,10 @@ async function runPlan(
       );
       await commitAll(options.git, state.worktreePath, "chore: the change's verdict");
       const sha = await headSha(options.git, state.worktreePath);
-      const size = await changedSize(options.git, state.worktreePath, {
-        base: state.base,
-        head: sha,
-      });
       await pushWorkBranch(options.git, state.worktreePath, {
         remote: options.remote,
         issueNumber: issue.number,
         sha,
-        verify: verifyPush({ verifyPushes: options.verifyPushes, size }),
       });
       return state.slug;
     },

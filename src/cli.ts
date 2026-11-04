@@ -160,8 +160,6 @@ export interface CliOptions {
   readonly pool?: string;
   /** Whether to print what the pool file means now, and run nothing. */
   readonly showPool?: boolean;
-  /** Whether the target repository's pre-push hook may gate the pushes. */
-  readonly verifyPushes?: boolean;
   /** Whether to fetch the related issues and work them in one batch. */
   readonly batchRelated?: boolean;
   /**
@@ -254,7 +252,6 @@ export const ARGS = {
   "agent-dir": { type: "string", description: "the host's own directory (default: ~/.pi/agent)" },
   pool: { type: "string", description: "the model pool file (default: <agent-dir>/models.yaml)" },
   "show-pool": { type: "boolean", description: "print what the pool file means now, and run nothing" },
-  "no-verify": { type: "boolean", description: "skip the target repository's pre-push hook when pushing" },
   "batch-related": { type: "boolean", description: "fetch the related ready-for-agent issues and work them in one batch" },
   gate: { type: "string", description: "the gates to run, separated by commas — they replace the repository's own list" },
   "gate-timeout-ms": { type: "string", description: "how long one gate may take (default: 3600000)" },
@@ -327,7 +324,6 @@ export function parseArgs(argv: readonly string[]): CliOptions {
   const agentDirectory = text(parsed["agent-dir"]) ?? defaultAgentDirectory();
   const pool = text(parsed["pool"]);
   const showPool = parsed["show-pool"] === true;
-  const noVerify = parsed["no-verify"] === true;
   const batchRelated = parsed["batch-related"] === true;
   const deadlineMs = number(text(parsed["deadline-ms"]), undefined, "--deadline-ms");
   const staleAfterMs = number(text(parsed["stale-after-ms"]), undefined, "--stale-after-ms");
@@ -349,7 +345,6 @@ export function parseArgs(argv: readonly string[]): CliOptions {
     agentDirectory,
     ...(pool === undefined ? {} : { pool }),
     ...(showPool ? { showPool: true } : {}),
-    ...(noVerify ? { verifyPushes: false } : {}),
     ...(batchRelated ? { batchRelated: true } : {}),
     ...(deadlineMs === undefined ? {} : { deadlineMs }),
     ...(staleAfterMs === undefined ? {} : { staleAfterMs }),
@@ -529,7 +524,6 @@ export function runOptionsFrom(
     staleAfterMs: options.staleAfterMs ?? DEFAULT_STALE_AFTER_MS,
     ...(options.gates === undefined ? {} : { gates: options.gates }),
     ...(options.gateTimeoutMs === undefined ? {} : { gateTimeoutMs: options.gateTimeoutMs }),
-    ...(options.verifyPushes === undefined ? {} : { verifyPushes: options.verifyPushes }),
     ...(options.batchRelated === undefined ? {} : { batchRelated: options.batchRelated }),
     // A named issue took its lock before the run read anything. A run that lets
     // the queue choose does not know the issue until it has chosen it, so the
@@ -1083,9 +1077,6 @@ export async function main(
         session,
         poolEvents,
         deadlineMs: resolved.deadlineMs,
-        ...(resolved.verifyPushes === undefined
-          ? {}
-          : { verifyPushes: resolved.verifyPushes }),
         stopped: () => stopped,
         onStepStart: (step) => {
           process.stdout.write(`[${step}] start\n`);

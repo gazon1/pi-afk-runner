@@ -15,6 +15,7 @@ for the rule that the copies follow.
 
 | Decision | What it settles |
 |---|---|
+| `2026-11-04-the-runners-commits-and-pushes-run-no-hook.md` | the runner's own commits and pushes run no hook: `commitAll` commits and `pushRef` pushes with `--no-verify`, so the target's pre-commit lint-and-compile and pre-push detekt cannot fail the run that was about to push — nor the commit that keeps a failed run's work — and the pull request's CI judges the tree; the `--no-verify` flag and the small-change rule go with them |
 | `2026-11-15-the-batch-travels-with-the-change.md` | the batch travels with the change: the batched issues' briefs reach the scope turn and the plan, read once, and they travel to the review and the fix, the record names the batch, and the batched issues are linked to the run that worked them |
 | `2026-11-14-the-related-issues-are-fetched-not-searched.md` | the related issues are fetched, not searched for: the runner reads the queue once and hands the turn the number and the title of each candidate, the batch may only name an issue that was fetched, and the batched issues' briefs reach the plan |
 | `2026-11-14-the-reminder-says-the-same-thing-in-different-words.md` | the reminder says the same thing in different words: the first reminder explains, the repeats say it in fewer words and come round again, the counter of the reminders belongs to the turn, and the behaviour — the reminder on every step past the threshold — is unchanged and measured in [#380](https://github.com/gazon1/pi-afk-runner/issues/380) |
@@ -73,10 +74,10 @@ for the rule that the copies follow.
 | `2026-11-02-the-branch-and-its-pattern-live-in-one-place.md` | the work branch's name and the pattern that recognises it, and who asks it |
 | `2026-11-02-the-session-is-a-workflow.md` | the session's states, the workflow that runs them, and whose rules they stay — **superseded** by `2026-11-05-pi-is-gone.md`: the shape stands, the graph is the runner's own |
 | `2026-11-01-the-queue-is-read-in-one-call.md` | the cost of a run: the queue and the branches are read once, and every `gh` call is bounded |
-| `2026-11-01-the-work-is-a-conditional-graph.md` | triage, scope and split as a branch; `gate` for the review loop; dependencies; the small-change skip |
+| `2026-11-01-the-work-is-a-conditional-graph.md` | triage, scope and split as a branch; `gate` for the review loop; dependencies; the small-change skip — **the small-change skip removed** in `2026-11-04-the-runners-commits-and-pushes-run-no-hook.md`: every push skips the hook |
 | `2026-11-01-a-fix-that-changes-nothing-stops-the-loop.md` | a fix that leaves the head where it was stops the review loop, and the run says why |
 | `2026-11-01-a-review-that-is-cut-off-stops-the-loop.md` | a review that was cut off stops the review loop, and the run says what cut it off |
-| `2026-11-01-the-work-is-a-conditional-graph.md` | triage, scope and split as a branch; `gate` for the review loop; dependencies; the small-change skip — **the dependency rule replaced** by `2026-11-03-a-dependency-is-settled-by-a-merge.md` |
+| `2026-11-01-the-work-is-a-conditional-graph.md` | triage, scope and split as a branch; `gate` for the review loop; dependencies; the small-change skip — **the dependency rule replaced** by `2026-11-03-a-dependency-is-settled-by-a-merge.md`, **the small-change skip removed** in `2026-11-04-the-runners-commits-and-pushes-run-no-hook.md` |
 | `2026-11-03-a-dependency-is-settled-by-a-merge.md` | what settles a dependency: the parent's pull request is merged, and nothing else |
 | `2026-11-01-the-triage-judges-the-base-not-the-branch.md` | what "already done" is asked of, when the worktree is the issue's own branch |
 | `2026-11-02-the-runner-runs-the-repositorys-gates.md` | the gates the runner runs itself, before it pushes: the list, the budget, and the agent's report it supersedes |
