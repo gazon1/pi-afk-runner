@@ -119,6 +119,24 @@ async function callMastra(
   return await execute(params, {});
 }
 
+/**
+ * The words the assistant said in a request.
+ *
+ * The reminders the session adds between the steps are assistant messages of
+ * their own, and the model sees them as such: they are what the words of the
+ * reminders were, in the order they were said.
+ */
+function textsOf(request: unknown): string[] {
+  const messages = request as { role: string; content: unknown }[];
+  return messages
+    .filter((message) => message.role === "assistant")
+    .flatMap((message) =>
+      (Array.isArray(message.content) ? message.content : [])
+        .filter((part) => (part as { type?: string }).type === "text")
+        .map((part) => (part as { text: string }).text),
+    );
+}
+
 /** A tool of the runner's own shape: a description and what it does. */
 function specOf(
   overrides: Partial<{
@@ -428,6 +446,87 @@ describe("the session of the Mastra engine", () => {
     }
   });
 
+  it("says the reminder in different words each time it repeats", async () => {
+    // The reminder comes on every step past the threshold, and the same
+    // sentence over and over reads as a stuck loop — a model that sees a
+    // stuck loop argues with the loop instead of doing the work. The first
+    // reminder explains; the ones after it say the same thing in fewer words.
+    const cwd = await mkdtemp(join(tmpdir(), "afk-worktree-"));
+    const { model, prompts } = recordingModelOf([
+      toolTurn("agent_test", { value: "1" }, "call-1"),
+      toolTurn("agent_test", { value: "2" }, "call-2"),
+      toolTurn("agent_test", { value: "3" }, "call-3"),
+      textTurn("the work is done"),
+    ]);
+    const session = await createMastraSession({
+      model,
+      cwd,
+      systemPromptSections: {},
+      tools: [specOf()],
+      feedback: {
+        afterSteps: 1,
+        text: "the reading is over",
+        repeats: ["make the change now", "make the change please"],
+      },
+    });
+    try {
+      await session.prompt("work the issue");
+      const said = textsOf(prompts[prompts.length - 1]);
+      // The first words are said once, and the repeats are different words.
+      expect(said[0]).toBe("the reading is over");
+      expect(said.filter((text) => text === "the reading is over").length).toBe(1);
+      expect(new Set(said).size).toBeGreaterThan(1);
+    } finally {
+      session.dispose();
+    }
+  });
+
+  it("says the first words again on the next turn", async () => {
+    // The counter of the reminders belongs to the turn: a second turn is told
+    // the first words once more, not the words of the last reminder of the
+    // turn before it.
+    const cwd = await mkdtemp(join(tmpdir(), "afk-worktree-"));
+    const requests: unknown[] = [];
+    let calls = 0;
+    const model = {
+      specificationVersion: "v2",
+      provider: "test",
+      modelId: "test-model",
+      supportedUrls: {},
+      async doGenerate(options: { prompt?: unknown }) {
+        requests.push(options?.prompt);
+        calls += 1;
+        // Four reads and a word, again and again: the turn ends on the word.
+        return calls % 5 === 0
+          ? textTurn("the work is done")
+          : toolTurn("agent_test", { value: "read" }, `call-${calls}`);
+      },
+      async doStream(): Promise<never> {
+        throw new Error("the mock model does not stream");
+      },
+    } as unknown as MastraModel;
+    const session = await createMastraSession({
+      model,
+      cwd,
+      systemPromptSections: {},
+      tools: [specOf()],
+      feedback: {
+        afterSteps: 1,
+        text: "the reading is over",
+        repeats: ["make the change now"],
+      },
+    });
+    try {
+      await session.prompt("work the issue");
+      await session.prompt("work the issue again");
+      const said = textsOf(requests[requests.length - 1]);
+      // Once per turn: the second turn starts over with the first words.
+      expect(said.filter((text) => text === "the reading is over").length).toBe(2);
+    } finally {
+      session.dispose();
+    }
+  });
+
   it("says nothing between the steps while the model is still reading", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "afk-worktree-"));
     const { model, prompts } = recordingModelOf([
@@ -566,6 +665,49 @@ describe("the session of the Mastra engine", () => {
     try {
       await session.prompt("review the change");
       expect(seen.some((prompt) => prompt.includes("You have read enough"))).toBe(true);
+    } finally {
+      session.dispose();
+    }
+  });
+
+  it("says the model's reminder in different words each time it repeats", async () => {
+    // The engine's own reminder — the one that tells the model the turn ends
+    // with a tool — says it once in full and then in fewer words, so a model
+    // that reads forever is not told the same sentence over and over.
+    const cwd = await mkdtemp(join(tmpdir(), "afk-worktree-"));
+    const requests: unknown[] = [];
+    let calls = 0;
+    const reader = {
+      specificationVersion: "v2",
+      provider: "test",
+      modelId: "test-model",
+      supportedUrls: {},
+      async doGenerate(options: { prompt?: unknown }) {
+        requests.push(options?.prompt);
+        calls += 1;
+        // Ten reads and a word: the reminder starts at the eighth step.
+        return calls === 11
+          ? textTurn("the review is done")
+          : toolTurn("agent_test", { value: "read" }, `call-${calls}`);
+      },
+      async doStream(): Promise<never> {
+        throw new Error("the mock model does not stream");
+      },
+    } as unknown as MastraModel;
+    const session = await createMastraSession({
+      model: reader,
+      cwd,
+      systemPromptSections: {},
+      tools: [specOf()],
+      finalTool: "agent_verdict",
+    });
+    try {
+      await session.prompt("review the change");
+      const said = textsOf(requests[requests.length - 1]);
+      // Three reminders, three different wordings.
+      expect(said.length).toBe(3);
+      expect(said[0]).toContain("You have read enough.");
+      expect(new Set(said).size).toBe(3);
     } finally {
       session.dispose();
     }
