@@ -15,6 +15,10 @@ Multiplatform application with its own gates, and a JavaScript toolchain inside 
 runner's code under the app's gates. The reasoning is in
 [docs/decisions/2026-11-05-the-runner-is-a-command-and-not-a-pi-extension.md](docs/decisions/2026-11-05-the-runner-is-a-command-and-not-a-pi-extension.md).
 
+The whole life of an issue — the states it is derived into, the plans they run, and every way a run
+can end — is [docs/lifecycle.md](docs/lifecycle.md). A change to the selection, the claim, the
+review loop or the release path is a change to that document.
+
 ## Working here through the runner
 
 This repository is also a target for its own runner: `ready-for-agent`, an issue

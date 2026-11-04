@@ -38,6 +38,14 @@ already been started — a claim a killed run left behind is in the claimed set,
 the only thing that frees it. Finishing started work before starting new work stays the rule; the
 claim read is not reordered.
 
+**A review that failed is worked before everything else — the one exception, and it is inside the
+two groups, not across them.** Among the claimed issues, and among the queue's, the ones whose pull
+request carries a review that said `fail` come first, still oldest-first inside each group. That
+work is further along than any other: the branch is pushed, the pull request is open, and what the
+review found is written down. The decision is
+`2026-11-04-a-failed-review-is-worked-again-on-its-branch.md`; this file keeps the order, and the
+exception is stated here because it is the first one.
+
 ## Rationale
 
 **Why the order is in the query and not in the runner.** The runner would need the creation time of
@@ -58,7 +66,10 @@ before the issue that arrived after it.
 
 - A run that files leftovers does not find them at the front of the next queue: the backlog behind
   them is worked first.
+- An issue whose review failed jumps the queue: it is worked before older issues that have not been
+  started. That is deliberate — a pull request sitting red behind a long backlog is work half done.
 - The queue read asks `gh` for one more thing — the order — and the read stays one call.
+- The selection reads the open pull requests once per run to know which issues those are.
 - The contract does not change: it names the label and the brief's marker, and it says nothing about
   the order the queue is worked in.
 

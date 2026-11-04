@@ -2,23 +2,24 @@
  * The runner's state, derived from what can be seen.
  *
  * The runner keeps no journal. Everything it needs to know about an issue it
- * reads from GitHub and from git, so the state of an issue is *derived* from six
- * observables rather than remembered:
+ * reads from GitHub and from git, so the state of an issue is *derived* from
+ * seven observables rather than remembered:
  *
  * | | Observable | Question it answers |
  * |---|---|---|
  * | `L` | `claimLabel` | does the issue carry `agent-in-progress`? |
  * | `P` | `pullRequest` | does a pull request exist for the branch? |
  * | `V` | `reviewComment` | does that pull request carry a review comment? |
+ * | `W` | `reviewVerdict` | what does the newest of them state — `pass`, `fail`, or nothing? |
  * | `C` | `recountLabel` | does that pull request carry `agent-reviewed`? |
  * | `R` | `workBranch` | does the remote branch `agent/issue-<N>` carry commits the base does not? |
  * | `A` | `stale` | is the claim older than the window? |
  *
- * The derivation is a pure function of those six. That is what makes recovery
+ * The derivation is a pure function of those seven. That is what makes recovery
  * possible: a run that died leaves the world in some state, and a later run
  * re-derives that state rather than replaying a log it does not have.
  *
- * Three of the runner's ten states — `Isolated`, `Working`, `Ready` — belong to
+ * Three of the runner's states — `Isolated`, `Working`, `Ready` — belong to
  * a process that is *running*: they live in one host's worktree, and nothing
  * outside that host can see them. They are never derived. A run that finds them
  * on its own host continues; a run on another host sees the claim as stale and
@@ -94,6 +95,7 @@ import {
   createPullRequest,
   dependencyNumbers,
   linkIssue,
+  newestReviewComment,
   newestReviewVerdict,
   postCommentArgs,
   pullRequestBody,
@@ -121,6 +123,7 @@ export type DerivedState =
   | "Orphaned"
   | "Pushed"
   | "Opened"
+  | "Failed"
   | "Reviewed"
   | "Counted";
 
@@ -144,6 +147,8 @@ export interface Observables {
   readonly pullRequest: boolean;
   /** `V` — that pull request carries a review comment that opens with the marker. */
   readonly reviewComment: boolean;
+  /** `W` — what the newest marked review comment states, or null when it states nothing. */
+  readonly reviewVerdict: "pass" | "fail" | null;
   /** `C` — that pull request carries `agent-reviewed`. */
   readonly recountLabel: boolean;
   /**
@@ -162,6 +167,7 @@ export const UNCLAIMED: Observables = {
   claimLabel: false,
   pullRequest: false,
   reviewComment: false,
+  reviewVerdict: null,
   recountLabel: false,
   workBranch: false,
   stale: false,
@@ -172,14 +178,25 @@ export const UNCLAIMED: Observables = {
  *
  * The order of the questions is the order of the decisions:
  *
- * 1. No claim label → the issue is in the queue, whoever gets it.
- * 2. A pull request exists → the issue has left the queue, and how far it got
+ * 1. A review that said `fail` → the work is not done. This is the one question
+ *    asked before the claim, because a failed review is what the branch and the
+ *    pull request are for: whether the claim was kept or let go, the issue is
+ *    worked again from that work, not from the queue.
+ * 2. No claim label → the issue is in the queue, whoever gets it.
+ * 3. A pull request exists → the issue has left the queue, and how far it got
  *    is what the pull request's own state says.
- * 3. No pull request but a work branch → the work was pushed and the pull
+ * 4. No pull request but a work branch → the work was pushed and the pull
  *    request was never opened.
- * 4. Neither → the claim is either live or stranded, and the age decides.
+ * 5. Neither → the claim is either live or stranded, and the age decides.
  */
 export function deriveState(observables: Observables): DerivedState {
+  if (
+    observables.pullRequest &&
+    observables.reviewComment &&
+    observables.reviewVerdict === "fail"
+  ) {
+    return "Failed";
+  }
   if (!observables.claimLabel) {
     return "Queue";
   }
@@ -218,11 +235,13 @@ export function selectIssue(
  * the gate wants the marker on the first non-blank line, so a comment that
  * quotes the format somewhere in the middle is not a review.
  */
-export function observePullRequest(
-  pullRequest: PullRequestSummary | null,
-): { readonly reviewComment: boolean; readonly recountLabel: boolean } {
+export function observePullRequest(pullRequest: PullRequestSummary | null): {
+  readonly reviewComment: boolean;
+  readonly recountLabel: boolean;
+  readonly reviewVerdict: "pass" | "fail" | null;
+} {
   if (pullRequest === null) {
-    return { reviewComment: false, recountLabel: false };
+    return { reviewComment: false, recountLabel: false, reviewVerdict: null };
   }
   const reviewComment = pullRequest.comments.some((body) =>
     body.trimStart().startsWith(REVIEW_MARKER),
@@ -230,6 +249,7 @@ export function observePullRequest(
   return {
     reviewComment,
     recountLabel: pullRequest.labels.includes(RECOUNT_LABEL),
+    reviewVerdict: newestReviewVerdict(pullRequest.comments),
   };
 }
 
@@ -329,10 +349,26 @@ export async function prepareWorktree(
   // add` fail on its own leftover. It is scratch: the branch holds the work.
   await removeWorktree(options.git, options.cwd, options.worktreePath);
 
+  // The branch may already be on the remote: a previous run pushed its work and
+  // never finished. That work is what this run continues, so a branch the
+  // checkout does not have starts at the remote's tip — not at the base, which
+  // would redo the work and be refused by the push. `addWorktree` keeps a local
+  // branch that has commits of its own; this is the branch it cannot see.
+  const pushed = await readRemoteSha(options.git, options.cwd, {
+    remote: options.remote,
+    ref: headRef(branch),
+  });
+
   await addWorktree(options.git, options.cwd, {
     path: options.worktreePath,
     branch,
-    baseSha: options.baseSha,
+    baseSha:
+      pushed === null
+        ? options.baseSha
+        : await fetchCommit(options.git, options.cwd, {
+            remote: options.remote,
+            ref: headRef(branch),
+          }),
   });
 
   const setup = await prepareWorktreeSetup(run, options.worktreePath);
@@ -1322,6 +1358,7 @@ export function observeIssue(options: {
       claimLabel: options.issue.labels.includes(CLAIM_LABEL),
       pullRequest: options.pullRequest !== null,
       reviewComment: observed.reviewComment,
+      reviewVerdict: observed.reviewVerdict,
       recountLabel: observed.recountLabel,
       workBranch: options.workBranch,
       stale: isStale(options.issue.updatedAt, options.now, options.staleAfterMs),
@@ -1360,6 +1397,8 @@ export type PlanKind =
   | "pull request"
   /** The pull request is open; review it. */
   | "review"
+  /** The review said fail: continue the branch and answer its findings. */
+  | "rework"
   /** The review is posted; count it. */
   | "re-count"
   /** Somebody else's work, or nothing to do. */
@@ -1382,26 +1421,42 @@ export interface Plan {
  * it may be working right now — and it is left alone. A claim that is stale
  * and has nothing behind it is a dead run's, and it is taken over. A claim
  * with a pull request behind it is finished where it stopped: the pull request
- * is opened, reviewed or counted, and never worked a second time.
+ * is opened, reviewed or counted. The exception is the review that said fail:
+ * that work is not finished, and it is the one state that is worked again — on
+ * the branch that already carries it.
  */
 export function planFor(observation: IssueObservation): Plan {
-  const kind: PlanKind =
-    observation.state === "Queue"
-      ? "work"
-      : observation.state === "Orphaned"
-        ? "reclaim"
-        : observation.state === "Pushed"
-          ? "pull request"
-          : observation.state === "Opened"
-            ? "review"
-            : observation.state === "Reviewed"
-              ? "re-count"
-              : "none";
   return {
-    kind,
+    kind: planKind(observation.state),
     issue: observation.issue,
     pullRequest: observation.pullRequest,
   };
+}
+
+/** What the run has to do about an issue in one state. */
+function planKind(state: DerivedState): PlanKind {
+  switch (state) {
+    case "Queue":
+      return "work";
+    case "Orphaned":
+      return "reclaim";
+    case "Failed":
+      return "rework";
+    case "Pushed":
+      return "pull request";
+    case "Opened":
+      return "review";
+    case "Reviewed":
+      return "re-count";
+    case "Counted":
+      return "none";
+    case "Claimed":
+      return "none";
+    default: {
+      const unhandled: never = state;
+      throw new Error(`the runner has no plan for the state ${String(unhandled)}`);
+    }
+  }
 }
 
 /**
@@ -2071,6 +2126,7 @@ export function unworkableReason(derivedState: DerivedState): string {
     case "Orphaned":
     case "Pushed":
     case "Opened":
+    case "Failed":
       throw new Error("not an unworkable state");
     default: {
       const _exhaustive: never = derivedState;
@@ -2533,6 +2589,9 @@ async function chooseIssue(
 
   let namedUnworkableState: DerivedState | undefined;
   let namedBlockedBy: readonly number[] | undefined;
+  /** The claimed issues' first plan, and the first one whose review failed. */
+  let first: Plan | undefined;
+  let failedReview: Plan | undefined;
   for (const candidate of candidates) {
     const branch = workBranch(candidate.number);
     const observation = observeIssue({
@@ -2559,12 +2618,27 @@ async function chooseIssue(
         continue;
       }
     }
-    if (plan.kind !== "none") {
-      return namedDetail === undefined ? plan : { ...plan, issueDetail: namedDetail };
+    if (plan.kind === "none") {
+      if (options.issueNumber !== undefined) {
+        namedUnworkableState = observation.state;
+      }
+      continue;
     }
-    if (options.issueNumber !== undefined) {
-      namedUnworkableState = observation.state;
+    // The named issue is the run's issue, whatever its plan is.
+    if (namedDetail !== undefined) {
+      return { ...plan, issueDetail: namedDetail };
     }
+    // A review that failed goes before the rest of the claims: it is the one
+    // claim whose findings are already written down, and the sweep reached it
+    // first so that the pull request stops waiting.
+    if (plan.kind === "rework") {
+      failedReview ??= plan;
+    }
+    first ??= plan;
+  }
+  const chosen = failedReview ?? first;
+  if (chosen !== undefined) {
+    return chosen;
   }
 
   if (options.issueNumber !== undefined) {
@@ -2588,13 +2662,39 @@ async function chooseIssue(
   } catch (failure) {
     throw selectFailed(failure);
   }
-  // The queue is worked in order, and an issue whose parent's work has not
-  // landed is passed over — not worked, and not removed: it is the next run's
-  // turn once the parent's pull request is merged.
-  for (const candidate of queue) {
-    if (candidate.labels.includes(CLAIM_LABEL)) {
-      continue;
-    }
+  // An issue back in the queue may still have its pull request: the claim that
+  // pointed at it was released, or a human took it off. A review that said fail
+  // is then work, not a finished pull request, and it is the queue's **first**
+  // work: the pull request is already open and what the review found is already
+  // written down. Every open pull request is read in one call, as the claimed
+  // issues' are.
+  let queuePullRequests: Map<string, PullRequestSummary>;
+  try {
+    queuePullRequests = pullRequestsByBranch(
+      await readAllOpenPullRequests(options.repo, options.gh),
+    );
+  } catch {
+    // A read that failed is not a verdict: every queue issue is plain work.
+    queuePullRequests = new Map();
+  }
+  const pending = queue
+    .filter((candidate) => !candidate.labels.includes(CLAIM_LABEL))
+    .map((candidate) => {
+      const pullRequest = queuePullRequests.get(workBranch(candidate.number)) ?? null;
+      return {
+        candidate,
+        pullRequest,
+        failedReview:
+          pullRequest !== null && newestReviewVerdict(pullRequest.comments) === "fail",
+      };
+    });
+  // The reviews that failed first, then the rest in the order they were filed.
+  // An issue whose parent's work has not landed is passed over — not worked,
+  // and not removed: it is the next run's turn once the pull request is merged.
+  for (const { candidate, pullRequest, failedReview } of [
+    ...pending.filter((entry) => entry.failedReview),
+    ...pending.filter((entry) => !entry.failedReview),
+  ]) {
     const blockedBy = await openDependencies(
       { repo: options.repo, gh: options.gh },
       candidate,
@@ -2602,7 +2702,9 @@ async function chooseIssue(
     if (blockedBy.length > 0) {
       continue;
     }
-    return { kind: "work", issue: candidate, pullRequest: null };
+    return failedReview && pullRequest !== null
+      ? { kind: "rework", issue: candidate, pullRequest }
+      : { kind: "work", issue: candidate, pullRequest: null };
   }
   return null;
 }
@@ -2667,6 +2769,25 @@ async function prepareExistingWorktree(
   });
 }
 
+/**
+ * The review a rework answers, when the pull request has one.
+ *
+ * It is the newest marked comment, read the way the gate reads it: the review
+ * that is on the pull request is the review the run has to answer, and the
+ * session gets it verbatim rather than as a summary of it.
+ */
+function failedReview(
+  pullRequest: PullRequestSummary | null,
+): { readonly pullRequest: number; readonly review: string } | undefined {
+  if (pullRequest === null) {
+    return undefined;
+  }
+  const review = newestReviewComment(pullRequest.comments);
+  return review === null
+    ? undefined
+    : { pullRequest: pullRequest.number, review };
+}
+
 /** The steps of one run, and the work they do. */
 async function runPlan(
   options: RunOptions,
@@ -2710,11 +2831,22 @@ async function runPlan(
     findings: [] as readonly string[],
     /** How many reviews the run took. */
     reviewCount: 0,
+    /**
+     * Whether the run stopped because the review did not pass.
+     *
+     * Such a claim is kept: it points the next run at the pull request whose
+     * findings are still open. A claim released there leaves the issue with no
+     * claim, and the branch and the review would have to be found by accident.
+     */
+    reviewFailed: false,
   };
 
-  const works = plan.kind === "work" || plan.kind === "reclaim";
+  const works =
+    plan.kind === "work" || plan.kind === "reclaim" || plan.kind === "rework";
   let reviews = works || plan.kind === "pull request" || plan.kind === "review";
   let workSessionStartedAt: number | undefined;
+  /** The review a rework answers — the one the branch and the pull request were left by. */
+  const rework = plan.kind === "rework" ? failedReview(plan.pullRequest) : undefined;
 
   // The run's budget is one wall-clock for everything it does: the session,
   // the gates and the review. Each keeps a share of it, and the share is
@@ -2844,10 +2976,20 @@ async function runPlan(
           nonce: options.nonce ?? randomUUID(),
           now,
         };
+        // A rework takes the claim over rather than inheriting it: the ref is
+        // what excludes a second runner, and a claim that is only extended is a
+        // claim two runners both believe is theirs. Its branch is kept — that is
+        // the work the review judged — and only the ref is replaced.
         const outcome =
           plan.kind === "reclaim"
             ? await reclaimClaim({ ...claim, worktreeRoot: options.worktreeRoot })
-            : await claimIssue(claim);
+            : plan.kind === "rework"
+              ? await reclaimClaim({
+                  ...claim,
+                  worktreeRoot: options.worktreeRoot,
+                  keepBranch: true,
+                })
+              : await claimIssue(claim);
         if (!outcome.claimed) {
           throw new Error(outcome.reason);
         }
@@ -2902,6 +3044,9 @@ async function runPlan(
           repo: options.repo,
           issueNumber: issue.number,
           ...(plan.issueDetail === undefined ? {} : { issue: plan.issueDetail }),
+          // A rework is told what it is reworking: the branch carries the
+          // previous attempt, and the review that failed it is the task.
+          ...(rework === undefined ? {} : { rework }),
           worktree: {
             branch: workBranch(issue.number),
             baseBranch: options.baseBranch,
@@ -3251,8 +3396,10 @@ async function runPlan(
         }
 
         // The review never passed. The finding goes on the issue — where the
-        // next run reads it as intake — and the run fails, which releases the
-        // claim and leaves the branch and the pull request for that run.
+        // next run reads it as intake — and the run fails with the claim kept:
+        // the claim is what points that run at the pull request, and the state
+        // the pull request's own verdict derives is `Failed`, which is worked.
+        state.reviewFailed = true;
         await commentIssue(
           {
             repo: options.repo,
@@ -3389,6 +3536,27 @@ async function runPlan(
           );
         }
         return;
+      }
+      // A review that did not pass is not a dead run either: the claim points
+      // the next run at the pull request whose findings are still open, and
+      // that run is the rework. The claim stays; only the worktree goes.
+      if (state.reviewFailed) {
+        const kept =
+          state.worktreePath === "" || !works
+            ? null
+            : await preserveUnfinishedWork({
+                git: options.git,
+                cwd: state.worktreePath,
+                branch: workBranch(issue.number),
+              }).catch(() => null);
+        if (state.worktreePath !== "") {
+          await removeWorktree(options.git, options.checkout, state.worktreePath).catch(
+            () => {
+              // The next run removes a worktree it could not.
+            },
+          );
+        }
+        return kept ?? "";
       }
       // The work a failed run did is durable: what the agent left in the
       // worktree is committed to the branch before the worktree goes, so the

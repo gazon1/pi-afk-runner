@@ -4,6 +4,7 @@ import { claimIssue, reclaimClaim, releaseClaim } from "../src/claim.js";
 import { headRef } from "../src/git.js";
 import {
   PROMPT_FILES,
+  REWORK_SECTION,
   UNTRUSTED_INPUT_RULE,
   UNTRUSTED_INPUT_SECTION,
   WORKTREE_SECTION,
@@ -133,6 +134,7 @@ import {
   prepareWorktree,
   isStale,
   observePullRequest,
+  planFor,
   pullRequestsByBranch,
   selectIssue,
   unworkableReason,
@@ -281,6 +283,41 @@ describe("the state the runner derives", () => {
         }),
       ),
     ).toBe("Counted");
+
+    // The review said fail → the work is not done, and the issue is worked
+    // again — the re-count does not make a failed review a finished one.
+    expect(
+      deriveState(
+        withObservables({
+          claimLabel: true,
+          pullRequest: true,
+          reviewComment: true,
+          reviewVerdict: "fail",
+          recountLabel: true,
+        }),
+      ),
+    ).toBe("Failed");
+  });
+
+  it("works a review that failed even when the claim is gone", () => {
+    // The claim points at the pull request; it is not what makes the review
+    // count. A released claim — the run that failed let it go, or a human took
+    // the label off — leaves the failed review in place, and the issue is
+    // worked again from that work rather than from the queue.
+    expect(
+      deriveState({
+        ...UNCLAIMED,
+        pullRequest: true,
+        reviewComment: true,
+        reviewVerdict: "fail",
+      }),
+    ).toBe("Failed");
+
+    // A pass is not: the pull request's review decides, and a passed review on
+    // a released claim is counted, not worked again.
+    expect(
+      deriveState({ ...UNCLAIMED, pullRequest: true, reviewComment: true, reviewVerdict: "pass" }),
+    ).toBe("Queue");
   });
 
   it("does not read a pull request's review before the pull request exists", () => {
@@ -297,6 +334,20 @@ describe("the state the runner derives", () => {
   });
 });
 
+describe("what the run does about a state", () => {
+  const issue = { number: 42, title: "an issue", updatedAt: "", labels: [] };
+
+  it("test_a_failed_review_is_a_rework_and_not_a_second_work", () => {
+    // The rework is what makes the failed review different from the queue: the
+    // run continues the branch and the pull request, it does not claim the
+    // issue and start again.
+    expect(planFor({ issue, state: "Failed", pullRequest: null }).kind).toBe("rework");
+    expect(planFor({ issue, state: "Queue", pullRequest: null }).kind).toBe("work");
+    // And the review that passed is counted, not worked.
+    expect(planFor({ issue, state: "Counted", pullRequest: null }).kind).toBe("none");
+  });
+});
+
 describe("the reason an issue could not be worked", () => {
   it("names the state that stopped the run", () => {
     expect(unworkableReason("Claimed")).toBe("it is held by another runner");
@@ -306,6 +357,7 @@ describe("the reason an issue could not be worked", () => {
 
   it("throws for states that are not unworkable", () => {
     expect(() => unworkableReason("Queue")).toThrow();
+    expect(() => unworkableReason("Failed")).toThrow();
   });
 
   it("says that the issue waits for a parent that has not landed", async () => {
@@ -591,8 +643,9 @@ describe("the cost of a run", () => {
     const few = await select(5);
     const many = await select(50);
 
-    // The pull requests are read once, not once per claimed issue.
-    expect(many.gh.filter((call) => call.startsWith("pr list"))).toHaveLength(1);
+    // The pull requests are read once, not once per claimed issue — and, when
+    // the claims yield nothing, once for the queue's own issues too.
+    expect(many.gh.filter((call) => call.startsWith("pr list"))).toHaveLength(2);
     expect(many.gh.some((call) => call.includes("--head"))).toBe(false);
     // And the branches are read once, not once per claimed issue.
     expect(many.git.filter((call) => call.startsWith("ls-remote"))).toHaveLength(1);
@@ -669,11 +722,27 @@ describe("what a pull request says about itself", () => {
     expect(observePullRequest(padded).reviewComment).toBe(true);
 
     // No pull request at all.
-    expect(observePullRequest(null)).toEqual({ reviewComment: false, recountLabel: false });
+    expect(observePullRequest(null)).toEqual({
+      reviewComment: false,
+      reviewVerdict: null,
+      recountLabel: false,
+    });
 
     // The recount label is read from the pull request's own labels.
     const recounted = { ...withReview, labels: [RECOUNT_LABEL] };
     expect(observePullRequest(recounted).recountLabel).toBe(true);
+
+    // And the verdict is the newest review's, read the way the gate reads it.
+    expect(observePullRequest(withReview).reviewVerdict).toBe("pass");
+    const failed = {
+      ...withReview,
+      comments: [`${REVIEW_MARKER}\n\n**Verdict:** fail`, `${REVIEW_MARKER}\n\n**Verdict:** pass`],
+    };
+    expect(observePullRequest(failed).reviewVerdict).toBe("pass");
+    expect(
+      observePullRequest({ ...withReview, comments: [`${REVIEW_MARKER}\n\n**Verdict:** fail`] })
+        .reviewVerdict,
+    ).toBe("fail");
   });
 });
 
@@ -1229,6 +1298,69 @@ describe("the worktree", () => {
       expect(
         await gitOutput(["rev-parse", "HEAD"], { cwd: third, env: fixture.env }),
       ).toBe(movedBase);
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("test_a_branch_that_is_only_on_the_remote_is_continued_from_its_tip", async () => {
+    // The work was pushed and the checkout has no branch of its own — another
+    // host pushed it, or the worktree root was cleaned. A run that started from
+    // the base would redo the work and be refused by the push; the work this
+    // run continues is the branch on the remote.
+    const fixture = await createFixtureRepository({
+      files: { "scripts/setup-worktree.sh": "#!/usr/bin/env bash\nset -euo pipefail\n" },
+    });
+    try {
+      const git = (args: readonly string[], options: { readonly cwd: string }) =>
+        runGit(args, options);
+      const baseSha = await gitOutput(["rev-parse", "main"], {
+        cwd: fixture.repo,
+        env: fixture.env,
+      });
+
+      // A commit made and pushed as the issue's branch, then dropped from the
+      // checkout: the remote has it, the checkout does not.
+      await writeFile(join(fixture.repo, "pushed.txt"), "the pushed work\n", "utf8");
+      await git(["add", "-A"], { cwd: fixture.repo });
+      await git(
+        [
+          "-c",
+          "user.name=Fixture",
+          "-c",
+          "user.email=fixture@example.com",
+          "commit",
+          "-q",
+          "-m",
+          "the pushed work",
+        ],
+        { cwd: fixture.repo },
+      );
+      const pushed = (
+        await gitOutput(["rev-parse", "HEAD"], { cwd: fixture.repo, env: fixture.env })
+      ).trim();
+      await git(["push", fixture.remote, `${pushed}:refs/heads/agent/issue-42`], {
+        cwd: fixture.repo,
+      });
+      await git(["reset", "--hard", baseSha], { cwd: fixture.repo });
+
+      const worktreePath = join(fixture.root, "worktree-issue-42");
+      await prepareWorktree({
+        repo: fixture.repo,
+        remote: fixture.remote,
+        baseBranch: "main",
+        baseSha,
+        issueNumber: 42,
+        worktreePath,
+        cwd: fixture.repo,
+        git,
+      });
+
+      // The worktree is the remote branch's commit, and the work is in it.
+      expect(await gitOutput(["rev-parse", "HEAD"], { cwd: worktreePath, env: fixture.env })).toBe(
+        pushed,
+      );
+      expect(existsSync(join(worktreePath, "pushed.txt"))).toBe(true);
     } finally {
       await fixture.dispose();
     }
@@ -3171,6 +3303,81 @@ describe("the brief", () => {
     expect(sections[0]?.[UNTRUSTED_INPUT_SECTION]).toContain("untrusted input");
   });
 
+  it("test_a_rework_is_given_the_review_that_failed_it", async () => {
+    // A rework continues the branch a failed review left, so the review is the
+    // first thing the turn reads: it is what the run is about, and the issue is
+    // what the change still has to satisfy.
+    const issue = {
+      title: "an issue",
+      body: "the brief body",
+      comments: [],
+      labels: [],
+      updatedAt: "",
+      state: "OPEN",
+    };
+    const review = `${REVIEW_MARKER}\n\n**Verdict:** fail\n\n- the guard is checked after the write`;
+    const turns: string[] = [];
+    const session: AgentSession = {
+      async prompt(text) {
+        turns.push(text);
+      },
+      async abort() {},
+      dispose() {},
+    };
+
+    await runPromptArray({
+      session,
+      nodes: workSessionNodes({
+        prompts: new Map(WORKFLOW_STATES.map((state) => [state.name, `the ${state.name} prompt`])),
+        issue,
+        rework: { pullRequest: 1040, review },
+      }),
+      deadlineMs: 60_000,
+    });
+
+    expect(turns[0]).toContain("The review that failed, as data");
+    expect(turns[0]).toContain("the guard is checked after the write");
+    // The review is above the issue, and the turn's instruction is last.
+    expect(turns[0]?.indexOf("the guard is checked after the write")).toBeLessThan(
+      turns[0]?.indexOf("the brief body") ?? -1,
+    );
+    expect(turns[0]?.trimEnd().endsWith("the triage prompt")).toBe(true);
+  });
+
+  it("test_the_rework_rule_is_in_the_system_prompt", async () => {
+    const sections: Record<string, string>[] = [];
+    const factory: SessionFactory = async (options) => {
+      sections.push(options.systemPromptSections);
+      return {
+        async prompt() {},
+        async abort() {},
+        dispose() {},
+      };
+    };
+    const gh = async (args: readonly string[]): Promise<string> => {
+      if (args[0] === "issue" && args[1] === "view") {
+        return JSON.stringify({ body: "the brief body", comments: [] });
+      }
+      return "";
+    };
+
+    await startAgent({
+      factory,
+      cwd: "/tmp/does-not-matter",
+      repo: "gazon1/sing",
+      issueNumber: 42,
+      worktree: fakeWorktree(42),
+      rework: { pullRequest: 1040, review: `${REVIEW_MARKER}\n\n**Verdict:** fail` },
+      gh,
+      deadlineMs: 60_000,
+    });
+
+    // The rule is the system prompt's, not the turn's: the turn's text is
+    // what the model is told, and the rule is what it knows while it works.
+    expect(sections[0]?.[REWORK_SECTION]).toContain("pull request #1040");
+    expect(sections[0]?.[REWORK_SECTION]).toContain("do not start the work over");
+  });
+
   it("test_an_issue_with_no_brief_stops_the_run", async () => {
     const factory: SessionFactory = async () => {
       throw new Error("the session must not be created for an issue with no brief");
@@ -4885,6 +5092,259 @@ describe("the CLI's run", () => {
       await fixture.dispose();
     }
   });
+
+  it("test_a_review_that_did_not_pass_keeps_the_claim", async () => {
+    // The claim is the pointer at the pull request. Released on a failed
+    // review, the issue goes back to the queue with its findings in a comment
+    // and nothing that says which pull request they are about.
+    const fixture = await fixtureWithSetupScript();
+    try {
+      const { gh, calls } = stubGh([{ number: 42, title: "an issue" }]);
+      const failure = await runOnce({
+        ...runOptions(fixture, gh),
+        session: async ({ cwd, tools }) => {
+          if (isReviewer(tools)) {
+            return {
+              async prompt() {
+                const tool = tools?.[0] as unknown as {
+                  execute: (id: string, params: unknown) => Promise<unknown>;
+                };
+                await tool.execute("call-1", {
+                  verdict: "fail",
+                  findings: ["the guard is checked after the write"],
+                });
+              },
+              async abort() {},
+              dispose() {},
+            };
+          }
+          let written = false;
+          return {
+            async prompt() {
+              if (written) {
+                return;
+              }
+              written = true;
+              await writeFile(join(cwd, "work.txt"), "the work\n", "utf8");
+            },
+            async abort() {},
+            dispose() {},
+          };
+        },
+      }).then(
+        () => null,
+        (error: unknown) => error,
+      );
+
+      expect(failure).toBeInstanceOf(Error);
+      // The finding is on the issue, where the next run reads it.
+      expect(
+        calls.some(
+          (call) =>
+            call.includes("issue comment") && call.includes("the guard is checked after the write"),
+        ),
+      ).toBe(true);
+      // And the claim stays: it is what points the next run at the pull request.
+      expect(calls.some((call) => call.includes("--remove-label agent-in-progress"))).toBe(false);
+      // The worktree is scratch, and it goes.
+      expect(existsSync(join(fixture.root, "worktrees", "issue-42"))).toBe(false);
+    } finally {
+      await fixture.dispose();
+    }
+  }, 60_000);
+
+  it("test_a_failed_review_works_the_issue_again_from_its_branch", async () => {
+    // The issue is back in the queue — the claim gone — and its pull request
+    // still carries the review that failed it. The run is a rework of that
+    // review: it continues the branch, it does not start the work over.
+    const fixture = await fixtureWithSetupScript();
+    try {
+      const { gh } = stubGh([{ number: 42, title: "an issue" }]);
+      const review = `${REVIEW_MARKER}\n\n**Verdict:** fail\n\n- the guard is checked after the write`;
+      const withPullRequest = async (args: readonly string[]): Promise<string> => {
+        if (args[0] === "pr" && args[1] === "list") {
+          return JSON.stringify([
+            { number: 1040, headRefName: "agent/issue-42", labels: [], comments: [review] },
+          ]);
+        }
+        return gh(args);
+      };
+
+      // The branch the review judged: the checkout does not have it, the remote
+      // does — the work a run on another host pushed.
+      const base = (await runGit(["rev-parse", "HEAD"], { cwd: fixture.repo })).trim();
+      await writeFile(join(fixture.repo, "pushed.txt"), "the pushed work\n", "utf8");
+      await runGit(["add", "-A"], { cwd: fixture.repo });
+      await runGit(
+        [
+          "-c",
+          "user.name=Fixture",
+          "-c",
+          "user.email=fixture@example.com",
+          "commit",
+          "-q",
+          "-m",
+          "the pushed work",
+        ],
+        { cwd: fixture.repo },
+      );
+      const pushed = (
+        await gitOutput(["rev-parse", "HEAD"], { cwd: fixture.repo, env: fixture.env })
+      ).trim();
+      await runGit(["push", fixture.remote, `${pushed}:refs/heads/agent/issue-42`], {
+        cwd: fixture.repo,
+      });
+      await runGit(["reset", "--hard", base], { cwd: fixture.repo });
+
+      const sections: Record<string, string>[] = [];
+      const result = await runOnce(runOptions(fixture, withPullRequest, sections));
+
+      expect(result.outcome).toBe("completed");
+      // The run knew what it was: a rework of the review that failed.
+      expect(sections.some((entry) => entry[REWORK_SECTION]?.includes("#1040"))).toBe(true);
+      // The branch carries the earlier attempt and this run's work.
+      const files = await gitOutput(["ls-tree", "--name-only", workBranch(42)], {
+        cwd: fixture.repo,
+        env: fixture.env,
+      });
+      expect(files).toContain("pushed.txt");
+      expect(files).toContain("work.txt");
+    } finally {
+      await fixture.dispose();
+    }
+  }, 60_000);
+
+  it("test_the_queue_works_a_failed_review_before_the_rest", async () => {
+    // The pull request is open and the findings are written down: that work
+    // goes before an issue nobody has started, whatever order the queue is in.
+    const fixture = await fixtureWithSetupScript();
+    try {
+      const queue: readonly {
+        readonly number: number;
+        readonly title: string;
+        readonly updatedAt: string;
+        readonly labels: readonly string[];
+      }[] = [
+        { number: 1, title: "the older issue", updatedAt: "2026-01-01T00:00:00Z", labels: [] },
+        { number: 42, title: "the one whose review failed", updatedAt: "2026-02-01T00:00:00Z", labels: [] },
+      ];
+      const review = `${REVIEW_MARKER}\n\n**Verdict:** fail\n\n- the guard is checked after the write`;
+      // The claimed read asks for `agent-in-progress`, and nothing is claimed.
+      const gh = async (args: readonly string[]): Promise<string> => {
+        if (args[0] === "issue" && args[1] === "list") {
+          const claimedOnly = args.includes(CLAIM_LABEL);
+          return JSON.stringify(
+            queue
+              .filter((issue) => !claimedOnly || issue.labels.includes(CLAIM_LABEL))
+              .map((issue) => ({
+                number: issue.number,
+                title: issue.title,
+                updatedAt: issue.updatedAt,
+                labels: issue.labels,
+              })),
+          );
+        }
+        if (args[0] === "pr" && args[1] === "list") {
+          return JSON.stringify([
+            { number: 1040, headRefName: "agent/issue-42", labels: [], comments: [review] },
+          ]);
+        }
+        if (args[0] === "issue" && args[1] === "view") {
+          return JSON.stringify({ body: "the brief body", comments: [] });
+        }
+        return "";
+      };
+
+      const sections: Record<string, string>[] = [];
+      const result = await runOnce(runOptions(fixture, gh, sections));
+
+      expect(result.issue).toBe(42);
+      expect(sections.some((entry) => entry[REWORK_SECTION]?.includes("#1040"))).toBe(true);
+    } finally {
+      await fixture.dispose();
+    }
+  }, 60_000);
+
+  it("test_a_claimed_review_that_failed_comes_first_and_takes_the_claim_over", async () => {
+    // Two claims are in flight: one pull request still needs its review, the
+    // other carries a review that failed. The failed one goes first — and it
+    // takes the claim over, because the ref is what keeps a second runner out.
+    const fixture = await fixtureWithSetupScript();
+    try {
+      const claimed = [
+        { number: 7, title: "an opened pull request", labels: [CLAIM_LABEL], updatedAt: "" },
+        { number: 42, title: "a failed review", labels: [CLAIM_LABEL], updatedAt: "" },
+      ];
+      const { gh, calls } = stubGh(claimed);
+      const review = `${REVIEW_MARKER}\n\n**Verdict:** fail\n\n- the guard is checked after the write`;
+      const withPullRequests = async (args: readonly string[]): Promise<string> => {
+        if (args[0] === "pr" && args[1] === "list") {
+          const all = [
+            { number: 1039, headRefName: "agent/issue-7", labels: [], comments: [] },
+            { number: 1040, headRefName: "agent/issue-42", labels: [], comments: [review] },
+          ];
+          const head = args.includes("--head") ? valueAfter(args, "--head") : undefined;
+          return JSON.stringify(
+            head === undefined ? all : all.filter((pull) => pull.headRefName === head),
+          );
+        }
+        return gh(args);
+      };
+
+      // The branch the failed review judged, on the remote.
+      const base = (await runGit(["rev-parse", "HEAD"], { cwd: fixture.repo })).trim();
+      await writeFile(join(fixture.repo, "pushed.txt"), "the pushed work\n", "utf8");
+      await runGit(["add", "-A"], { cwd: fixture.repo });
+      await runGit(
+        [
+          "-c",
+          "user.name=Fixture",
+          "-c",
+          "user.email=fixture@example.com",
+          "commit",
+          "-q",
+          "-m",
+          "the pushed work",
+        ],
+        { cwd: fixture.repo },
+      );
+      const pushed = (
+        await gitOutput(["rev-parse", "HEAD"], { cwd: fixture.repo, env: fixture.env })
+      ).trim();
+      await runGit(["push", fixture.remote, `${pushed}:refs/heads/agent/issue-42`], {
+        cwd: fixture.repo,
+      });
+      await runGit(["reset", "--hard", base], { cwd: fixture.repo });
+
+      const result = await runOnce({
+        ...runOptions(fixture, withPullRequests),
+        staleAfterMs: 60_000,
+        now: new Date("2026-10-30T09:00:00Z"),
+      });
+
+      // The failed review was the run's issue, not the pull request that only
+      // needs reviewing.
+      expect(result.issue).toBe(42);
+      // The claim was taken over: the label goes on again, and the ref is on
+      // the remote after the run.
+      expect(calls.some((call) => call.includes("--add-label agent-in-progress"))).toBe(true);
+      const claim = await readClaimBase(
+        (args, options) => runGit(args, options),
+        fixture.repo,
+        { remote: fixture.remote, issueNumber: 42 },
+      );
+      expect(claim).not.toBeNull();
+      // And the branch it judged is still there, with this run's work on top.
+      const files = await gitOutput(["ls-tree", "--name-only", workBranch(42)], {
+        cwd: fixture.repo,
+        env: fixture.env,
+      });
+      expect(files).toContain("pushed.txt");
+      expect(files).toContain("work.txt");
+    } finally {
+      await fixture.dispose();
+    }
+  }, 60_000);
 
   it("test_one_invocation_acts_on_one_issue", async () => {
     const fixture = await fixtureWithSetupScript();
