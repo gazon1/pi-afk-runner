@@ -15,6 +15,7 @@ for the rule that the copies follow.
 
 | Decision | What it settles |
 |---|---|
+| `2026-11-13-the-gateway-gives-the-engines-own-message-the-reasoning.md` | a reasoning model wants the reasoning of every assistant message back: the gateway gives the engine's own message — the feedback between the steps — the last reasoning the model wrote, or a placeholder when the model wrote none before it, and a model that does not reason is left alone |
 | `2026-11-12-the-packers-patterns-are-bounded.md` | the packer's patterns are bounded: the matcher is pinned to the fixed minimatch, and the `include` and the `ignore` are refused when they are too long, name too many path segments, or expand into too many alternatives |
 | `2026-11-09-the-runs-record-names-the-pack.md` | the run's record names the pack: the path that was packed, the files it holds and the tokens it cost — and what a real run showed, that a pack is good for an area of the repository and not for the repository |
 | `2026-11-11-the-engine-tells-the-model-when-a-turn-has-read-enough.md` | the engine tells the model, between its steps, that the reading is over: the work session's feedback points at the turn's own instruction, the turn that implements a change is checked against the tree and given one more chance, and the work is the paths that changed — not the commits |
