@@ -513,12 +513,10 @@ export function pickPoolModel(pool: Pool, choice: PoolChoice = {}): PoolModel | 
     if (model.workers !== undefined) {
       providerCap.set(provider, (providerCap.get(provider) ?? 0) + model.workers);
     }
-    if (model.workers !== undefined) {
-      providerUsage.set(
-        provider,
-        (providerUsage.get(provider) ?? 0) + (workersInUse.get(model.reference) ?? 0),
-      );
-    }
+    providerUsage.set(
+      provider,
+      (providerUsage.get(provider) ?? 0) + (workersInUse.get(model.reference) ?? 0),
+    );
   }
   const usableModels = (respectCaps: boolean): PoolModel[] => {
     const result: PoolModel[] = [];
@@ -531,7 +529,7 @@ export function pickPoolModel(pool: Pool, choice: PoolChoice = {}): PoolModel | 
         const used = workersInUse.get(model.reference) ?? 0;
         if (used >= model.workers) continue;
       }
-      if (respectCaps && model.workers !== undefined) {
+      if (respectCaps) {
         const provider = splitReference(model.reference, "the pool's model").provider;
         const cap = providerCap.get(provider);
         if (cap !== undefined) {
