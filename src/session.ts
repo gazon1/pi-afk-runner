@@ -105,7 +105,12 @@ function neutralise(text: string, tag: string): string {
 }
 
 /** The tags the untrusted text is fenced in. */
-const UNTRUSTED_TAGS = ["issue-body", "issue-comments", "related-issues"] as const;
+const UNTRUSTED_TAGS = [
+  "issue-body",
+  "issue-comments",
+  "related-issues",
+  "review",
+] as const;
 
 /** Defang every closing tag inside untrusted text. */
 function neutraliseAll(text: string): string {
@@ -118,6 +123,22 @@ export function fenceIssueBody(body: string): string {
     "<issue-body source=\"github-issue\" trust=\"untrusted\">",
     neutralise(body, "issue-body"),
     "</issue-body>",
+  ].join("\n");
+}
+
+/**
+ * The fence a review arrives in.
+ *
+ * The review is the runner's own — it wrote the comment from the reviewer's
+ * verdict — so it is not fenced as a stranger's text. It is fenced as data all
+ * the same: the findings quote the code, and a quoted line is not an
+ * instruction.
+ */
+export function fenceReview(review: string): string {
+  return [
+    '<review source="pull-request-review" trust="the runner\'s own">',
+    neutralise(review, "review"),
+    "</review>",
   ].join("\n");
 }
 
@@ -347,6 +368,47 @@ export function worktreeRule(options: {
       "a file, and a file the branch changed is not a file the base has.",
   );
   return lines.join("\n");
+}
+
+/** The name of the system prompt section that says what a rework is. */
+export const REWORK_SECTION = "rework";
+
+/** The review a rework answers: the pull request, and the review on it. */
+export interface Rework {
+  readonly pullRequest: number;
+  /** The newest marked review comment, verbatim. */
+  readonly review: string;
+}
+
+/**
+ * The rule that says what this run is.
+ *
+ * A rework is not a second attempt at the issue: the branch already carries the
+ * first one, and the review said what is wrong with it. Without this rule the
+ * triage judges the branch as work that has landed, and the implement turn
+ * writes the change again — which is what "reworked from the start" means, and
+ * it is exactly what this run must not do.
+ */
+function reworkRule(rework: Rework): string {
+  return (
+    `This issue is a rework. The review of pull request #${rework.pullRequest} said fail, and ` +
+    "that review arrived above as data: its findings are the task of this run. The branch " +
+    "already carries the previous attempt, and it is the work this run continues — do not start " +
+    "the work over. The brief's acceptance criteria are still the contract, and the change is " +
+    "reviewed again when this run stops."
+  );
+}
+
+/** The failed review, as data, in one block. */
+export function reworkData(rework: Rework): string {
+  return [
+    "## The review that failed, as data",
+    "",
+    `The review of pull request #${rework.pullRequest} did not pass. What it found is the work of this run:`,
+    "the branch carries the attempt it judged, and the brief below is what that attempt has to satisfy.",
+    "",
+    fenceReview(rework.review),
+  ].join("\n");
 }
 
 /**
@@ -712,6 +774,13 @@ export interface WorkSessionGraphOptions {
   readonly prompts: ReadonlyMap<string, string>;
   /** The issue the session works on — its data travels with the first turn. */
   readonly issue: IssueDetail;
+  /**
+   * The review a rework answers, when this run is one.
+   *
+   * Its findings go above the issue, in the same first turn: the review is what
+   * the run is about, and the issue is what the change still has to satisfy.
+   */
+  readonly rework?: Rework;
   /** Whether the optional related-issues turn runs before triage. */
   readonly includeRelated?: boolean;
   /** The related-issues prompt, when the turn runs. */
@@ -813,7 +882,13 @@ export function workSessionNodes(options: WorkSessionGraphOptions): WorkflowStat
   if (firstNode !== undefined) {
     nodes[first] = {
       ...firstNode,
-      text: async () => [issueData(options.issue), "", await stateText(firstNode)].join("\n"),
+      text: async () =>
+        [
+          ...(options.rework === undefined ? [] : [reworkData(options.rework), ""]),
+          issueData(options.issue),
+          "",
+          await stateText(firstNode),
+        ].join("\n"),
     };
   }
 
@@ -1194,6 +1269,15 @@ export async function startAgent(options: {
     readonly baseSha: string;
     readonly commits: readonly string[];
   };
+  /**
+   * The review a rework answers.
+   *
+   * A rework continues the branch a failed review left, and the review is the
+   * task: its findings are the turn's data and its rule is the system prompt.
+   * Without it the session is a run of the issue, and a run of an issue whose
+   * branch already carries the work writes it again.
+   */
+  readonly rework?: Rework;
   /** How the issue is read and written. */
   readonly gh?: GhRunner;
   /** How the worktree is read — the runner's own git, or the one under test. */
@@ -1295,6 +1379,9 @@ export async function startAgent(options: {
       [UNTRUSTED_INPUT_SECTION]: UNTRUSTED_INPUT_RULE,
       [BRIEF_SECTION]: briefRule(brief),
       [WORKTREE_SECTION]: worktreeRule(options.worktree),
+      ...(options.rework === undefined
+        ? {}
+        : { [REWORK_SECTION]: reworkRule(options.rework) }),
     },
     // The tools the work session carries: the triage's decision, the scope's
     // decision, the leftover the fourth turn files, and the pack that hands
@@ -1333,6 +1420,7 @@ export async function startAgent(options: {
     nodes: workSessionNodes({
       prompts,
       issue,
+      ...(options.rework === undefined ? {} : { rework: options.rework }),
       includeRelated: options.batchRelated === true,
       ...(relatedPrompt === undefined ? {} : { relatedPrompt }),
       relatedIssues,

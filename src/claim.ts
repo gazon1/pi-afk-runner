@@ -338,9 +338,18 @@ export async function removeClaimLabel(
  * no work — its commits are already on the base — so deleting it loses
  * nothing, and the rework's push creates the branch instead of failing on the
  * leftover.
+ *
+ * **`keepBranch`** is for the claim a review that failed left behind. That
+ * branch carries the work the review judged, so it is kept: only the ref is
+ * taken over. The ref is still replaced, because it is what excludes a second
+ * runner, and a claim that is merely extended is a claim two runners both
+ * believe is theirs.
  */
 export async function reclaimClaim(
-  options: ClaimOptions & { readonly worktreeRoot?: string },
+  options: ClaimOptions & {
+    readonly worktreeRoot?: string;
+    readonly keepBranch?: boolean;
+  },
 ): Promise<ClaimOutcome> {
   await deleteClaim(options.git, options.cwd, {
     remote: options.remote,
@@ -355,13 +364,15 @@ export async function reclaimClaim(
       issueWorktreePath(options.worktreeRoot, options.issue.number),
     );
   }
-  await deleteLocalBranch(options.git, options.cwd, {
-    branch: workBranch(options.issue.number),
-  });
-  await deleteRemoteBranch(options.git, options.cwd, {
-    remote: options.remote,
-    branch: workBranch(options.issue.number),
-  });
+  if (options.keepBranch !== true) {
+    await deleteLocalBranch(options.git, options.cwd, {
+      branch: workBranch(options.issue.number),
+    });
+    await deleteRemoteBranch(options.git, options.cwd, {
+      remote: options.remote,
+      branch: workBranch(options.issue.number),
+    });
+  }
   return claimIssue(options);
 }
 

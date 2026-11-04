@@ -565,6 +565,23 @@ export async function readOpenPullRequests(
 }
 
 /**
+ * The newest marked review comment, or null.
+ *
+ * The gate's own rule: the **newest** comment that opens with the marker is the
+ * review. A comment that quotes the format somewhere in the middle is not one,
+ * and there is no falling back to an older review.
+ */
+export function newestReviewComment(comments: readonly string[]): string | null {
+  for (let index = comments.length - 1; index >= 0; index -= 1) {
+    const body = comments[index] ?? "";
+    if (body.trimStart().startsWith(REVIEW_MARKER)) {
+      return body;
+    }
+  }
+  return null;
+}
+
+/**
  * The verdict of the newest marked review comment, or null.
  *
  * The gate's own rule: the **newest** comment that opens with the marker
@@ -575,19 +592,16 @@ export async function readOpenPullRequests(
 export function newestReviewVerdict(
   comments: readonly string[],
 ): "pass" | "fail" | null {
-  for (let index = comments.length - 1; index >= 0; index -= 1) {
-    const body = (comments[index] ?? "").trimStart();
-    if (!body.startsWith(REVIEW_MARKER)) {
-      continue;
-    }
-    const stated = [
-      ...body.matchAll(
-        /^\s*\**\s*verdict\s*\**\s*:\s*\**\s*(pass|fail)\s*\**\s*\.?\s*$/gim,
-      ),
-    ];
-    return stated.length === 1 ? (stated[0]?.[1] as "pass" | "fail") : null;
+  const review = newestReviewComment(comments);
+  if (review === null) {
+    return null;
   }
-  return null;
+  const stated = [
+    ...review.matchAll(
+      /^\s*\**\s*verdict\s*\**\s*:\s*\**\s*(pass|fail)\s*\**\s*\.?\s*$/gim,
+    ),
+  ];
+  return stated.length === 1 ? (stated[0]?.[1] as "pass" | "fail") : null;
 }
 
 /**

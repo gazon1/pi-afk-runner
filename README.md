@@ -254,8 +254,12 @@ loop: there is nothing to push and nothing to review again. A review that was
 cut off — by the deadline or by a human's stop — stops it too: it stated no
 verdict, so there is nothing to fix and nothing to review again, and the run's
 record says what cut it off. A review that still fails leaves its finding on
-the issue and fails the run: the claim is released, the branch and the pull
-request stay, and the next run continues them.
+the issue and fails the run: the **claim stays on the issue**, the branch and
+the pull request stay, and the next run is a **rework** — it takes the claim
+over, continues the branch, takes the failed review as the session's task, and
+reviews the new diff. A rework is worked before the rest of the queue. The
+whole life of an issue — every state, and every way a run can end — is in
+[docs/lifecycle.md](docs/lifecycle.md).
 
 A review that **stated no verdict** — the reviewer answered, but never called
 the verdict tool — gets a second turn in the same session: it is told what is
@@ -378,6 +382,7 @@ and it only lands what that pipeline opened and reviewed.
 |---|---|
 | `src/` | the runner: the queue, the claim, the worktree, the session, the push, the pull request, the review, the record |
 | `test/` | the suite, in the repository it operates on's sandbox — real `git` in a temporary directory, stubbed `gh` and stubbed agent |
+| [docs/lifecycle.md](docs/lifecycle.md) | the life of an issue: the states it is derived into, the plans they run, and every way a run can end |
 | `contract/` | **a copy** of the contract this runner binds to, taken from the repository it operates on — see [contract/README.md](contract/README.md) |
 | `docs/decisions/` | the decisions behind the runner and the practices it inherits |
 | `docs/practices/` | the working practices: the agent's rules, the coding standards, the test rules, the order of the checks, the gate registry, the docs lifecycle |
