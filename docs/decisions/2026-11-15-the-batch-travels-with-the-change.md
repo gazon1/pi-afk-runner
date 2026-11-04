@@ -58,7 +58,7 @@ and works none, so a record that named the batch there would claim a coverage
 the run did not have.
 
 **The batched issues are linked to the run.** The same link the leftovers use,
-in the leftovers' own words: a comment that says the issues were filed in the
+in the leftovers' own shape: a comment that says the issues were worked in the
 same run. The `**Related:**` marker lives in the **body** of an issue the
 runner files — a batched issue's body belongs to somebody else, so the comment
 carries the relation alone. One relation, one spelling. A link that cannot be

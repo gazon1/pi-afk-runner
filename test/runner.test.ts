@@ -7545,7 +7545,7 @@ describe("the related issues the runner fetches", () => {
   });
 
   it("test_the_batched_issues_are_linked_to_the_run_that_worked_them", async () => {
-    // The same link the leftovers use, in the same words, so a reader of the
+    // The same link the leftovers use, in the same shape, so a reader of the
     // queue sees that these issues are one run's work.
     const comments: { number: number; body: string }[] = [];
     const gh = async (args: readonly string[]): Promise<string> => {
@@ -7577,11 +7577,12 @@ describe("the related issues the runner fetches", () => {
 
     expect(comments).toHaveLength(1);
     expect(comments[0]?.number).toBe(101);
-    // The leftovers' own words: one relation, one spelling. The `**Related:**`
-    // marker lives in the body of an issue the runner files — a batched issue's
-    // body belongs to somebody else.
+    // The leftovers' own shape, and its own word: a leftover is *filed*, a
+    // batch is *worked*. The `**Related:**` marker lives in the body of an
+    // issue the runner files — a batched issue's body belongs to somebody
+    // else.
     expect(comments[0]?.body).toBe(
-      "Filed in the same run as this issue: #42 — the issue the run works",
+      "Worked in the same run as this issue: #42 — the issue the run works",
     );
   });
 

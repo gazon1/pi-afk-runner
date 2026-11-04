@@ -1050,11 +1050,14 @@ export function workedBatch(
 /**
  * Tell the batched issues that they were batched into this run.
  *
- * The link is the one the leftovers use, in the leftovers' own words: the
+ * The link is the one the leftovers use, in the leftovers' own shape: the
  * earlier issues of a run learn about the later ones from a comment that says
  * so. The `**Related:**` marker lives in the **body** of an issue the runner
  * files — a batched issue's body belongs to somebody else, so the comment
  * carries the relation alone.
+ *
+ * The word is the leftover's own, and it is not the leftover's word here: the
+ * leftovers are *filed*, a batch is *worked*. The comment says what happened.
  *
  * The link is a nicety — one that cannot be posted does not fail the run.
  */
@@ -1073,7 +1076,7 @@ export async function linkBatchedIssues(options: {
         repo: options.repo,
         issueNumber: batched.number,
         body:
-          `Filed in the same run as this issue: #${options.issueNumber} — ` +
+          `Worked in the same run as this issue: #${options.issueNumber} — ` +
           `${options.issueTitle}`,
       },
       options.gh,
