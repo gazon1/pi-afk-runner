@@ -566,6 +566,7 @@ async function chooseModel(options: {
   /** The models whose limit is gone — for the whole run. */
   readonly state: PoolState;
   readonly proxyConfigured: boolean;
+  readonly workersInUse?: ReadonlyMap<string, number>;
 }): Promise<{ readonly reference: string; readonly pooled: boolean } | undefined> {
   if (options.model !== undefined) {
     return { reference: options.model, pooled: false };
@@ -581,6 +582,7 @@ async function chooseModel(options: {
     proxyConfigured: options.proxyConfigured,
     now: new Date(),
     usable: (model) => knownModel(catalogue, model.reference),
+    ...(options.workersInUse === undefined ? {} : { workersInUse: options.workersInUse }),
   });
   if (chosen === undefined) {
     throw new NoModelAvailable(
@@ -983,6 +985,7 @@ export async function main(
       pool,
       state: poolState,
       proxyConfigured,
+      workersInUse: poolState.inUse,
     });
     const created = await base({
       ...options,
@@ -991,11 +994,25 @@ export async function main(
     // The session is tracked while it lives: a stop cuts every session that is
     // running, and a sweep that works several issues at once has one per issue.
     const move = created.setModel;
+    // The model this worker is on, when the pool chose one: it counts against
+    // that model's worker cap for as long as the session lives.
+    const assigned = chosen !== undefined && chosen.pooled && !injected ? chosen.reference : undefined;
+    if (assigned !== undefined) {
+      poolState.inUse.set(assigned, (poolState.inUse.get(assigned) ?? 0) + 1);
+    }
     const tracked: AgentSession = {
       prompt: (text) => created.prompt(text),
       abort: () => created.abort(),
       dispose: () => {
         active.delete(tracked);
+        if (assigned !== undefined) {
+          const count = (poolState.inUse.get(assigned) ?? 1) - 1;
+          if (count <= 0) {
+            poolState.inUse.delete(assigned);
+          } else {
+            poolState.inUse.set(assigned, count);
+          }
+        }
         created.dispose();
       },
       get messages(): readonly TurnMessage[] {
