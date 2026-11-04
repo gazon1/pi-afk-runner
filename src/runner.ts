@@ -1034,16 +1034,39 @@ export async function addRecountLabel(options: {
 }
 
 /**
+ * The batch a run's record names: only a run that worked covers anything.
+ *
+ * A split files smaller issues and works none of them, and a skip closes the
+ * issue: neither covered the batched issues' criteria, so a record that named
+ * the batch there would claim a coverage the run did not have.
+ */
+export function workedBatch(
+  decision: "work" | "skip" | "split",
+  batch: readonly BatchedIssue[],
+): readonly BatchedIssue[] {
+  return decision === "work" ? batch : [];
+}
+
+/**
  * Tell the batched issues that they were batched into this run.
  *
- * The link is the one the leftovers use: `**Related:** #N` on the issue, so a
- * reader of the queue sees that these issues are one run's work. The link is a
- * nicety — one that cannot be posted does not fail the run.
+ * The link is the one the leftovers use, in the leftovers' own shape: the
+ * earlier issues of a run learn about the later ones from a comment that says
+ * so. The `**Related:**` marker lives in the **body** of an issue the runner
+ * files — a batched issue's body belongs to somebody else, so the comment
+ * carries the relation alone.
+ *
+ * The word is the leftover's own, and it is not the leftover's word here: the
+ * leftovers are *filed*, a batch is *worked*. The comment says what happened.
+ *
+ * The link is a nicety — one that cannot be posted does not fail the run.
  */
 export async function linkBatchedIssues(options: {
   readonly repo: string;
   /** The issue the run works — the one the batch was made for. */
   readonly issueNumber: number;
+  /** The issue's title — the comment names the issue it links to. */
+  readonly issueTitle: string;
   readonly batch: readonly BatchedIssue[];
   readonly gh: GhRunner;
 }): Promise<void> {
@@ -1053,8 +1076,8 @@ export async function linkBatchedIssues(options: {
         repo: options.repo,
         issueNumber: batched.number,
         body:
-          `**Related:** #${options.issueNumber} — this issue was batched into the same ` +
-          `run as #${options.issueNumber}.`,
+          `Worked in the same run as this issue: #${options.issueNumber} — ` +
+          `${options.issueTitle}`,
       },
       options.gh,
     );
@@ -3020,11 +3043,16 @@ async function runPlan(
         state.decision = result.decision;
         state.reason = result.reason;
         state.issue = result.issue;
-        state.batch = result.batch;
+        // The batch is what the change covered, and only a run that worked
+        // covers anything: a split files smaller issues and works none, so a
+        // record that named the batch there would claim a coverage the run
+        // did not have.
+        state.batch = workedBatch(result.decision, result.batch);
         if (result.decision === "work" && result.batch.length > 0) {
           await linkBatchedIssues({
             repo: options.repo,
             issueNumber: issue.number,
+            issueTitle: issue.title,
             batch: result.batch,
             gh: options.gh,
           });

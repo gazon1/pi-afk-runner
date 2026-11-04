@@ -56,10 +56,10 @@ bound would not be the bound the prompt promises. A brief that names no
 leftover is refused: a bound that cannot be counted is not a bound.
 
 **Nothing that is already known is filed twice.** The duplicate check reads
-the queue and the claimed issues: the work that is waiting, and the work
-somebody is already doing. It does not read every open issue in the
-repository — that read is three times the size for the same answer, and an
-issue outside the queue is not work the next run would take.
+every open issue of the queue — the work that is waiting and the work somebody
+is already doing, in one read of the label alone. It does not read every open
+issue in the repository: that read is three times the size for the same
+answer, and an issue outside the queue is not work the next run would take.
 
 **No new tool and no new field.** A grouped issue is an ordinary issue with an
 ordinary brief; the runner files it, labels it `ready-for-agent`, and the next
@@ -106,6 +106,8 @@ uses everywhere else.
 - The issues of one run carry each other's numbers, so a reader of the queue
   sees that they belong together without reading every body. `**Related:**` is
   not a dependency marker, so the link never holds an issue out of the queue.
+- The duplicate check reads the queue's label alone: one read, and it covers the
+  claimed issues too — the ones a queue read skips by construction.
 
 ## Links
 
