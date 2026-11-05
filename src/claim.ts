@@ -287,11 +287,7 @@ async function settleClaimLabel(options: {
 }
 
 /** Take the claim label off an issue. */
-export async function removeClaimLabel(
-  gh: GhRunner,
-  repo: string,
-  issueNumber: number,
-): Promise<void> {
+async function removeClaimLabel(gh: GhRunner, repo: string, issueNumber: number): Promise<void> {
   await gh(["issue", "edit", String(issueNumber), "--repo", repo, "--remove-label", CLAIM_LABEL]);
 }
 

@@ -12,7 +12,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 const AUTH_FILE = join(homedir(), ".commandcode", "auth.json");
-export const COMMANDCODE_API_KEY = "COMMAND_CODE_API_KEY";
+const COMMANDCODE_API_KEY = "COMMAND_CODE_API_KEY";
 export const COMMANDCODE_PROVIDER = "commandcode";
 const COMMANDCODE_URL = "https://api.commandcode.ai/provider/v1";
 

@@ -35,13 +35,13 @@ import { simpleGit } from "simple-git";
 import { KILL_GRACE_MS, withHardStop } from "./bound.js";
 
 /** Who the claim is attributed to. Part of the tag object's identity. */
-export const CLAIM_TAGGER = {
+const CLAIM_TAGGER = {
   name: "afk-runner",
   email: "afk-runner@localhost",
 } as const;
 
 /** A command to run, and where. */
-export interface CommandSpec {
+interface CommandSpec {
   readonly command: string;
   readonly args: readonly string[];
   readonly cwd: string;

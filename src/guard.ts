@@ -31,7 +31,7 @@ export type PolicyRule = "allow" | "deny" | { readonly action: "deny"; readonly 
  * when it carries an argument (`npm test`), and a module a Python runner runs
  * (`python -m unittest`) are all one entry in the policy's list.
  */
-export type SuiteEntry =
+type SuiteEntry =
   | { readonly kind: "program"; readonly program: string; readonly argument?: string }
   | { readonly kind: "module"; readonly module: string };
 
@@ -46,7 +46,7 @@ export type SuiteEntry =
  * written: a runner is one more entry, and the rule that reads the policy
  * knows no runner by name.
  */
-export interface ProgramPolicy {
+interface ProgramPolicy {
   /** Why a test suite is refused. */
   readonly reason: string;
   /** The ways a command runs a test suite. */
@@ -63,7 +63,7 @@ export interface ProgramPolicy {
  * waits. The ceiling is the same for the two ways a command asks for time —
  * the tool's own timeout and the shell's `timeout`.
  */
-export interface DurationPolicy {
+interface DurationPolicy {
   /** Why a command that runs too long is refused. */
   readonly reason: string;
   /** The longest a command may run, in seconds. */

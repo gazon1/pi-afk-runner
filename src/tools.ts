@@ -15,7 +15,7 @@
 import type { Static, TSchema } from "typebox";
 
 /** A block of text a tool answers with. */
-export interface ToolText {
+interface ToolText {
   readonly type: "text";
   readonly text: string;
 }
@@ -28,7 +28,7 @@ export interface ToolText {
  * that is too small, the leftover that is already open — is a refusal, and the
  * model has to be able to try again.
  */
-export interface ToolResult<TDetails = unknown> {
+interface ToolResult<TDetails = unknown> {
   readonly content: readonly ToolText[];
   readonly details: TDetails;
   readonly isError?: boolean;

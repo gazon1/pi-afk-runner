@@ -32,7 +32,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import { claimIssue, reclaimClaim, releaseClaim } from "./claim.js";
-import { errorMessage } from "./cli.js";
+import { errorMessage } from "./errors.js";
 import { budgetShares } from "./budget.js";
 import { isProtectedPath } from "./guard.js";
 import { GateFailed, runGates } from "./gates.js";
@@ -103,7 +103,6 @@ import {
   readQueue,
   reviewCommentBody,
   RECOUNT_LABEL,
-  REVIEW_MARKER,
   type GhRunner,
   type IssueDetail,
   type IssueSummary,
@@ -117,149 +116,11 @@ import {
 } from "./workflow/index.js";
 import type { Lock } from "./lock.js";
 
-/** The states that can be derived from the observables. */
-export type DerivedState =
-  | "Queue"
-  | "Claimed"
-  | "Orphaned"
-  | "Pushed"
-  | "Opened"
-  | "Failed"
-  | "Reviewed"
-  | "Counted";
-
-/** What can be seen of one issue. */
-export interface Observables {
-  /** `L` — the issue carries `agent-in-progress`. */
-  readonly claimLabel: boolean;
-  /** `P` — a pull request exists for the branch. */
-  readonly pullRequest: boolean;
-  /** `V` — that pull request carries a review comment that opens with the marker. */
-  readonly reviewComment: boolean;
-  /** `W` — what the newest marked review comment states, or null when it states nothing. */
-  readonly reviewVerdict: "pass" | "fail" | null;
-  /** `C` — that pull request carries `agent-reviewed`. */
-  readonly recountLabel: boolean;
-  /**
-   * `R` — the remote branch `agent/issue-<N>` carries work.
-   *
-   * Existence is not enough: a branch that points at the base carries nothing,
-   * and GitHub refuses a pull request for it.
-   */
-  readonly workBranch: boolean;
-  /** `A` — the claim is older than the staleness window. */
-  readonly stale: boolean;
-}
-
-/** The observables of an issue nobody has touched. */
-export const UNCLAIMED: Observables = {
-  claimLabel: false,
-  pullRequest: false,
-  reviewComment: false,
-  reviewVerdict: null,
-  recountLabel: false,
-  workBranch: false,
-  stale: false,
-};
-
-/**
- * Derive the state of an issue from what can be seen of it.
- *
- * The order of the questions is the order of the decisions:
- *
- * 1. A review that said `fail` → the work is not done. This is the one question
- *    asked before the claim, because a failed review is what the branch and the
- *    pull request are for: whether the claim was kept or let go, the issue is
- *    worked again from that work, not from the queue.
- * 2. No claim label → the issue is in the queue, whoever gets it.
- * 3. A pull request exists → the issue has left the queue, and how far it got
- *    is what the pull request's own state says.
- * 4. No pull request but a work branch → the work was pushed and the pull
- *    request was never opened.
- * 5. Neither → the claim is either live or stranded, and the age decides.
- */
-export function deriveState(observables: Observables): DerivedState {
-  if (
-    observables.pullRequest &&
-    observables.reviewComment &&
-    observables.reviewVerdict === "fail"
-  ) {
-    return "Failed";
-  }
-  if (!observables.claimLabel) {
-    return "Queue";
-  }
-  if (observables.pullRequest) {
-    if (observables.reviewComment) {
-      return observables.recountLabel ? "Counted" : "Reviewed";
-    }
-    return "Opened";
-  }
-  if (observables.workBranch) {
-    return "Pushed";
-  }
-  return observables.stale ? "Orphaned" : "Claimed";
-}
-
-/**
- * Pick the issue this run will work.
- *
- * The queue query already excludes the claimed issues — the exclusion is in the
- * search form, so the claimed issues are never fetched. This is the second
- * half of the same rule: the runner does not *trust* the query to have done
- * it. A queue that somehow carries a claimed issue is a bug in the query, and
- * working it anyway would put two runs on one issue — the exact thing the
- * claim exists to prevent.
- */
-export function selectIssue(queue: readonly IssueSummary[]): IssueSummary | undefined {
-  return queue.find((issue) => !issue.labels.includes(CLAIM_LABEL));
-}
-
-/**
- * What a pull request says about itself.
- *
- * `reviewComment` is true only for a comment that **opens** with the marker:
- * the gate wants the marker on the first non-blank line, so a comment that
- * quotes the format somewhere in the middle is not a review.
- */
-export function observePullRequest(pullRequest: PullRequestSummary | null): {
-  readonly reviewComment: boolean;
-  readonly recountLabel: boolean;
-  readonly reviewVerdict: "pass" | "fail" | null;
-} {
-  if (pullRequest === null) {
-    return { reviewComment: false, recountLabel: false, reviewVerdict: null };
-  }
-  const reviewComment = pullRequest.comments.some((body) =>
-    body.trimStart().startsWith(REVIEW_MARKER),
-  );
-  return {
-    reviewComment,
-    recountLabel: pullRequest.labels.includes(RECOUNT_LABEL),
-    reviewVerdict: newestReviewVerdict(pullRequest.comments),
-  };
-}
-
-/**
- * Is the claim old enough to take over?
- *
- * The window is a parameter, not a constant, because its value is a decision
- * the plan has not made: too short and a slow run loses its issue to a second
- * runner, too long and a killed run keeps the issue out of the queue for
- * hours. The caller supplies it.
- */
-export function isStale(updatedAt: string, now: Date, staleAfterMs: number): boolean {
-  const updated = Date.parse(updatedAt);
-  if (Number.isNaN(updated)) {
-    // An issue whose last-update time cannot be read is not treated as stale:
-    // guessing wrong in that direction takes an issue from a live run.
-    return false;
-  }
-  return now.getTime() - updated >= staleAfterMs;
-}
+import { deriveState, isStale, observePullRequest, type DerivedState } from "./state.js";
+export * from "./state.js";
 
 /** The script the repository uses to prepare a worktree. */
-export const SETUP_SCRIPT = "scripts/setup-worktree.sh";
+const SETUP_SCRIPT = "scripts/setup-worktree.sh";
 
 export interface WorktreeOptions {
   /** The checkout the worktree is created from. */
@@ -367,7 +228,7 @@ export async function prepareWorktree(
 }
 
 /** What the repository's own setup script said when it ran in a worktree. */
-export interface WorktreeSetup {
+interface WorktreeSetup {
   /** The reason it could not run, or null when it did. */
   readonly reason: string | null;
   /** The PATH it asks the runner to run the gates with. */
@@ -381,7 +242,7 @@ export interface WorktreeSetup {
  * Every worktree-maker calls this; what a caller does with a failure is its
  * own (failing the run, or reporting it as a limit).
  */
-export async function prepareWorktreeSetup(
+async function prepareWorktreeSetup(
   run: CommandRunner,
   worktreePath: string,
 ): Promise<WorktreeSetup> {
@@ -410,7 +271,7 @@ export async function prepareWorktreeSetup(
  * there is named and nothing more — and the gates would then run with the
  * PATH of the host, where the gate CLI of that checkout is not on it.
  */
-export function setupPath(output: string): string | undefined {
+function setupPath(output: string): string | undefined {
   const match = /export PATH="([^"]+)"/.exec(output);
   if (match?.[1] !== undefined) {
     const printed = match[1];
@@ -429,10 +290,10 @@ export function setupPath(output: string): string | undefined {
 }
 
 /** The tool that computes a change's contract digest — the repository's own. */
-export const DIGEST_TOOL = "scripts/check-review-verdicts.py";
+const DIGEST_TOOL = "scripts/check-review-verdicts.py";
 
 /** The tool that creates a change's registry entry — the repository's own. */
-export const REGISTRY_TOOL = "scripts/openspec-import-all.py";
+const REGISTRY_TOOL = "scripts/openspec-import-all.py";
 
 /**
  * The digest of a change's contract documents.
@@ -542,7 +403,7 @@ export async function openPullRequest(options: {
 }
 
 /** The tool that reads a commit's CI verdict — the repository's own. */
-export const CI_VERDICT_TOOL = "scripts/ci-verdict.py";
+const CI_VERDICT_TOOL = "scripts/ci-verdict.py";
 
 /**
  * The CI line out of the tool's own JSON, or null.
@@ -584,7 +445,7 @@ export interface CiOutcome {
  * success are both lines — so the merge gate needs the exit the tool states.
  * The tool writes `exit` on every path that reached a verdict.
  */
-export function parseCiOutcome(json: string): CiOutcome | null {
+function parseCiOutcome(json: string): CiOutcome | null {
   try {
     const parsed: unknown = JSON.parse(json);
     if (typeof parsed !== "object" || parsed === null) {
@@ -986,7 +847,7 @@ export async function reviewPullRequest(options: {
 
 /**
  * The prompt the reviewer is given. */
-export const REVIEW_PROMPT = [
+const REVIEW_PROMPT = [
   "Review the pull request in this repository, as a reader who did not write it.",
   "",
   "Read the diff (`git diff origin/main...HEAD`), the code it touches, and the tests. When the",
@@ -1010,7 +871,7 @@ export const REVIEW_PROMPT = [
  * second turn is the same second chance a gate's refusal gets: the reviewer
  * is told what is missing and ends the review with it.
  */
-export const VERDICT_REMINDER = [
+const VERDICT_REMINDER = [
   "Your review did not end with a verdict.",
   "",
   "If the verdict tool has already been called in this session, the verdict is recorded: do not call it",
@@ -1021,7 +882,7 @@ export const VERDICT_REMINDER = [
 ].join("\n");
 
 /** Post the review comment. */
-export async function postReviewComment(
+async function postReviewComment(
   options: {
     readonly repo: string;
     readonly pullRequest: number;
@@ -1034,7 +895,7 @@ export async function postReviewComment(
 
 /**
  * Apply the label that makes the gate count the review again. */
-export async function addRecountLabel(options: {
+async function addRecountLabel(options: {
   readonly repo: string;
   readonly pullRequest: number;
   readonly gh: GhRunner;
@@ -1140,7 +1001,7 @@ export function fixPrompt(
  * comes back to it as what the runner saw. The agent's own turn is what fixes
  * it, and the runner runs the gates again afterwards.
  */
-export function gateFixPrompt(failure: GateFailed): string {
+function gateFixPrompt(failure: GateFailed): string {
   return [
     "The repository's own gates refused this change. Fix what they reported.",
     "",
@@ -1161,7 +1022,7 @@ export function gateFixPrompt(failure: GateFailed): string {
 }
 
 /** How much of a gate's output the agent is shown. */
-export const GATE_FIX_OUTPUT_CHARS = 8000;
+const GATE_FIX_OUTPUT_CHARS = 8000;
 
 /**
  * Run one fix turn for a gate's failure.
@@ -1245,7 +1106,7 @@ export async function fixWorktree(options: {
 }
 
 /** The comment a run leaves on an issue whose review never passed. */
-export function continuationComment(options: {
+function continuationComment(options: {
   readonly pullRequest: number;
   readonly findings: readonly string[];
   readonly reviews: number;
@@ -1309,7 +1170,7 @@ export interface IssueObservation {
  *
  * The staleness comes from the issue's last update — which any comment moves.
  */
-export function observeIssue(options: {
+function observeIssue(options: {
   readonly issue: IssueSummary;
   /** The pull request behind the issue's branch, when there is one. */
   readonly pullRequest: PullRequestSummary | null;
@@ -1356,7 +1217,7 @@ export function pullRequestsByBranch(
 }
 
 /** What a run has to do about an issue. */
-export type PlanKind =
+type PlanKind =
   /** Claim it, work it, open a pull request, review it. */
   | "work"
   /** A dead run's claim: take it over and do the work again. */
@@ -1675,7 +1536,7 @@ function renderRecord(options: {
  * The record names the issue, the steps the run took and what came of each, so
  * a reader can reconstruct the run's timeline without the runner's process.
  */
-export async function writeRunRecord(options: {
+async function writeRunRecord(options: {
   readonly root: string;
   readonly issue: number;
   readonly runId: string;
@@ -2028,7 +1889,7 @@ export interface RunOptions {
  * found nothing and a run that found the issue unworkable all say how long
  * they took and what they cost.
  */
-export interface RunResultFacts {
+interface RunResultFacts {
   /** The issue the run worked, or null when it worked none. */
   readonly issue: number | null;
   readonly steps: readonly StepRecord[];
@@ -2130,7 +1991,7 @@ export async function headSha(git: GitRunner, cwd: string): Promise<string> {
 }
 
 /** How many times the review may fail and be fixed in one run. */
-export const MAX_FIX_ITERATIONS = 3;
+const MAX_FIX_ITERATIONS = 3;
 
 /**
  * How many times a gate may refuse the change and be fixed in one run.
@@ -2140,7 +2001,7 @@ export const MAX_FIX_ITERATIONS = 3;
  * enough for a gate that reports a finding and one that reports the finding
  * again; a third costs the run a great deal for very little.
  */
-export const GATE_FIX_ATTEMPTS = 2;
+const GATE_FIX_ATTEMPTS = 2;
 
 /**
  * Commit what the runner itself wrote.
@@ -2250,7 +2111,7 @@ async function gateTheTree(options: {
  * reviewer that committed something of its own moved the branch, and the tree
  * that is pushed has to be the tree the reviewer judged.
  */
-export async function restoreTree(git: GitRunner, cwd: string, head?: string): Promise<void> {
+async function restoreTree(git: GitRunner, cwd: string, head?: string): Promise<void> {
   await git(head === undefined ? ["reset", "--hard"] : ["reset", "--hard", head], { cwd });
   await git(["clean", "-fd"], { cwd });
 }
@@ -2287,7 +2148,7 @@ export async function preserveUnfinishedWork(options: {
  * A change is a directory under `openspec/changes/`, and its name is the
  * change's slug — the same name its registry entry and its verdict file carry.
  */
-export async function changedChangeSlug(
+async function changedChangeSlug(
   git: GitRunner,
   cwd: string,
   options: { readonly base: string; readonly head: string },
