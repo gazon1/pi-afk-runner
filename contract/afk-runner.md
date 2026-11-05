@@ -36,12 +36,12 @@ a later run re-derives the state from them.
 
 ## The intake contract
 
-| This repository guarantees | Where |
-|---|---|
-| The label `ready-for-agent` means "a human has judged this issue specified" | `.agents/skills/triage/SKILL.md:33-45` |
-| The brief is the authoritative task, and a brief comment's first line is `## Agent Brief` | `.agents/skills/triage/AGENT-BRIEF.md:3,42` |
+| This repository guarantees                                                                                     | Where                                       |
+| -------------------------------------------------------------------------------------------------------------- | ------------------------------------------- |
+| The label `ready-for-agent` means "a human has judged this issue specified"                                    | `.agents/skills/triage/SKILL.md:33-45`      |
+| The brief is the authoritative task, and a brief comment's first line is `## Agent Brief`                      | `.agents/skills/triage/AGENT-BRIEF.md:3,42` |
 | The agent brief is behavioural, names no file paths, carries acceptance criteria and explicit scope boundaries | `.agents/skills/triage/AGENT-BRIEF.md:9-37` |
-| The label `agent-in-progress` is the runner's claim marker | `gh label list` |
+| The label `agent-in-progress` is the runner's claim marker                                                     | `gh label list`                             |
 
 **The brief is the comment that opens with `## Agent Brief`.** The runner passes the body and the
 comments to the agent and tells it, in the system prompt, which one is the contract.
@@ -68,7 +68,7 @@ that died. It goes on **first**.
 two runners both "win" it. The runner creates a ref carrying the claim, with a **nonce in its
 message** so that its object is never identical to the one already there. Git refuses to update an
 existing ref without `--force`, and a differing object is always rejected — while a plain push of
-the *same* object answers "Everything up-to-date" and exits 0, which is why the nonce is not
+the _same_ object answers "Everything up-to-date" and exits 0, which is why the nonce is not
 optional.
 
 If the ref creation is rejected, another runner holds the issue: the runner removes the label it
@@ -81,11 +81,11 @@ A worktree on `agent/issue-<N>`, created from `origin/main`.
 **`scripts/setup-worktree.sh` must run in it before any other command.** A generic worktree
 extension cannot do what that script does, and this repository needs all of it:
 
-| What | Where |
-|---|---|
-| the `core.bare` repair — a worktree of a bare main checkout is not usable | `scripts/setup-worktree.sh:182-183` |
-| the per-worktree `core.hooksPath` — the pre-push hook must be this repository's | `scripts/setup-worktree.sh:197-209` |
-| the `.env` copy — the canonical checkout holds it, a worktree does not | `scripts/setup-worktree.sh:268-286` |
+| What                                                                                          | Where                                                                                       |
+| --------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| the `core.bare` repair — a worktree of a bare main checkout is not usable                     | `scripts/setup-worktree.sh:182-183`                                                         |
+| the per-worktree `core.hooksPath` — the pre-push hook must be this repository's               | `scripts/setup-worktree.sh:197-209`                                                         |
+| the `.env` copy — the canonical checkout holds it, a worktree does not                        | `scripts/setup-worktree.sh:268-286`                                                         |
 | the per-checkout venv and the private Gradle home — two builds at once must not share a cache | `scripts/setup-worktree.sh:311-335`, `docs/decisions/2026-10-04-gradle-daemon-isolation.md` |
 
 The layout of the checkout is resolved through `config/git-layout.sh`, not re-derived: two scripts
@@ -118,13 +118,13 @@ same ADR records that it does not run `docs-audit` or `find-unwired-surfaces`.
 
 ## The pull request and its review
 
-| This repository guarantees | Where |
-|---|---|
-| The review comment must **open** with `<!-- agent-review -->` — a comment that merely quotes the format is not a review | `scripts/ci/check-agent-review.py:164-178` |
-| The verdict line's value is exactly `**Verdict:** pass` or `**Verdict:** fail` | `scripts/ci/check-agent-review.py:146-149` |
-| The **newest** marked comment decides; a newest comment with no verdict decides nothing rather than falling back to an older `pass` | `scripts/ci/check-agent-review.py:216-238` |
-| A `fail` verdict fails the gate | `scripts/ci/check-agent-review.py:233-237` |
-| The gate does not judge the comment's author — "separate" is a fact about the session, not the login | `scripts/ci/check-agent-review.py:88-94` |
+| This repository guarantees                                                                                                                          | Where                                                                                 |
+| --------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| The review comment must **open** with `<!-- agent-review -->` — a comment that merely quotes the format is not a review                             | `scripts/ci/check-agent-review.py:164-178`                                            |
+| The verdict line's value is exactly `**Verdict:** pass` or `**Verdict:** fail`                                                                      | `scripts/ci/check-agent-review.py:146-149`                                            |
+| The **newest** marked comment decides; a newest comment with no verdict decides nothing rather than falling back to an older `pass`                 | `scripts/ci/check-agent-review.py:216-238`                                            |
+| A `fail` verdict fails the gate                                                                                                                     | `scripts/ci/check-agent-review.py:233-237`                                            |
+| The gate does not judge the comment's author — "separate" is a fact about the session, not the login                                                | `scripts/ci/check-agent-review.py:88-94`                                              |
 | The review must be **re-counted**: a comment does not start a CI run, and a run started by the comment has its checks counted on the default branch | `.github/PULL_REQUEST_TEMPLATE.md:38-39`, `docs/architecture/verification.md:126-128` |
 
 So the runner applies the label `agent-reviewed` **to the pull request** after the comment lands.
@@ -149,7 +149,7 @@ tool says — the workflow, the run and the conclusion, or nothing at all.
 
 **The tool's exit code is its verdict**: 0 when the CI succeeded, 1 when it did not, 2 when there
 is no run, 3 when the runs could not be read
-(`scripts/ci-verdict.py:48-52`). It prints the line and *then* exits with that conclusion, so a
+(`scripts/ci-verdict.py:48-52`). It prints the line and _then_ exits with that conclusion, so a
 red CI is a non-zero exit and the answer travels with the failure. The runner asks for `--json`
 and reads the answer whether the exit code was zero or not — reading only the success path would
 report a red CI as no CI at all, which is the one case a reader is looking for.
@@ -161,10 +161,10 @@ just started — so the runner reads it before it applies the label, and says wh
 
 A change directory under `openspec/changes/` needs two more files in the pull request:
 
-| File | What | Where |
-|---|---|---|
-| `.specify/issues/<slug>.yaml` | the registry entry, pointing back at the change **by slug** | `scripts/check-issue-registry.py:28-35` |
-| `.specify/reviews/<slug>.md` | the verdict file, with `pr:` naming **this** pull request and `documents:` carrying the digest | `scripts/check-review-verdicts.py:19-29` |
+| File                          | What                                                                                           | Where                                    |
+| ----------------------------- | ---------------------------------------------------------------------------------------------- | ---------------------------------------- |
+| `.specify/issues/<slug>.yaml` | the registry entry, pointing back at the change **by slug**                                    | `scripts/check-issue-registry.py:28-35`  |
+| `.specify/reviews/<slug>.md`  | the verdict file, with `pr:` naming **this** pull request and `documents:` carrying the digest | `scripts/check-review-verdicts.py:19-29` |
 
 The `documents:` digest is computed by `scripts/check-review-verdicts.py --digest <slug>` — the same
 implementation the gate uses, so the recorded value and the checked value cannot disagree. The
@@ -176,7 +176,7 @@ which kind of change it is making.
 
 ## What the runner must never do
 
-- **Merge.** Not the pull request, not anything. The `agent-reviewed` label exists so a *review* is
+- **Merge.** Not the pull request, not anything. The `agent-reviewed` label exists so a _review_ is
   re-counted, not so a change lands unattended.
 - **Push outside `agent/issue-<N>`.** The only other ref it may write is its own claim ref. The
   branch prefix is the guard that keeps a successful injection from reaching further than one

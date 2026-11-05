@@ -15,12 +15,14 @@ When an ADR is proposed, it needs both a **writer** (author) and a **reviewer** 
 ### Roles
 
 **Writer** (author of the ADR):
+
 - Creates the `proposed` ADR with full context, alternatives considered, and decision
 - Opens a PR with the ADR
 - Responds to review comments, updates the ADR
 - Is responsible for the `supersedes` chain when updating
 
 **Reviewer** (assigned approver):
+
 - Must not be the same person as the writer
 - Reviews within 2 business days of assignment
 - Challenges assumptions, not taste — technical objections only

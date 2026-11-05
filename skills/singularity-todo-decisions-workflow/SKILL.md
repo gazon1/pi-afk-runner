@@ -122,7 +122,7 @@ today's code. Supersede it:
    common case, and a blanket `superseded` hides decisions that are still in force.
 
 `scripts/check-doc-dead-refs.py` understands these banners: references inside one are
-reported as *historical* rather than *dead*, so a superseded ADR can still name files it
+reported as _historical_ rather than _dead_, so a superseded ADR can still name files it
 described at the time.
 
 **A retired artifact also gets a banner.** When a skill, class or script is removed, the
@@ -168,12 +168,12 @@ The AI agent can create, list, and read ADR files through MCP tools. Tools live 
 
 ### Tool names
 
-| Tool | What it does |
-|---|---|
-| `write_adr` | Creates an ADR file — slug, title, tags, body; writes `status: open` |
-| `list_adrs` | Lists all ADR filenames recursively (walks subdirectories) |
-| `read_adr` | Reads one ADR by slug |
-| `list_open_deferred` | Lists open/partial deferred backlog entries from `deferred/` |
+| Tool                 | What it does                                                         |
+| -------------------- | -------------------------------------------------------------------- |
+| `write_adr`          | Creates an ADR file — slug, title, tags, body; writes `status: open` |
+| `list_adrs`          | Lists all ADR filenames recursively (walks subdirectories)           |
+| `read_adr`           | Reads one ADR by slug                                                |
+| `list_open_deferred` | Lists open/partial deferred backlog entries from `deferred/`         |
 
 All ADR tools are read from `AdrStorage` (the single implementation), which
 depends only on `(HostEnvironmentPort, Clock, TimeZoneProvider)` — no database required.
@@ -181,11 +181,17 @@ depends only on `(HostEnvironmentPort, Clock, TimeZoneProvider)` — no database
 ### Output format
 
 `write_adr` returns:
+
 ```json
-{"slug":"2026-09-05-koog-both-platforms","path":"/abs/path/docs/decisions/2026-09-05-koog-both-platforms.md","title":"Koog on both platforms"}
+{
+  "slug": "2026-09-05-koog-both-platforms",
+  "path": "/abs/path/docs/decisions/2026-09-05-koog-both-platforms.md",
+  "title": "Koog on both platforms"
+}
 ```
 
 Frontmatter written (includes `status: open`):
+
 ```yaml
 ---
 title: "Koog on both platforms"
@@ -193,7 +199,6 @@ date: 2026-09-05
 status: open
 tags: ["koog", "adr"]
 ---
-
 ## Context
 ...
 ```
@@ -264,19 +269,19 @@ Run it from the repository root. Every command takes `--json` for
 machine-readable output; exit code `2` means the command line was wrong,
 `1` means the operation failed.
 
-| Command | What it does |
-|---|---|
-| `singularity-adr new <slug> <title> [tag ...]` | write a new decision |
-| `singularity-adr list` | every decision in the corpus |
-| `singularity-adr list-open` | deferred backlog entries still open |
-| `singularity-adr read <slug>` | one decision, with its body |
-| `singularity-adr search <query>` | find decisions by title, tags or body |
-| `singularity-adr update <slug> <status> [by]` | change status, never the body (#509) |
-| `singularity-adr stale [--days N] [--status S]` | what the gate will reject next (#521) |
-| `singularity-adr prune [--keep slug]` | uncited decisions, never deleted (#525) |
-| `singularity-adr validate` | run the repository's ADR status gate |
-| `singularity-adr version [--check]` | which build this is, and does it match the checkout |
-| `singularity-adr upgrade [--check|--force]` | rebuild this binary when it no longer matches |
+| Command                                         | What it does                                        |
+| ----------------------------------------------- | --------------------------------------------------- |
+| `singularity-adr new <slug> <title> [tag ...]`  | write a new decision                                |
+| `singularity-adr list`                          | every decision in the corpus                        |
+| `singularity-adr list-open`                     | deferred backlog entries still open                 |
+| `singularity-adr read <slug>`                   | one decision, with its body                         |
+| `singularity-adr search <query>`                | find decisions by title, tags or body               |
+| `singularity-adr update <slug> <status> [by]`   | change status, never the body (#509)                |
+| `singularity-adr stale [--days N] [--status S]` | what the gate will reject next (#521)               |
+| `singularity-adr prune [--keep slug]`           | uncited decisions, never deleted (#525)             |
+| `singularity-adr validate`                      | run the repository's ADR status gate                |
+| `singularity-adr version [--check]`             | which build this is, and does it match the checkout |
+| `singularity-adr upgrade [--check               | --force]`                                           | rebuild this binary when it no longer matches |
 
 Global flags:
 
@@ -288,14 +293,14 @@ Global flags:
 These are the tools an agent calls over the MCP server. The descriptions
 below are the same strings the server sends, so they cannot drift.
 
-| Tool | What it does |
-|---|---|
-| `write_adr` | Create a NEW Architecture Decision Record (ADR) as a Markdown file. Fails if the slug already exists — a decision is never overwritten. To close or revise an existing decision use update_adr, which changes its status and records the supersedes/superseded-by link. To say something new that replaces an old decision, write a new ADR naming the old one in its `supersedes:` frontmatter field, then call update_adr on the old one with status=superseded — do NOT invent a '-v2' slug, it leaves the predecessor unlinked. |
-| `list_adrs` | List all Architecture Decision Records sorted by date (newest first). |
-| `update_adr` | Change an existing ADR's status frontmatter; the body is never modified. status must be one of: accepted, deferred, superseded, open. status=superseded additionally requires supersededBy, naming an existing slug (a markdown link is accepted). Use this to close a decision once it is settled, and to mark one as replaced after writing its successor — the replacement is a separate write_adr call, not a new '-v2' slug of this one. |
-| `read_adr` | Read a specific ADR by its slug (e.g. 2026-09-05-koin-suspend-bridge). |
-| `list_open_deferred` | List all deferred backlog entries with OPEN or PARTIAL status. |
-| `search_decisions` | Search the decision records by title, tags or body text, newest first. Returns each match with its status, tags, date and a snippet, so an open or superseded decision is visible without reading the file. Use read_adr for the full text of a hit. An empty result means nothing matched; check the 'available' field — false means there was no corpus to search, not that nothing matched. |
+| Tool                 | What it does                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `write_adr`          | Create a NEW Architecture Decision Record (ADR) as a Markdown file. Fails if the slug already exists — a decision is never overwritten. To close or revise an existing decision use update_adr, which changes its status and records the supersedes/superseded-by link. To say something new that replaces an old decision, write a new ADR naming the old one in its `supersedes:` frontmatter field, then call update_adr on the old one with status=superseded — do NOT invent a '-v2' slug, it leaves the predecessor unlinked. |
+| `list_adrs`          | List all Architecture Decision Records sorted by date (newest first).                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `update_adr`         | Change an existing ADR's status frontmatter; the body is never modified. status must be one of: accepted, deferred, superseded, open. status=superseded additionally requires supersededBy, naming an existing slug (a markdown link is accepted). Use this to close a decision once it is settled, and to mark one as replaced after writing its successor — the replacement is a separate write_adr call, not a new '-v2' slug of this one.                                                                                       |
+| `read_adr`           | Read a specific ADR by its slug (e.g. 2026-09-05-koin-suspend-bridge).                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `list_open_deferred` | List all deferred backlog entries with OPEN or PARTIAL status.                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `search_decisions`   | Search the decision records by title, tags or body text, newest first. Returns each match with its status, tags, date and a snippet, so an open or superseded decision is visible without reading the file. Use read_adr for the full text of a hit. An empty result means nothing matched; check the 'available' field — false means there was no corpus to search, not that nothing matched.                                                                                                                                      |
 
 #### Before you push
 

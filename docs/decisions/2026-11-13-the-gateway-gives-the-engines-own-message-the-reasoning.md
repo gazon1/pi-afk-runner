@@ -35,7 +35,10 @@ between the steps — showed which message the provider was missing. It was not 
 model had written:
 
 ```json
-{ "role": "assistant", "content": "You have read enough. Stop exploring and call the finish_triage tool now." }
+{
+  "role": "assistant",
+  "content": "You have read enough. Stop exploring and call the finish_triage tool now."
+}
 ```
 
 That is the **engine's** message: the feedback the engine injects between the steps of a turn.

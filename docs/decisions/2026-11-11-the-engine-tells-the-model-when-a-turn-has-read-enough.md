@@ -14,8 +14,8 @@ tags: [session, engine, work, tree]
 The run of issue 286 read the repository for twenty steps and changed nothing.
 
 The log of that run shows the turn that implements a change making twenty-one calls — all of them
-reads — and ending with the text *I have not yet made the change — the implement turn ended with
-reading only*. The runner committed the worktree anyway, and the branch it pushed carried one
+reads — and ending with the text _I have not yet made the change — the implement turn ended with
+reading only_. The runner committed the worktree anyway, and the branch it pushed carried one
 file: `.local/state/gh/device-id`, the host's own state, left by a tool the agent ran. The pull
 request held no implementation, and the review failed it.
 
@@ -38,9 +38,9 @@ given one more chance, and a run that holds no work opens no pull request.
 model is told something, and what it is told. The engine adds it to the conversation between the
 steps, the same way the verdict tool's reminder is added — not as a prompt, and not as a new turn.
 
-**The work session's feedback points at the turn's own instruction.** The words are *you have read
+**The work session's feedback points at the turn's own instruction.** The words are _you have read
 enough, do not read any more files, do now what this turn's instruction says: make the change,
-call the tool this turn ends on, or say what you found*. They do not name a job. The work
+call the tool this turn ends on, or say what you found_. They do not name a job. The work
 session's turns are not alike — the brief's turn must change nothing, the implement's turn must
 change the tree — and a nudge that named one of them would push the wrong turn into editing.
 Twelve steps is the number: the triage decides in four calls, the scope in three, and the brief of
@@ -63,7 +63,7 @@ read instead.
 ## Rationale
 
 **Why the engine, and not the prompt.** The prompt is read once, at the start of a turn that lasts
-twenty steps. The engine's step hook is the only place that is *inside* the turn.
+twenty steps. The engine's step hook is the only place that is _inside_ the turn.
 
 **Why the words point at the instruction.** The nudge is one text for six turns. A text that names
 the implement's job tells the brief's turn to change the tree — the one turn whose instruction says
@@ -75,9 +75,9 @@ implement. The second chance costs one turn in a session that already holds the 
 that still changes nothing fails: a second chance that changes nothing is the answer.
 
 **Why the paths and not the commits.** Two questions, two witnesses. The head is the witness for
-the review loop — *did the fix move the head* —
+the review loop — _did the fix move the head_ —
 ([2026-11-01-a-fix-that-changes-nothing-stops-the-loop](2026-11-01-a-fix-that-changes-nothing-stops-the-loop.md)).
-The paths are the witness for the run's work — *is there anything to push*. The run of issue 286
+The paths are the witness for the run's work — _is there anything to push_. The run of issue 286
 made a commit and the commit was the host's own state; the head moved, and the pull request held
 nothing.
 

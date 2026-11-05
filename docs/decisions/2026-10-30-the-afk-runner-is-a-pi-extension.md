@@ -58,17 +58,17 @@ builds the system prompt itself, so the guardrail is a string and there is no fi
 
 **2. The mechanics are installed, not written.**
 
-| Component | Source | Version | Downloads/wk |
-|---|---|---|---|
-| The reviewer (delegation) | `pi-subagents` | v0.84.0 | 329 003 |
-| The executor/advisor flow | `pi-advisor-flow` | v0.14.3 | 18 693 |
-| The multi-step workflow | `@quintinshaw/pi-dynamic-workflows` | v3.15.0 | 16 045 |
-| Live lint and format feedback | `pi-lens` | v4.4.7 | 26 609 |
-| The guard | `@gotgenes/pi-permission-system` | v42.0.0 | 10 648 |
-| Cron, isolated runs, the run store | `agents-cron` | v0.15.0 | 2 152 |
-| The worktree | `@signalridge/pi-worktree` | v1.4.5 | 47 |
-| The pull request and its checks | `@narumitw/pi-github-pr` | v0.49.8 | 93 |
-| The verdict, the commit, the system prompt, the steer queue, the event bus | the Pi package's own `examples/extensions/` | ships with Pi | — |
+| Component                                                                  | Source                                      | Version       | Downloads/wk |
+| -------------------------------------------------------------------------- | ------------------------------------------- | ------------- | ------------ |
+| The reviewer (delegation)                                                  | `pi-subagents`                              | v0.84.0       | 329 003      |
+| The executor/advisor flow                                                  | `pi-advisor-flow`                           | v0.14.3       | 18 693       |
+| The multi-step workflow                                                    | `@quintinshaw/pi-dynamic-workflows`         | v3.15.0       | 16 045       |
+| Live lint and format feedback                                              | `pi-lens`                                   | v4.4.7        | 26 609       |
+| The guard                                                                  | `@gotgenes/pi-permission-system`            | v42.0.0       | 10 648       |
+| Cron, isolated runs, the run store                                         | `agents-cron`                               | v0.15.0       | 2 152        |
+| The worktree                                                               | `@signalridge/pi-worktree`                  | v1.4.5        | 47           |
+| The pull request and its checks                                            | `@narumitw/pi-github-pr`                    | v0.49.8       | 93           |
+| The verdict, the commit, the system prompt, the steer queue, the event bus | the Pi package's own `examples/extensions/` | ships with Pi | —            |
 
 Three signals decide "stable", and they disagree often enough to be worth stating: the number of
 published versions (a long history of shipping), the date of the last release (within days means
@@ -156,7 +156,7 @@ instead.
   source is read before the first run, and the first-party examples need no install at all.
 - **Composition is a claim, not a fact.** Six packages, each with its own idea of what a turn is
   and who owns the session. The spike exists to find out.
-- **No second agent program to fall back to.** An extension runs *inside* Pi, so `mcode exec` is
+- **No second agent program to fall back to.** An extension runs _inside_ Pi, so `mcode exec` is
   not a fallback any more. The provider is configured at deployment.
 - The claim's nonce is a correctness-critical string, and nothing in the ecosystem enforces it.
 

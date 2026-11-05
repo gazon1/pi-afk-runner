@@ -57,14 +57,14 @@ happened. Measured on 2026-11-01: a cut-off fix was swallowed every time, and th
 four reviews of a diff no fix had touched.
 
 The cut-off is the run's own end, not a failed fix: the run is out of time, the work it left stays
-on the branch, and the next run continues it. A fix that *failed* for any other reason is a
+on the branch, and the next run continues it. A fix that _failed_ for any other reason is a
 different stop, and it is settled elsewhere.
 
 ## Rationale
 
 **Why compare the head and not the diff.** The head is one `git rev-parse` before and one after,
 and it answers the question the loop asks: is there a new commit to push? A diff against the base
-would answer a different question — whether the *work* changed — and the work is what was already
+would answer a different question — whether the _work_ changed — and the work is what was already
 reviewed.
 
 **Why stop rather than try again.** The finding was not addressed. A second fix turn with the

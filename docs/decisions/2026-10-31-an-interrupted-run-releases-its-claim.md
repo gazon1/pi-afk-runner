@@ -47,7 +47,7 @@ issue of it.
 
 ## Rationale
 
-**Why not shorten the staleness window.** The window protects a *live* run, possibly on another
+**Why not shorten the staleness window.** The window protects a _live_ run, possibly on another
 host, from being taken over. Making it short enough to recover a killed run in minutes would let a
 slow run lose its issue. The signal is the one case where the runner knows the run is over.
 

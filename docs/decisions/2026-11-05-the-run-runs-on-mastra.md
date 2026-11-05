@@ -40,7 +40,7 @@ rather than in it:
   failure out of the session's messages.
 
 None of this is wrong. It is a lot of machinery that is not the runner's, and the parts
-that *are* the runner's — the deadline, the stop, the failed turn, the record — sit next
+that _are_ the runner's — the deadline, the stop, the failed turn, the record — sit next
 to it and have to be re-implemented in whatever the session is.
 
 Mastra has what the runner was reaching for: an **agent** with tools and a model, a

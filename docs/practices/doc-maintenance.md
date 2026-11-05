@@ -9,6 +9,7 @@ This file defines when and how to write and update documentation for the Singula
 ### When to write an ADR
 
 Write an ADR when:
+
 - A new architectural decision is made (new port, new pattern, new platform)
 - An existing pattern is changed or deprecated
 - A technical approach was tried and rejected (record the rejection reason)
@@ -27,10 +28,10 @@ Write an ADR when:
 ---
 title: "<short descriptive title>"
 date: 2026-MM-DD
-status: accepted  # or: deferred | superseded | open
+status: accepted # or: deferred | superseded | open
 tags: [tag1, tag2]
-supersedes: YYYY-MM-DD-slug  # optional
-superseded-by: YYYY-MM-DD-slug  # optional
+supersedes: YYYY-MM-DD-slug # optional
+superseded-by: YYYY-MM-DD-slug # optional
 ---
 ## Context
 
@@ -49,12 +50,12 @@ superseded-by: YYYY-MM-DD-slug  # optional
 
 Exactly these four. No ad-hoc values.
 
-| Status | Meaning |
-|---|---|
-| `accepted` | Decision is implemented and current |
-| `deferred` | Decision is postponed; revisit by date or trigger in Consequences |
-| `superseded` | Replaced by another ADR; must have `superseded-by` |
-| `open` | Under active discussion or implementation — avoid new `open` ADRs |
+| Status       | Meaning                                                           |
+| ------------ | ----------------------------------------------------------------- |
+| `accepted`   | Decision is implemented and current                               |
+| `deferred`   | Decision is postponed; revisit by date or trigger in Consequences |
+| `superseded` | Replaced by another ADR; must have `superseded-by`                |
+| `open`       | Under active discussion or implementation — avoid new `open` ADRs |
 
 `archived` is a fifth value, used only for files under `docs/decisions/archive/`. It marks
 a document that was never an architectural decision (a retro, audit, findings list or
@@ -81,14 +82,14 @@ triage list) and therefore has no status to resolve.
 
 ### Minimum KDoc requirements by category
 
-| Category | Class-level KDoc | Method-level KDoc |
-|---|---|---|
-| `expect/actual` declarations | Required | Required |
-| Public repository interfaces | Required | Required |
-| Public port interfaces | Required | All methods |
-| ViewModels | Required | No |
-| Use cases with business rules | Required | For public methods |
-| Data class / sealed class state | No | No |
+| Category                        | Class-level KDoc | Method-level KDoc  |
+| ------------------------------- | ---------------- | ------------------ |
+| `expect/actual` declarations    | Required         | Required           |
+| Public repository interfaces    | Required         | Required           |
+| Public port interfaces          | Required         | All methods        |
+| ViewModels                      | Required         | No                 |
+| Use cases with business rules   | Required         | For public methods |
+| Data class / sealed class state | No               | No                 |
 
 ### KDoc style
 
@@ -138,13 +139,13 @@ governs the full process. This section resolves conflicts between OpenSpec and o
 
 ### Resolution rules
 
-| Conflict | Resolution |
-|---|---|
-| ADR vs spec | Both are written: ADR for the architectural decision, spec for the behavioural surface. Never duplicate ADR reasoning into a spec. |
-| `skip_specs` vs `doc-maintenance.md` | `skip_specs` in `openspec/config.yaml` takes precedence for OpenSpec changes. Bug-fix PRs, dependency bumps, doc-only changes, and use cases that follow an existing pattern are exempt from OpenSpec even if they touch behaviour. |
-| OpenSpec `verify` gate vs `just docs-audit` | Both must pass. `openspec validate --all --json --strict` is the verify gate; `just docs-audit` runs the doc hygiene checks. Neither waives the other. |
-| Skill reference vs spec | Specs must not describe Kotlin/Koin/Compose/ViewModel/DAO names. Skills may describe them. The `check-doc-dead-refs.py` detector 8 (`skill-dangling-symbol`) guards skills, not specs. |
-| `design.md` requirement | Required only for cross-cutting changes, new architecture, new data models, or security-sensitive surfaces. Not required for straightforward feature specs. |
+| Conflict                                    | Resolution                                                                                                                                                                                                                          |
+| ------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| ADR vs spec                                 | Both are written: ADR for the architectural decision, spec for the behavioural surface. Never duplicate ADR reasoning into a spec.                                                                                                  |
+| `skip_specs` vs `doc-maintenance.md`        | `skip_specs` in `openspec/config.yaml` takes precedence for OpenSpec changes. Bug-fix PRs, dependency bumps, doc-only changes, and use cases that follow an existing pattern are exempt from OpenSpec even if they touch behaviour. |
+| OpenSpec `verify` gate vs `just docs-audit` | Both must pass. `openspec validate --all --json --strict` is the verify gate; `just docs-audit` runs the doc hygiene checks. Neither waives the other.                                                                              |
+| Skill reference vs spec                     | Specs must not describe Kotlin/Koin/Compose/ViewModel/DAO names. Skills may describe them. The `check-doc-dead-refs.py` detector 8 (`skill-dangling-symbol`) guards skills, not specs.                                              |
+| `design.md` requirement                     | Required only for cross-cutting changes, new architecture, new data models, or security-sensitive surfaces. Not required for straightforward feature specs.                                                                         |
 
 ### When a spec is required vs a skip
 
@@ -177,7 +178,7 @@ grep -r "status: open\|status: deferred" docs/decisions/
 
 ## How to write documentation
 
-Added 2026-10-15. These are the rules for *writing*; the sections above decide *whether*
+Added 2026-10-15. These are the rules for _writing_; the sections above decide _whether_
 to write an ADR and how big a file may get.
 
 **Document only what would surprise an experienced engineer.** If a reader who knows
@@ -206,7 +207,7 @@ should survive refactors. A document answers "how does this work now" and is exp
 be updated in the same commit as the code it describes. Moving a document into a skill
 because it grew a procedure section is the signal it was a document.
 
-**No manual line wrapping** is *not* a rule of this repository. `.editorconfig` sets
+**No manual line wrapping** is _not_ a rule of this repository. `.editorconfig` sets
 `max_line_length` for `kt`/`kts` only, and Markdown here is written at a comfortable
 reading width.
 
@@ -219,36 +220,37 @@ it". `docs/navigation.md`, `docs/PLATFORM-REFERENCE.md` and the generated
 Removed from `.agents/skills/`. Each has an ADR naming it; do not resurrect one without
 reading that ADR first.
 
-| Skill | Why it is gone | ADR |
-|---|---|---|
-| `koin-suspend-bridge` | Koin 4 has no suspend bridge problem left to solve | `2026-09-05-koin-suspend-bridge` |
-| `ai-provider-settings` | provider settings moved into a different module | `2026-09-05-llm-provider-settings` |
-| `secret-migration` | secret storage split into two ports | `2026-09-05-secret-storage-split` |
-| `koog-test-workarounds` | workarounds replaced by the Koog upgrade | `2026-09-05-koog-test-workarounds` |
-| `koog-both-platforms` | superseded by `singularity-todo-kmp-platform-specific` | `2026-09-05-koog-both-platforms` |
-| `vm-koin-scoping` | `viewModelOf` + `koinViewModel` made the guidance wrong | `2026-09-27-vm-koin-scoping-retired` |
-| `koin-di` | split into `koin-dsl` and `di-graph-testing` | `2026-09-27-di-module-aggregator-narrative` |
-| `grill-me` | renamed to `grilling` | `2026-10-01-tech-debt-reconciled` |
-| `grill-with-docs` | renamed to `grilling` | `2026-10-01-tech-debt-reconciled` |
-| `task-snapshot-testing` | Roborazzi never integrated; notes superseded | `2026-09-30-roborazzi-not-built-superseded` |
-| `kiwi-tcm-stand` | infra/kiwi/ was local-only, never committed; skill pointed to non-existent infra | `2026-10-15-kiwi-tcms-stand-retired` |
-| `sync`, `notifications`, `mcp-server`, `kmp-platform-specific` | described code state, not a procedure — now documents | `2026-10-15-reference-skills-become-documents` |
+| Skill                                                          | Why it is gone                                                                   | ADR                                            |
+| -------------------------------------------------------------- | -------------------------------------------------------------------------------- | ---------------------------------------------- |
+| `koin-suspend-bridge`                                          | Koin 4 has no suspend bridge problem left to solve                               | `2026-09-05-koin-suspend-bridge`               |
+| `ai-provider-settings`                                         | provider settings moved into a different module                                  | `2026-09-05-llm-provider-settings`             |
+| `secret-migration`                                             | secret storage split into two ports                                              | `2026-09-05-secret-storage-split`              |
+| `koog-test-workarounds`                                        | workarounds replaced by the Koog upgrade                                         | `2026-09-05-koog-test-workarounds`             |
+| `koog-both-platforms`                                          | superseded by `singularity-todo-kmp-platform-specific`                           | `2026-09-05-koog-both-platforms`               |
+| `vm-koin-scoping`                                              | `viewModelOf` + `koinViewModel` made the guidance wrong                          | `2026-09-27-vm-koin-scoping-retired`           |
+| `koin-di`                                                      | split into `koin-dsl` and `di-graph-testing`                                     | `2026-09-27-di-module-aggregator-narrative`    |
+| `grill-me`                                                     | renamed to `grilling`                                                            | `2026-10-01-tech-debt-reconciled`              |
+| `grill-with-docs`                                              | renamed to `grilling`                                                            | `2026-10-01-tech-debt-reconciled`              |
+| `task-snapshot-testing`                                        | Roborazzi never integrated; notes superseded                                     | `2026-09-30-roborazzi-not-built-superseded`    |
+| `kiwi-tcm-stand`                                               | infra/kiwi/ was local-only, never committed; skill pointed to non-existent infra | `2026-10-15-kiwi-tcms-stand-retired`           |
+| `sync`, `notifications`, `mcp-server`, `kmp-platform-specific` | described code state, not a procedure — now documents                            | `2026-10-15-reference-skills-become-documents` |
 
 ---
 
 ## Top-level docs
 
-| File | Purpose | Who maintains |
-|---|---|---|
-| `AGENTS.md` | Agent cheatsheet (auto-loaded) | All contributors |
-| `ARCHITECTURE.md` | Full design doc | All contributors |
-| `CODING_STANDARDS.md` | Judgement rules a reviewing agent applies (read at review, not at implementation) | All contributors |
-| `README.md` | Project intro + quickstart | All contributors |
-| `docs/architecture/*.md` | How each subsystem works *now* | Whoever changes it |
-| `docs/decisions/DIGEST.md` | Auto-generated orientation layer | `refresh-decisions-digest.sh` |
-| `docs/decisions/DIGEST-full.md` | Auto-generated decision index | `refresh-decisions-digest.sh` |
+| File                            | Purpose                                                                           | Who maintains                 |
+| ------------------------------- | --------------------------------------------------------------------------------- | ----------------------------- |
+| `AGENTS.md`                     | Agent cheatsheet (auto-loaded)                                                    | All contributors              |
+| `ARCHITECTURE.md`               | Full design doc                                                                   | All contributors              |
+| `CODING_STANDARDS.md`           | Judgement rules a reviewing agent applies (read at review, not at implementation) | All contributors              |
+| `README.md`                     | Project intro + quickstart                                                        | All contributors              |
+| `docs/architecture/*.md`        | How each subsystem works _now_                                                    | Whoever changes it            |
+| `docs/decisions/DIGEST.md`      | Auto-generated orientation layer                                                  | `refresh-decisions-digest.sh` |
+| `docs/decisions/DIGEST-full.md` | Auto-generated decision index                                                     | `refresh-decisions-digest.sh` |
 
 Update these when:
+
 - New feature adds a new package or expect/actual declaration
 - DI pattern changes
 - Build commands change

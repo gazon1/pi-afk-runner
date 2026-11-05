@@ -71,8 +71,8 @@ and the tree it did not judge is not back either.
 
 **A leftover is not kept in a commit of its own.** The brief allowed both — a
 commit of its own, or the gates' restore — and the restore is the one that
-holds the promise the brief makes: *a reviewer's leftover never reaches the
-branch*. A commit of its own is still on the branch, and the branch is what
+holds the promise the brief makes: _a reviewer's leftover never reaches the
+branch_. A commit of its own is still on the branch, and the branch is what
 the pull request is made of.
 
 ## Rationale

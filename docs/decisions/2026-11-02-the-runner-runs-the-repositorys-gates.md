@@ -51,7 +51,7 @@ judges; a list written down twice without a test between them is the same drift 
 [2026-11-01-the-self-review-runs-the-gates-again](2026-11-01-the-self-review-runs-the-gates-again.md),
 which said that #28 would make the report unnecessary. A report of gates the runner now runs itself
 is a second rule about the same thing, and two rules about the same thing can only disagree: the
-agent would have to run the gates *and* report them, and the runner would run them a second time.
+agent would have to run the gates _and_ report them, and the runner would run them a second time.
 The report's tree check goes with it — the runner runs the gates on the tree it is about to push,
 so there is no earlier tree for a report to be about. The agent still runs the gates: it has to, to
 fix what they report. The runner's run is the verdict; the agent's run is the feedback.

@@ -56,7 +56,7 @@ answer is that it does not touch them.
 
 **Why the agent may keep a stash of its own.** A stash is scratch: the agent
 may take a measurement with one, or park something for a moment. The rule is
-about where the *work* is. An agent that stashes its work and leaves an empty
+about where the _work_ is. An agent that stashes its work and leaves an empty
 tree has put the work where the run cannot reach it, and the run keeps an
 empty tree.
 

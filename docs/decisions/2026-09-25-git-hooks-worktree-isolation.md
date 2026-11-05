@@ -15,6 +15,7 @@ epic: refactor/test-suite-acceleration
 The project uses git worktrees for feature branches (isolated from main checkout). Hooks must work correctly whether triggered from main checkout or any worktree, without duplicating hook scripts.
 
 ## Decision
+
 ### D1: Hooks live in `.githooks/` (versioned)
 
 Hooks are stored in `.githooks/` (version-controlled) and linked via `git config core.hooksPath`.
@@ -53,11 +54,11 @@ cd "$REPO_ROOT"
 
 ### D4: Hook behavior by context
 
-| Hook | What it does |
-|---|---|
-| `pre-commit` | Compile main + test sources (~22s) — fail-fast on compilation errors |
-| `pre-push` | Full fast test suite + detekt — last gate before push |
-| `post-checkout` | Clean stale `build/classes` dirs after branch switch |
+| Hook            | What it does                                                         |
+| --------------- | -------------------------------------------------------------------- |
+| `pre-commit`    | Compile main + test sources (~22s) — fail-fast on compilation errors |
+| `pre-push`      | Full fast test suite + detekt — last gate before push                |
+| `post-checkout` | Clean stale `build/classes` dirs after branch switch                 |
 
 ### D5: Worktree detection
 

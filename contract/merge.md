@@ -24,13 +24,13 @@ It lands with `gh pr merge --squash --delete-branch`.
 
 A pull request is a candidate when all of these hold:
 
-| This repository guarantees | Where |
-|---|---|
-| its branch is `agent/issue-<N>` — the work pipeline's own | `src/merge.ts` |
-| it is not a draft | `gh pr list --json isDraft` |
-| its **newest** comment that opens with `<!-- agent-review -->` states `**Verdict:** pass` | `src/gh.ts` |
-| it carries `agent-reviewed` | the re-count label |
-| the repository's own `scripts/ci-verdict.py` states a successful run — its `exit` is `0` | the target's tool |
+| This repository guarantees                                                                | Where                       |
+| ----------------------------------------------------------------------------------------- | --------------------------- |
+| its branch is `agent/issue-<N>` — the work pipeline's own                                 | `src/merge.ts`              |
+| it is not a draft                                                                         | `gh pr list --json isDraft` |
+| its **newest** comment that opens with `<!-- agent-review -->` states `**Verdict:** pass` | `src/gh.ts`                 |
+| it carries `agent-reviewed`                                                               | the re-count label          |
+| the repository's own `scripts/ci-verdict.py` states a successful run — its `exit` is `0`  | the target's tool           |
 
 Anything else is named and left alone. A skipped pull request is not a failure.
 

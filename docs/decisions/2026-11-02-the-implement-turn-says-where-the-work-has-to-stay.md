@@ -66,7 +66,7 @@ writes the change is the last point at which the agent can be told where the
 work has to be.
 
 **Why a stash of the agent's own is still allowed.** The rule is about where
-the *work* is. An agent may take a measurement with a stash, or park something
+the _work_ is. An agent may take a measurement with a stash, or park something
 for a moment, as long as the work it is making is in the tree.
 
 **Why the wording is the same rule, not the same sentence.** The two turns

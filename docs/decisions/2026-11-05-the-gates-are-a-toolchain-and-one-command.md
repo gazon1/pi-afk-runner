@@ -41,12 +41,12 @@ check, Knip, the tests and the build — and then `jactionlint --strict-exit`. C
 same script. `npm run check` stays as the fast subset for a change that does not touch
 `.github/`.
 
-**The code we own is formatted by oxfmt.** The scripts pass the code paths —
-`src/**/*.ts`, `test/**/*.ts`, `scripts/**/*.mjs` and the root JSON — so the copies
-(`contract/`, `docs/practices/`, `skills/`, `pipelines/`), every Markdown file and every
-workflow are out of reach. A copy is fixed upstream and copied again; formatting one here
-would make the next copy a conflict. `npm run format` writes, and the gate runs
-`oxfmt --check` over the same paths. `package.json` keeps its own key order
+**The code and the Markdown are formatted by oxfmt.** The scripts pass the code paths —
+`src/**/*.ts`, `test/**/*.ts`, `scripts/**/*.mjs` and the root JSON — and every Markdown
+file in the repository, the copies under `contract/`, `docs/practices/`, `skills/` and
+`pipelines/` included. A copy's content is fixed upstream and copied again; a formatting
+pass over a copy is redone when the copy is taken again. `npm run format` writes, and the
+gate runs `oxfmt --check` over the same paths. `package.json` keeps its own key order
 (`sortPackageJson: false`): the formatter sorts it otherwise, and a manifest reorder is
 noise in every later diff.
 
@@ -95,8 +95,9 @@ merge door needs. A check whose data changes on a schedule is run on a schedule.
   drift the way the step-by-step workflow could.
 - A developer needs `mise install` before the gate can run; `check.sh` says so and exits
   non-zero rather than skipping jactionlint.
-- The copies under `contract/`, `docs/practices/`, `skills/` and `pipelines/` are not
-  formatted or linted here. A finding in one is a finding in the target repository.
+- The copies under `contract/`, `docs/practices/`, `skills/` and `pipelines/` are formatted
+  with the rest of the repository. A content finding in one is a finding in the target
+  repository; a copy taken again will need the formatter run on it again.
 - Knip fails on a new unused export; a real one is deleted, and a false positive is one
   narrow ignore with a reason.
 - A new advisory fails `security.yml` without a commit on our side. That is the point of

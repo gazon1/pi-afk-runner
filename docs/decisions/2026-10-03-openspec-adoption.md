@@ -31,15 +31,15 @@ how to perform an operation (skill).
 
 ### Ownership matrix
 
-| Question | Source of truth |
-|---|---|
-| What should the system **do**? | `openspec/specs/` |
-| What are we **changing now**? | `openspec/changes/` |
-| Why is the architecture this way? | `docs/decisions/*.md` |
-| How do I perform this task? | `.agents/skills/` |
-| Where are we in this epic? | `PROGRESS.md` |
-| What did we learn after work? | ADR Consequences → `DIGEST.md` |
-| What terms do we use? | `docs/CONTEXT.md` |
+| Question                          | Source of truth                |
+| --------------------------------- | ------------------------------ |
+| What should the system **do**?    | `openspec/specs/`              |
+| What are we **changing now**?     | `openspec/changes/`            |
+| Why is the architecture this way? | `docs/decisions/*.md`          |
+| How do I perform this task?       | `.agents/skills/`              |
+| Where are we in this epic?        | `PROGRESS.md`                  |
+| What did we learn after work?     | ADR Consequences → `DIGEST.md` |
+| What terms do we use?             | `docs/CONTEXT.md`              |
 
 ### When to write an OpenSpec change
 
@@ -58,19 +58,19 @@ CI tooling changes.
 
 ### skip_specs reference table
 
-| Change type | OpenSpec spec needed |
-|---|---|
-| New or changed user-visible behavior | ✅ |
-| Changed API contract | ✅ |
-| Changed sync semantics | ✅ |
-| Changed database migration behavior | ✅ |
-| Changed UI behavior | ✅ |
-| Bugfix that changes observed behavior | ✅ |
-| Pure refactor | ❌ `skip_specs: true` |
-| Package move / rename | ❌ `skip_specs: true` |
-| Dead code removal | ❌ `skip_specs: true` |
-| Formatting / CI tooling | ❌ `skip_specs: true` |
-| Trivial bugfix, no behavior change | ordinary PR, no change needed |
+| Change type                           | OpenSpec spec needed          |
+| ------------------------------------- | ----------------------------- |
+| New or changed user-visible behavior  | ✅                            |
+| Changed API contract                  | ✅                            |
+| Changed sync semantics                | ✅                            |
+| Changed database migration behavior   | ✅                            |
+| Changed UI behavior                   | ✅                            |
+| Bugfix that changes observed behavior | ✅                            |
+| Pure refactor                         | ❌ `skip_specs: true`         |
+| Package move / rename                 | ❌ `skip_specs: true`         |
+| Dead code removal                     | ❌ `skip_specs: true`         |
+| Formatting / CI tooling               | ❌ `skip_specs: true`         |
+| Trivial bugfix, no behavior change    | ordinary PR, no change needed |
 
 ### What goes in a spec
 

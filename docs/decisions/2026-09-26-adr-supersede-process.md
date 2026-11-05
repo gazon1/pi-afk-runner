@@ -17,15 +17,18 @@ When a decision changes, the old ADR must be marked superseded. The correct link
 When ADR **B** replaces ADR **A**:
 
 **In ADR A** (the old one being replaced):
+
 ```markdown
 ---
 status: superseded
 superseded-by: 2026-09-26-B-slug
 ---
 ```
+
 Add `superseded-by` only. Keep the full content.
 
 **In ADR B** (the new one):
+
 ```markdown
 ---
 status: accepted
@@ -33,6 +36,7 @@ date: 2026-09-26
 supersedes: 2026-09-25-A-slug
 ---
 ```
+
 Add `supersedes` only. `date` must be newer than A's date.
 
 ### Date ordering invariant
@@ -53,7 +57,7 @@ A single ADR may supersede multiple older ones (many-to-one). Each old ADR gets 
 
 ### Content preservation
 
-The superseded ADR's content is **never removed** — it explains *why* the old decision was made. The reader can follow the chain to understand the evolution.
+The superseded ADR's content is **never removed** — it explains _why_ the old decision was made. The reader can follow the chain to understand the evolution.
 
 ## Consequences
 

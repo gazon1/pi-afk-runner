@@ -21,11 +21,11 @@ A run of the runner against issue 275 of this repository — the runner working 
 repository, with the pack in the work session's tool set — packed this repository. What it
 found:
 
-| What was packed | Files | Tokens |
-|---|---|---|
-| the tree alone (`structureOnly`) | 175 | 2 231 |
-| `src/mastra` | 8 | 8 345 |
-| `src` | — | refused: 124 760, and the context holds 60 000 |
+| What was packed                  | Files | Tokens                                         |
+| -------------------------------- | ----- | ---------------------------------------------- |
+| the tree alone (`structureOnly`) | 175   | 2 231                                          |
+| `src/mastra`                     | 8     | 8 345                                          |
+| `src`                            | —     | refused: 124 760, and the context holds 60 000 |
 
 So the pack is good for **an area of the repository, not the repository**: a directory is a
 document the model reads, and this repository's `src` is twice what the context holds. It

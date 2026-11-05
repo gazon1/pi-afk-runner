@@ -48,15 +48,15 @@ stop, the cut-off, the failed turn, the record — they stay in `src/session.ts`
 **The graph is a module of components.** `src/workflow.ts` is gone; `src/workflow/` holds
 one idea per file:
 
-| Module | What it is |
-|---|---|
-| `states.ts` | the states a session is made of |
-| `tokens.ts` | the tokens the branch is keyed by |
-| `errors.ts` | the graph's own errors and their codes |
-| `steps.ts` | the step that runs one state, and the failure it carries |
-| `linear.ts` | the states, in order, in one session |
-| `work-session.ts` | the work session's script, composed of workflows |
-| `review-gate.ts` | the review loop |
+| Module            | What it is                                               |
+| ----------------- | -------------------------------------------------------- |
+| `states.ts`       | the states a session is made of                          |
+| `tokens.ts`       | the tokens the branch is keyed by                        |
+| `errors.ts`       | the graph's own errors and their codes                   |
+| `steps.ts`        | the step that runs one state, and the failure it carries |
+| `linear.ts`       | the states, in order, in one session                     |
+| `work-session.ts` | the work session's script, composed of workflows         |
+| `review-gate.ts`  | the review loop                                          |
 
 `src/workflow/index.ts` is the module's face, and the runner imports that.
 

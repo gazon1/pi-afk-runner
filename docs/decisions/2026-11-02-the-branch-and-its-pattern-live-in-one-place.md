@@ -53,7 +53,7 @@ which is the thing this change exists to remove. The optional `refs/heads/` is a
 that lets both callers ask the same question of the same object.
 
 **Why the pattern lives beside the name and not in a module of its own.** The name is what the
-pattern recognises. A file that holds only a pattern has to be asked what it is a pattern *of*;
+pattern recognises. A file that holds only a pattern has to be asked what it is a pattern _of_;
 the file that names the branch says so.
 
 **Why the merge pipeline re-exports the pattern.** Its contract names the branch, and the code

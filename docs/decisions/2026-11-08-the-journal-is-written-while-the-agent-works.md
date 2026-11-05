@@ -58,7 +58,7 @@ written as its own line (`↳ Refused: …`). A call that was refused is over, a
 to see that it is over — a refused call that is silent looks exactly like a call that runs.
 
 **The record file stays what it is.** `build/diagnostics/issue-<n>/<runId>.md` holds the
-*steps* of the run and is written at the boundaries; the journal is the stream of the run. The
+_steps_ of the run and is written at the boundaries; the journal is the stream of the run. The
 live lines make the stream honest — they do not make the record file a log.
 
 **The journal is also a file.** `build/diagnostics/issue-<n>/<runId>.log` is written while the run

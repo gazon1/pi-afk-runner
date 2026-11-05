@@ -21,7 +21,7 @@ cross-host case. This decision is about the layer below it, on one host.
 
 The obvious implementation — a lock file, created with `O_EXCL` and deleted on exit — has two
 failures that matter here. A runner that is killed leaves the file behind, and the next runner
-blocks on it for ever; and a lock that is only a *marker* is not a lock at all, because the label
+blocks on it for ever; and a lock that is only a _marker_ is not a lock at all, because the label
 cannot be one either: adding a label is idempotent, so two runners would both "win" it.
 
 The host is a Linux workstation, and `flock(1)` is there.

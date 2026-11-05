@@ -14,7 +14,7 @@ repeat it.
 
 ## The review reads the change, not the diff
 
-A diff shows what changed. A review has to answer what the change *does* — and
+A diff shows what changed. A review has to answer what the change _does_ — and
 those are different questions. The three cases that cost a reviewer the most:
 
 1. **A change that adds a surface and wires nothing to it.** The code compiles,
@@ -54,7 +54,7 @@ A reviewing agent holds this line even where the test cannot:
   test moved to the proposing side. A set that only grows is a work queue
   nobody is working through.
 - **The assistant's words must match what happened.** A tool that proposed a
-  change says the change was *proposed*. It does not say the task was changed,
+  change says the change was _proposed_. It does not say the task was changed,
   and it does not say it was saved. The user has not agreed to anything yet.
 
 ---
@@ -81,7 +81,7 @@ A reviewing agent applies the same standard to the diff it is reading:
   that reads the classes, the suites or the modules out of the source and then
   checks the ones it found has proved nothing about the ones it did not find:
   the naming convention it reads, the sub-tag it ignores, the module it has no
-  mapping for. The gate's set is compared with an *independent* enumeration —
+  mapping for. The gate's set is compared with an _independent_ enumeration —
   a second way of listing the same thing — and the comparison is part of the
   gate, not a note in the pull request. The slow-class rule is the shape of
   this: `unmapped_slow_classes` walks the test roots itself and names the
@@ -107,7 +107,7 @@ tell it apart from a number that was still true.
 - **A decision record is history; a living document is the present.** An ADR
   states what was decided at a moment, and its numbers are the numbers of that
   moment — they are not a defect when the tree moves on. A document that
-  describes the tree *now* — `AGENTS.md`, `docs/architecture/`, a catalogue —
+  describes the tree _now_ — `AGENTS.md`, `docs/architecture/`, a catalogue —
   states what is true now, and a number in it is a claim that has to be checked.
   A reviewer reads a changed number in an ADR as a record and in a living
   document as a claim.
@@ -204,7 +204,7 @@ For a diff that adds a screen or a card:
   message.
 - **A shared component that renders selectable text makes its callers
   selectable too.** A screen that renders the shared empty state is
-  `excluded` *for that text*, and the screen's own text decides the rest.
+  `excluded` _for that text_, and the screen's own text decides the rest.
 
 When a file changes its text, its row in that table changes with it. The table
 is a claim about the code, and the gate compares the two.
@@ -235,7 +235,7 @@ cross-refs, the blocking edges, and the links its description implies; a note
 is the row, its folder, its attachments, its outgoing links.
 
 A path that applies a document writes every part of it. A path that applies
-*part* of a document says which part, and leaves the rest alone.
+_part_ of a document says which part, and leaves the rest alone.
 
 And a part the document does not carry is not written at all. The wire carries
 the fields the sending device knew about, so the absence of a part is the
@@ -331,7 +331,7 @@ memory: a field added to a model is forgotten in the list, and the field is
 sent and dropped by the server, and nobody says so.
 
 So the list is derived — from the model's serial descriptor, which is what the
-encoder writes from — and what is written by hand is the *exception*: the four
+encoder writes from — and what is written by hand is the _exception_: the four
 fields the server owns.
 
 A reviewing agent watches for:
@@ -531,11 +531,11 @@ a sentence elsewhere became false. That is the review's work.
 
 ## A rule that replaces a rule names what it replaced
 
-The search had a rule: *a record that carries the word in its title is a
-better answer than one that carries it in its body.* A branch replaced it with
+The search had a rule: _a record that carries the word in its title is a
+better answer than one that carries it in its body._ A branch replaced it with
 a predicate — `SearchMode.matches(record, term)`, which asks about the
 record's whole surface list. The replacement was correct in itself, and it
-took the ranking with it: the ranking asks about *one* surface, and the new
+took the ranking with it: the ranking asks about _one_ surface, and the new
 predicate asks about all of them.
 
 Nothing failed. The corpus case for the ranking supplies its own predicate, so
@@ -568,22 +568,22 @@ not one nobody had noticed for a year. That judgement is the review's work.
 These are checked; a reviewer verifies the check was run rather than
 re-deriving them.
 
-| Rule | Checked by |
-|---|---|
-| Fakes, not mocks; mocks only for outgoing calls | `AGENTS.md`, review |
-| A document writes only the parts it carries; a part it does not carry is not written | `TaskDocumentPartsTest`, `TaskDocumentWriteTest`, `ProjectDocumentWriteTest`, review |
-| A push carries what the database holds; the emptiness of a read is not a claim | `TaskPushClaimTest`, `TaskDaoArchiveRepositoryImplTest`, review |
-| The wire's field list is the model's own list; only the exceptions are written | `SyncContractIsTheSourceOfTruthTest`, `SyncFieldAllowlistExportTest`, `scripts/check-sync-allowlist-regenerated.py` |
-| Every test class carries `@Tag` (`fast`, or `slow` when it crosses a process boundary) | `TestTagCoverageTest` |
-| No `delay()` in tests — virtual time and `awaitState` | detekt `NoRealDelayInTest` (a delay over 500 ms) + review |
-| ViewModels take an injected `AutoCloseableCoroutineScope`; never `viewModelScope` | detekt + review |
-| No pass-through use cases | `PassThroughUseCase` detekt rule |
-| No `stateIn` in a ViewModel | detekt `NoStateIn` + review |
-| No `runBlocking` in production code | detekt + review |
-| `catch (CancellationException)` before a general `catch` | detekt |
-| A swallowed exception keeps its cause | detekt `SwallowedException` |
-| Room schema changes bump `SCHEMA_VERSION` and add a migration | `scripts/check-room-schema-integrity.py` |
-| New ports bind in both `PlatformModule.*.kt` | `scripts/check-platform-reference-ports.py` |
+| Rule                                                                                   | Checked by                                                                                                          |
+| -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| Fakes, not mocks; mocks only for outgoing calls                                        | `AGENTS.md`, review                                                                                                 |
+| A document writes only the parts it carries; a part it does not carry is not written   | `TaskDocumentPartsTest`, `TaskDocumentWriteTest`, `ProjectDocumentWriteTest`, review                                |
+| A push carries what the database holds; the emptiness of a read is not a claim         | `TaskPushClaimTest`, `TaskDaoArchiveRepositoryImplTest`, review                                                     |
+| The wire's field list is the model's own list; only the exceptions are written         | `SyncContractIsTheSourceOfTruthTest`, `SyncFieldAllowlistExportTest`, `scripts/check-sync-allowlist-regenerated.py` |
+| Every test class carries `@Tag` (`fast`, or `slow` when it crosses a process boundary) | `TestTagCoverageTest`                                                                                               |
+| No `delay()` in tests — virtual time and `awaitState`                                  | detekt `NoRealDelayInTest` (a delay over 500 ms) + review                                                           |
+| ViewModels take an injected `AutoCloseableCoroutineScope`; never `viewModelScope`      | detekt + review                                                                                                     |
+| No pass-through use cases                                                              | `PassThroughUseCase` detekt rule                                                                                    |
+| No `stateIn` in a ViewModel                                                            | detekt `NoStateIn` + review                                                                                         |
+| No `runBlocking` in production code                                                    | detekt + review                                                                                                     |
+| `catch (CancellationException)` before a general `catch`                               | detekt                                                                                                              |
+| A swallowed exception keeps its cause                                                  | detekt `SwallowedException`                                                                                         |
+| Room schema changes bump `SCHEMA_VERSION` and add a migration                          | `scripts/check-room-schema-integrity.py`                                                                            |
+| New ports bind in both `PlatformModule.*.kt`                                           | `scripts/check-platform-reference-ports.py`                                                                         |
 
 ---
 

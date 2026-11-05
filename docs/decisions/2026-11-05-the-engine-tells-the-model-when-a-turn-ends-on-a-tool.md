@@ -34,7 +34,7 @@ outstanding, and the verdict tool was never among them.
 
 **The model was not asked to end.** The review prompt says the verdict tool is the last
 action, and the tool's own description says the same — but a prompt is what the model reads
-*before* it starts reading. Forty steps later, the model has read the diff, the code, the
+_before_ it starts reading. Forty steps later, the model has read the diff, the code, the
 tests and a good deal of the repository, and the sentence that told it to stop is a sentence
 from a long way back.
 
@@ -53,8 +53,8 @@ nothing has no final tool, and is left alone.
 **The engine says it between the steps.** Mastra's `onIterationComplete` runs after every
 iteration of a turn, with the calls that iteration made. After
 `FINAL_TOOL_AFTER_STEPS` (eight) steps, the engine adds one message to the conversation:
-*you have read enough, call the tool now, with the verdict you reached and the findings you
-found*. The message goes to the model as part of its next step — it is not a prompt, and it
+_you have read enough, call the tool now, with the verdict you reached and the findings you
+found_. The message goes to the model as part of its next step — it is not a prompt, and it
 is not a new turn.
 
 **The engine says it once.** The engine remembers that the final tool was called: a turn that
@@ -68,7 +68,7 @@ default ends such a turn with nothing decided.
 ## Rationale
 
 **Why the engine, and not the prompt.** The prompt is read once, at the start of a turn that
-lasts forty steps. The engine's step hook is the only place that is *inside* the turn. A
+lasts forty steps. The engine's step hook is the only place that is _inside_ the turn. A
 reminder that arrives while the model is still exploring is a reminder the model acts on; a
 reminder that was sent forty steps ago is a rule it has already moved past.
 
@@ -77,7 +77,7 @@ eighth step called the verdict tool on the ninth, having read the diff, the code
 tests. The number is the engine's, and the runner does not name it — the runner names the
 tool, and the engine knows how to push a model.
 
-**Why the tool is named.** The reminder says *stop exploring*; the model that does not know
+**Why the tool is named.** The reminder says _stop exploring_; the model that does not know
 which call ends the turn has to guess it. Naming the tool makes the reminder an instruction
 rather than a hint.
 

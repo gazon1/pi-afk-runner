@@ -36,7 +36,7 @@ were a second judge of the same tree, and the second judge was the slow one.
 **A run gates nothing, and nothing in it builds.** The tree the agent leaves is the tree that is
 pushed, and the repository's own CI is what judges it.
 
-The machinery is not gone: a run that is *told* to run gates still runs them, in the worktree,
+The machinery is not gone: a run that is _told_ to run gates still runs them, in the worktree,
 with the repository's own PATH — and the merge door keeps the full `./check.sh`, which is the
 contract of the merge mode.
 
@@ -73,7 +73,7 @@ full `./check.sh` — that is the contract of the merge mode.
 
 **Why the gates went off by default.** A gate is a second judge of the tree, and the pull
 request already has one: the repository's own CI. The work pipeline's gate bought a second
-opinion of the same diff at the price of minutes per run, and it bought it on the tree *before*
+opinion of the same diff at the price of minutes per run, and it bought it on the tree _before_
 the review — so the review, which is the thing that reads the diff, started later.
 
 **Why the machinery stayed.** A run that is told to run gates still runs them, in the worktree,
