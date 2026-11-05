@@ -112,11 +112,22 @@ export class CommandCodeGateway extends MastraModelGateway {
 
   async getApiKey(_modelId: string): Promise<string> {
     const key = authKey();
-    if (!key) throw new Error(`no Command Code credential found — set ${COMMANDCODE_API_KEY} or run cmd login`);
+    if (!key)
+      throw new Error(
+        `no Command Code credential found — set ${COMMANDCODE_API_KEY} or run cmd login`,
+      );
     return key;
   }
 
-  async resolveLanguageModel({ modelId, providerId, apiKey }: { modelId: string; providerId: string; apiKey: string }): Promise<GatewayLanguageModel> {
+  async resolveLanguageModel({
+    modelId,
+    providerId,
+    apiKey,
+  }: {
+    modelId: string;
+    providerId: string;
+    apiKey: string;
+  }): Promise<GatewayLanguageModel> {
     const fetchImpl = async (input: unknown, init?: RequestInit): Promise<Response> => {
       // The reasoning of every assistant message goes back with it.
       const initAny = init as { body?: unknown } | undefined;

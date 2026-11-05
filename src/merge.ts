@@ -194,16 +194,13 @@ export function issueNumberFromBranch(branch: string): number | null {
  * gates are the review's verdict and the CI's own exit — nothing here guesses
  * that a pull request is good because it is open.
  */
-export async function mergeReviewedPullRequests(
-  options: MergeOptions,
-): Promise<MergeResult> {
+export async function mergeReviewedPullRequests(options: MergeOptions): Promise<MergeResult> {
   const runId = options.runId ?? newRunId(options.now);
   // The sweep has one wall-clock, the same rule a work run follows: the
   // sessions, the gate and the review take what is left when their turn comes,
   // so a sweep can no longer outlive its budget by a gate-hour per pull request.
   const startedAt = Date.now();
-  const remainingMs = (): number =>
-    Math.max(0, options.deadlineMs - (Date.now() - startedAt));
+  const remainingMs = (): number => Math.max(0, options.deadlineMs - (Date.now() - startedAt));
 
   /**
    * The journal of the sweep: the lines the sweep writes, beside the
@@ -230,11 +227,7 @@ export async function mergeReviewedPullRequests(
     session: journalFactory(options.session, journalFile),
   };
 
-  const candidates = await readOpenPullRequests(
-    options.repo,
-    options.baseBranch,
-    options.gh,
-  );
+  const candidates = await readOpenPullRequests(options.repo, options.baseBranch, options.gh);
 
   const merged: number[] = [];
   const skipped: { pullRequest: number; reason: string }[] = [];
@@ -434,9 +427,7 @@ async function mergeOne(
           // breakage. The index is the test: unmerged entries mean a conflict
           // is waiting to be resolved, and a check that cannot be made is not
           // a conflict either.
-          const conflicted = await hasUnmergedEntries(options.git, worktreePath).catch(
-            () => false,
-          );
+          const conflicted = await hasUnmergedEntries(options.git, worktreePath).catch(() => false);
           if (!conflicted) {
             // Nothing to resolve: the merge's own error is the reason, and it
             // is the reason the step fails with.
@@ -621,21 +612,23 @@ async function verifyGate(
       throw new Error("the run's deadline left no budget for the gate");
     }
     await mkdir(dirname(outputFile), { recursive: true }).catch(() => {});
-    await options.run({
-      command: invocation.command,
-      args: [...invocation.args],
-      cwd: worktreePath,
-      timeoutMs: Math.min(options.gateTimeoutMs ?? GATE_TIMEOUT_MS, remaining),
-      maxOutputBytes: GATE_OUTPUT_LIMIT_BYTES,
-      killGroup: true,
-      outputFile,
-    }).catch(async (failure) => {
-      const failed = await gateFailure(GATE_SCRIPT, invocation, failure, outputFile);
-      if (failed.outputFile === undefined) {
-        await rm(outputFile, { force: true }).catch(() => {});
-      }
-      throw failed;
-    });
+    await options
+      .run({
+        command: invocation.command,
+        args: [...invocation.args],
+        cwd: worktreePath,
+        timeoutMs: Math.min(options.gateTimeoutMs ?? GATE_TIMEOUT_MS, remaining),
+        maxOutputBytes: GATE_OUTPUT_LIMIT_BYTES,
+        killGroup: true,
+        outputFile,
+      })
+      .catch(async (failure) => {
+        const failed = await gateFailure(GATE_SCRIPT, invocation, failure, outputFile);
+        if (failed.outputFile === undefined) {
+          await rm(outputFile, { force: true }).catch(() => {});
+        }
+        throw failed;
+      });
   };
   try {
     await run();
@@ -751,7 +744,9 @@ async function resolveWithAgent(
       throw failure;
     });
   if (marked.trim() !== "") {
-    throw new Error(`conflict marker "<<<<<<<" remains in ${marked.trim().split("\n")[0] ?? "the tree"}`);
+    throw new Error(
+      `conflict marker "<<<<<<<" remains in ${marked.trim().split("\n")[0] ?? "the tree"}`,
+    );
   }
 
   // The resolution is the work; what the session left that the resolution

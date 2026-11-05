@@ -38,10 +38,7 @@ export async function withHardStop<T>(
   const killGraceMs = options.killGraceMs ?? KILL_GRACE_MS;
   let hardStop: NodeJS.Timeout | undefined;
   const stop = new Promise<never>((_resolve, reject) => {
-    hardStop = setTimeout(
-      () => reject(options.timeoutError()),
-      options.timeoutMs + killGraceMs,
-    );
+    hardStop = setTimeout(() => reject(options.timeoutError()), options.timeoutMs + killGraceMs);
     hardStop.unref();
   });
   try {

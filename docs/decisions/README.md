@@ -15,6 +15,7 @@ for the rule that the copies follow.
 
 | Decision | What it settles |
 |---|---|
+| `2026-11-05-the-gates-are-a-toolchain-and-one-command.md` | the gates are a toolchain and one command: mise pins Node and the binaries, `./check.sh` runs typecheck, lint, format, Knip, test, build and jactionlint, CI runs the same script, OSV-Scanner and Betterleaks run on pull requests and weekly, and oxfmt and jactionlint leave the copies alone |
 | `2026-11-04-a-failed-review-is-worked-again-on-its-branch.md` | a review that said fail is worked again, on its own branch: the verdict is the seventh observable, `Failed` is asked before the claim, `rework` takes the claim over, keeps the branch and goes before the rest of the queue, and the failed review is the rework session's task |
 | `2026-11-04-the-runners-commits-and-pushes-run-no-hook.md` | the runner's own commits and pushes run no hook: `commitAll` commits and `pushRef` pushes with `--no-verify`, so the target's pre-commit lint-and-compile and pre-push detekt cannot fail the run that was about to push — nor the commit that keeps a failed run's work — and the pull request's CI judges the tree; the `--no-verify` flag and the small-change rule go with them |
 | `2026-11-15-the-batch-travels-with-the-change.md` | the batch travels with the change: the batched issues' briefs reach the scope turn and the plan, read once, and they travel to the review and the fix, the record names the batch, and the batched issues are linked to the run that worked them |

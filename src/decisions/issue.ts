@@ -39,8 +39,7 @@ export function createIssueDecisionTool(holder: { value?: IssueDecision }) {
         description: "work to do the brief; skip to close the issue with the reason",
       }),
       reason: Type.String({
-        description:
-          "Why — one sentence a human can read. Required when the decision is skip.",
+        description: "Why — one sentence a human can read. Required when the decision is skip.",
       }),
     }),
     async execute(_toolCallId, params) {
@@ -50,9 +49,7 @@ export function createIssueDecisionTool(holder: { value?: IssueDecision }) {
       };
       holder.value = decision;
       return {
-        content: [
-          { type: "text", text: `Issue decision recorded: ${decision.decision}` },
-        ],
+        content: [{ type: "text", text: `Issue decision recorded: ${decision.decision}` }],
         details: decision,
       };
     },

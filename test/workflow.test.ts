@@ -123,9 +123,7 @@ describe("the session's workflow", () => {
           : { state: "ok" },
     });
 
-    await expect(run).rejects.toThrow(
-      "the Implement phase failed: the model's turn failed",
-    );
+    await expect(run).rejects.toThrow("the Implement phase failed: the model's turn failed");
   });
 
   it("does not swallow a turn that threw", async () => {
@@ -217,10 +215,7 @@ describe("the session's workflow", () => {
       "Next",
     ]);
     // The two actions run no prompt: they are the runner's own work.
-    expect(WORKFLOW_ACTIONS.map((action) => action.name)).toEqual([
-      "close-skip",
-      "split",
-    ]);
+    expect(WORKFLOW_ACTIONS.map((action) => action.name)).toEqual(["close-skip", "split"]);
   });
 
   it("fails the run when a turn throws", async () => {
@@ -422,9 +417,7 @@ describe("the batched issues' briefs", () => {
     const text = await stateText(brief as WorkflowState);
     expect(text).toContain("the batched issue");
     // The instruction is the last thing the model reads.
-    expect(text.indexOf("the batched issue")).toBeLessThan(
-      text.indexOf("the brief instruction"),
-    );
+    expect(text.indexOf("the batched issue")).toBeLessThan(text.indexOf("the brief instruction"));
   });
 
   it("reach the scope turn too: the volume of the whole change is judged", async () => {
@@ -436,9 +429,7 @@ describe("the batched issues' briefs", () => {
     const scope = nodes.find((n) => n.name === "scope");
     const text = await stateText(scope as WorkflowState);
     expect(text).toContain("the batched issue");
-    expect(text.indexOf("the batched issue")).toBeLessThan(
-      text.indexOf("the scope instruction"),
-    );
+    expect(text.indexOf("the batched issue")).toBeLessThan(text.indexOf("the scope instruction"));
   });
 
   it("are not there when nothing was batched", async () => {
@@ -486,10 +477,7 @@ describe("the work session's branch", () => {
 
     // The four work turns never ran: the branch is the engine's own flow.
     expect(ran).toEqual(["triage", "close-skip"]);
-    expect(result.completed.map((state) => state.name)).toEqual([
-      "triage",
-      "close-skip",
-    ]);
+    expect(result.completed.map((state) => state.name)).toEqual(["triage", "close-skip"]);
   });
 
   it("splits and stops when the scope says split", async () => {
@@ -515,14 +503,7 @@ describe("the work session's branch", () => {
       },
     });
 
-    expect(ran).toEqual([
-      "triage",
-      "scope",
-      "brief",
-      "implement",
-      "verify",
-      "next",
-    ]);
+    expect(ran).toEqual(["triage", "scope", "brief", "implement", "verify", "next"]);
     expect(result.completed).toHaveLength(6);
   });
 
@@ -559,11 +540,7 @@ describe("the work session's branch", () => {
     });
 
     expect(result.aborted).toBe(true);
-    expect(result.completed.map((state) => state.name)).toEqual([
-      "triage",
-      "scope",
-      "brief",
-    ]);
+    expect(result.completed.map((state) => state.name)).toEqual(["triage", "scope", "brief"]);
     // The turns after the cut-off never ran.
     expect(ran).toEqual(["triage", "scope", "brief", "implement"]);
   });
@@ -702,7 +679,10 @@ describe("the review loop", () => {
       },
     });
 
-    expect(result.stopReason).toEqual({ kind: "cutOff", message: "the review's session hit its 30-minute deadline" });
+    expect(result.stopReason).toEqual({
+      kind: "cutOff",
+      message: "the review's session hit its 30-minute deadline",
+    });
     expect(result.reviews).toBe(1);
     // The same diff was not reviewed again, and no fix was bought for it.
     expect(calls).toEqual(["review"]);
@@ -724,7 +704,10 @@ describe("the review loop", () => {
       },
     });
 
-    expect(result.stopReason).toEqual({ kind: "cutOff", message: "the fix's session was cut off before its last turn" });
+    expect(result.stopReason).toEqual({
+      kind: "cutOff",
+      message: "the fix's session was cut off before its last turn",
+    });
     // A fix that was cut off is not a fix that changed nothing.
     expect(calls).toEqual(["review", "fix"]);
   });

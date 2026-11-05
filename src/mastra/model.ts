@@ -8,25 +8,16 @@
 
 import type { GatewayLanguageModel } from "@mastra/core/llm";
 
-import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
-
 import type { ModelCatalogue } from "../pool.js";
 
 import {
-  MINIMAX_API_KEY,
   MINIMAX_DEFAULT_MODEL,
   MINIMAX_MODELS,
   MINIMAX_PROVIDER,
   MiniMaxGateway,
 } from "./gateways/minimax.js";
 
-import {
-  COMMANDCODE_API_KEY,
-  COMMANDCODE_PROVIDER,
-  CommandCodeGateway,
-} from "./gateways/commandcode.js";
+import { COMMANDCODE_PROVIDER, CommandCodeGateway } from "./gateways/commandcode.js";
 
 /** The model a run uses when the command names none. */
 export const DEFAULT_MASTRA_MODEL = `${MINIMAX_PROVIDER}/${MINIMAX_DEFAULT_MODEL}`;
@@ -98,22 +89,4 @@ export function mastraCatalogue(): ModelCatalogue {
       return false;
     },
   };
-}
-
-/** Whether the host has the credential the provider needs. */
-export function hasMastraKey(): boolean {
-  const key = process.env[MINIMAX_API_KEY] ?? process.env[COMMANDCODE_API_KEY];
-  if (key !== undefined && key !== "") {
-    return true;
-  }
-  try {
-    const raw = readFileSync(join(homedir(), ".commandcode", "auth.json"), "utf8");
-    const parsed = JSON.parse(raw) as { apiKey?: unknown };
-    if (typeof parsed.apiKey === "string" && parsed.apiKey !== "") {
-      return true;
-    }
-  } catch {
-    // no auth file
-  }
-  return false;
 }

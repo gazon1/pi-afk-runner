@@ -70,7 +70,9 @@ export function createRelatedDecisionTool(
       const decision: RelatedDecision = { batch };
       holder.value = decision;
       return {
-        content: [{ type: "text", text: `Related decision recorded: ${batch.join(", ") || "solo"}` }],
+        content: [
+          { type: "text", text: `Related decision recorded: ${batch.join(", ") || "solo"}` },
+        ],
         details: decision,
       };
     },

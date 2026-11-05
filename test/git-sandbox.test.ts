@@ -70,10 +70,12 @@ describe("the fixture repository", () => {
     fixture = await createFixtureRepository();
     // The assertion is the point: it says so when the fixture is not its own.
     await expect(assertOwnRepository(fixture.repo, fixture.env)).resolves.toBeUndefined();
-    await expect(gitOutput(["rev-parse", "--show-toplevel"], {
-      cwd: fixture.repo,
-      env: fixture.env,
-    })).resolves.toBe(fixture.repo);
+    await expect(
+      gitOutput(["rev-parse", "--show-toplevel"], {
+        cwd: fixture.repo,
+        env: fixture.env,
+      }),
+    ).resolves.toBe(fixture.repo);
   });
 
   it("has a commit, made without any git configuration", async () => {
@@ -89,7 +91,9 @@ describe("the fixture repository", () => {
       cwd: fixture.repo,
       env: fixture.env,
     });
-    expect(author).toBe(`${SANDBOX_IDENTITY.GIT_AUTHOR_NAME} <${SANDBOX_IDENTITY.GIT_AUTHOR_EMAIL}>`);
+    expect(author).toBe(
+      `${SANDBOX_IDENTITY.GIT_AUTHOR_NAME} <${SANDBOX_IDENTITY.GIT_AUTHOR_EMAIL}>`,
+    );
   });
 
   it("cannot reach a repository above itself", async () => {

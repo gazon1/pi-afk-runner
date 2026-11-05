@@ -63,11 +63,7 @@ import {
   type Scheduler,
   type SessionFactory,
 } from "./session.js";
-import {
-  VERDICT_TOOL_NAME,
-  createVerdictTool,
-  type ReviewVerdict,
-} from "./decisions/index.js";
+import { VERDICT_TOOL_NAME, createVerdictTool, type ReviewVerdict } from "./decisions/index.js";
 import { createPackTool, type PackDetails } from "./packing.js";
 import {
   CommandFailed,
@@ -113,7 +109,12 @@ import {
   type IssueSummary,
   type PullRequestSummary,
 } from "./gh.js";
-import { FixChangedNothing, ReviewStatedNoVerdict, cutOffError, runReviewGate } from "./workflow/index.js";
+import {
+  FixChangedNothing,
+  ReviewStatedNoVerdict,
+  cutOffError,
+  runReviewGate,
+} from "./workflow/index.js";
 import type { Lock } from "./lock.js";
 
 /** The states that can be derived from the observables. */
@@ -126,18 +127,6 @@ export type DerivedState =
   | "Failed"
   | "Reviewed"
   | "Counted";
-
-/**
- * The states that belong to a running process and are never derived.
- *
- * `Isolated` — the worktree exists and the setup script has run.
- * `Working` — the agent session is running.
- * `Ready` — the agent finished and the worktree holds commits.
- */
-export type LiveState = "Isolated" | "Working" | "Ready";
-
-/** Every state the runner knows an issue to be in. */
-export type RunnerState = DerivedState | LiveState;
 
 /** What can be seen of one issue. */
 export interface Observables {
@@ -222,9 +211,7 @@ export function deriveState(observables: Observables): DerivedState {
  * working it anyway would put two runs on one issue — the exact thing the
  * claim exists to prevent.
  */
-export function selectIssue(
-  queue: readonly IssueSummary[],
-): IssueSummary | undefined {
+export function selectIssue(queue: readonly IssueSummary[]): IssueSummary | undefined {
   return queue.find((issue) => !issue.labels.includes(CLAIM_LABEL));
 }
 
@@ -261,11 +248,7 @@ export function observePullRequest(pullRequest: PullRequestSummary | null): {
  * runner, too long and a killed run keeps the issue out of the queue for
  * hours. The caller supplies it.
  */
-export function isStale(
-  updatedAt: string,
-  now: Date,
-  staleAfterMs: number,
-): boolean {
+export function isStale(updatedAt: string, now: Date, staleAfterMs: number): boolean {
   const updated = Date.parse(updatedAt);
   if (Number.isNaN(updated)) {
     // An issue whose last-update time cannot be read is not treated as stale:
@@ -445,11 +428,6 @@ export function setupPath(output: string): string | undefined {
   return `${venv[1]}/bin:${process.env["PATH"] ?? ""}`;
 }
 
-/** Alias kept for callers that name the preparation by its effect. */
-export const prepareWorktreeScript = prepareWorktreeSetup;
-export const runWorktreeSetup = prepareWorktreeSetup;
-export const setupWorktree = prepareWorktreeSetup;
-
 /** The tool that computes a change's contract digest — the repository's own. */
 export const DIGEST_TOOL = "scripts/check-review-verdicts.py";
 
@@ -486,10 +464,7 @@ export async function computeDocumentsDigest(
  * The importer creates the records that are missing and leaves the ones that
  * exist alone, so running it is how a change gets its entry.
  */
-export async function ensureRegistryEntry(
-  run: CommandRunner,
-  cwd: string,
-): Promise<void> {
+export async function ensureRegistryEntry(run: CommandRunner, cwd: string): Promise<void> {
   await run({ command: "python3", args: [REGISTRY_TOOL], cwd });
 }
 
@@ -1064,9 +1039,7 @@ export async function addRecountLabel(options: {
   readonly pullRequest: number;
   readonly gh: GhRunner;
 }): Promise<void> {
-  await options.gh(
-    addPullRequestLabelArgs(options.repo, options.pullRequest, RECOUNT_LABEL),
-  );
+  await options.gh(addPullRequestLabelArgs(options.repo, options.pullRequest, RECOUNT_LABEL));
 }
 
 /**
@@ -1143,16 +1116,11 @@ export function fixPrompt(
     "## Findings",
     "",
     ...(findings.length === 0
-      ? ["- The review said fail without naming a finding. Read the review comment on the pull request."]
+      ? [
+          "- The review said fail without naming a finding. Read the review comment on the pull request.",
+        ]
       : findings.map((finding) => `- ${finding}`)),
-    ...(fence === ""
-      ? []
-      : [
-          "",
-          "## The brief this change must still satisfy",
-          "",
-          fence,
-        ]),
+    ...(fence === "" ? [] : ["", "## The brief this change must still satisfy", "", fence]),
     ...(batch.length === 0 ? [] : ["", batchData(batch)]),
     "",
     "1. Address every finding. Where a finding is wrong, make the code say why it is wrong.",
@@ -1602,7 +1570,7 @@ function readJson(file: URL): Record<string, unknown> {
 
 const RUNNER_STAMP = ((): string => {
   const pkg = readJson(new URL("../package.json", import.meta.url));
-  const version = (typeof pkg.version === "string" ? pkg.version : "unknown");
+  const version = typeof pkg.version === "string" ? pkg.version : "unknown";
   const built = readJson(new URL("./build-info.json", import.meta.url));
   const sha = typeof built.sha === "string" ? built.sha : null;
   return sha === null ? version : `${version} ${sha}`;
@@ -2142,15 +2110,12 @@ export function unworkableReason(derivedState: DerivedState): string {
  * satisfied by the parent's work landing: its pull request is merged. A parent
  * that was closed without a merge is not merged yet, and the child waits.
  */
-export function blockedReason(
-  blockedBy: readonly number[] | undefined,
-): string | null {
+export function blockedReason(blockedBy: readonly number[] | undefined): string | null {
   if (blockedBy === undefined || blockedBy.length === 0) {
     return null;
   }
   return `it waits for ${blockedBy.map((number) => `#${number}`).join(", ")} — a parent issue is not merged yet`;
 }
-
 
 /**
  * The sentence for an empty queue, in the words the runner says.
@@ -2158,32 +2123,6 @@ export function blockedReason(
 export function emptyQueueSentence(): string {
   return "the queue is empty — there was nothing to work";
 }
-
-/**
- * The sentence for a worked issue, in the words the runner says.
- */
-export function workedIssueSentence(result: RunResult): string {
-  return `worked issue ${result.issue} — the record is at ${result.record}`;
-}
-
-/**
- * The sentence the runner says for a run result, where one exists.
- */
-export function runResultSentence(result: RunResult): string | null {
-  if (result.outcome === "empty") return emptyQueueSentence();
-  if (result.outcome === "completed") return workedIssueSentence(result);
-  return null;
-}
-
-// Aliases, so callers can use either name.
-export const emptyQueueMessage = emptyQueueSentence;
-export const emptyQueueLine = emptyQueueSentence;
-export const emptyQueueReason = emptyQueueSentence;
-export const workedIssueMessage = workedIssueSentence;
-export const workedIssueLine = workedIssueSentence;
-export const workedIssueReason = workedIssueSentence;
-export const outcomeSentence = runResultSentence;
-export const outcomeMessage = runResultSentence;
 
 /** The commit the worktree is at. */
 export async function headSha(git: GitRunner, cwd: string): Promise<string> {
@@ -2214,11 +2153,7 @@ export const GATE_FIX_ATTEMPTS = 2;
  * run that was about to push the work, and the work went with the worktree. The
  * pull request's own CI judges the tree.
  */
-export async function commitAll(
-  git: GitRunner,
-  cwd: string,
-  message: string,
-): Promise<void> {
+export async function commitAll(git: GitRunner, cwd: string, message: string): Promise<void> {
   await git(["add", "-A"], { cwd });
   const staged = await git(["diff", "--cached", "--name-only"], { cwd });
   for (const raw of staged.split("\n")) {
@@ -2315,11 +2250,7 @@ async function gateTheTree(options: {
  * reviewer that committed something of its own moved the branch, and the tree
  * that is pushed has to be the tree the reviewer judged.
  */
-export async function restoreTree(
-  git: GitRunner,
-  cwd: string,
-  head?: string,
-): Promise<void> {
+export async function restoreTree(git: GitRunner, cwd: string, head?: string): Promise<void> {
   await git(head === undefined ? ["reset", "--hard"] : ["reset", "--hard", head], { cwd });
   await git(["clean", "-fd"], { cwd });
 }
@@ -2346,11 +2277,7 @@ export async function preserveUnfinishedWork(options: {
   if (status.trim() === "") {
     return null;
   }
-  await commitAll(
-    options.git,
-    options.cwd,
-    "wip: the work a run that did not finish left behind",
-  );
+  await commitAll(options.git, options.cwd, "wip: the work a run that did not finish left behind");
   return `the unfinished work is on ${options.branch}`;
 }
 
@@ -2365,10 +2292,7 @@ export async function changedChangeSlug(
   cwd: string,
   options: { readonly base: string; readonly head: string },
 ): Promise<string | null> {
-  const changed = await git(
-    ["diff", "--name-only", `${options.base}...${options.head}`],
-    { cwd },
-  );
+  const changed = await git(["diff", "--name-only", `${options.base}...${options.head}`], { cwd });
   for (const line of changed.split("\n")) {
     const match = /^openspec\/changes\/([^/]+)\//.exec(line.trim());
     if (match !== null) {
@@ -2484,11 +2408,7 @@ export async function openDependencies(
  * the next run reads it again. The queue is read once per run, so a read that
  * fails holds an issue out for one run, not for ever.
  */
-async function hasLanded(
-  repo: string,
-  parent: number,
-  gh: GhRunner,
-): Promise<boolean> {
+async function hasLanded(repo: string, parent: number, gh: GhRunner): Promise<boolean> {
   try {
     return (await readMergedPullRequest(repo, parent, gh)) !== null;
   } catch {
@@ -2563,9 +2483,7 @@ async function chooseIssue(
     // every run pay for the whole history. A run with nothing claimed reads
     // nothing: there is no issue to match a pull request against.
     pullRequests =
-      candidates.length === 0
-        ? []
-        : await readAllOpenPullRequests(options.repo, options.gh);
+      candidates.length === 0 ? [] : await readAllOpenPullRequests(options.repo, options.gh);
   } catch (failure) {
     throw selectFailed(failure);
   }
@@ -2684,8 +2602,7 @@ async function chooseIssue(
       return {
         candidate,
         pullRequest,
-        failedReview:
-          pullRequest !== null && newestReviewVerdict(pullRequest.comments) === "fail",
+        failedReview: pullRequest !== null && newestReviewVerdict(pullRequest.comments) === "fail",
       };
     });
   // The reviews that failed first, then the rest in the order they were filed.
@@ -2695,10 +2612,7 @@ async function chooseIssue(
     ...pending.filter((entry) => entry.failedReview),
     ...pending.filter((entry) => !entry.failedReview),
   ]) {
-    const blockedBy = await openDependencies(
-      { repo: options.repo, gh: options.gh },
-      candidate,
-    );
+    const blockedBy = await openDependencies({ repo: options.repo, gh: options.gh }, candidate);
     if (blockedBy.length > 0) {
       continue;
     }
@@ -2783,9 +2697,7 @@ function failedReview(
     return undefined;
   }
   const review = newestReviewComment(pullRequest.comments);
-  return review === null
-    ? undefined
-    : { pullRequest: pullRequest.number, review };
+  return review === null ? undefined : { pullRequest: pullRequest.number, review };
 }
 
 /** The steps of one run, and the work they do. */
@@ -2841,8 +2753,7 @@ async function runPlan(
     reviewFailed: false,
   };
 
-  const works =
-    plan.kind === "work" || plan.kind === "reclaim" || plan.kind === "rework";
+  const works = plan.kind === "work" || plan.kind === "reclaim" || plan.kind === "rework";
   let reviews = works || plan.kind === "pull request" || plan.kind === "review";
   let workSessionStartedAt: number | undefined;
   /** The review a rework answers — the one the branch and the pull request were left by. */
@@ -2874,10 +2785,7 @@ async function runPlan(
    * leaves behind what it was doing when it died.
    */
   const journalSubject = issueSubject(issue.number);
-  const journalFile = journalPath(
-    diagnosticsDirectory(options.checkout, journalSubject),
-    runId,
-  );
+  const journalFile = journalPath(diagnosticsDirectory(options.checkout, journalSubject), runId);
   await mkdir(dirname(journalFile), { recursive: true });
   await writeFile(journalFile, `${journalHeader(runId, journalSubject)}\n`, "utf8");
   const session = journalFactory(options.session, journalFile);
@@ -2888,10 +2796,7 @@ async function runPlan(
    * file is where the rest of it is. A record is a document a person reads,
    * and a document that carries a whole build log is not read.
    */
-  const gatesLog = gatesLogPath(
-    diagnosticsDirectory(options.checkout, journalSubject),
-    runId,
-  );
+  const gatesLog = gatesLogPath(diagnosticsDirectory(options.checkout, journalSubject), runId);
   /**
    * The gates run on the tree the agent left, and again on the tree a
    * review's fix left. Both sets come out of the one share, so a fix loop
@@ -3073,7 +2978,8 @@ async function runPlan(
             });
           },
         });
-        const workElapsedMs = workSessionStartedAt === undefined ? 0 : Date.now() - workSessionStartedAt;
+        const workElapsedMs =
+          workSessionStartedAt === undefined ? 0 : Date.now() - workSessionStartedAt;
         state.usage = addUsage(state.usage, usage);
         if (workElapsedMs >= sessionBudgetMs) {
           reviews = false;
@@ -3149,11 +3055,7 @@ async function runPlan(
         });
         if (state.slug !== null) {
           await ensureRegistryEntry(options.run, state.worktreePath);
-          await commitAll(
-            options.git,
-            state.worktreePath,
-            "chore: the change's registry entry",
-          );
+          await commitAll(options.git, state.worktreePath, "chore: the change's registry entry");
         }
         return `${result.completed} turns`;
       },
@@ -3273,8 +3175,7 @@ async function runPlan(
         // The work session handed back the issue it read. A resume has no work
         // session, so the review reads it once; the fix and every re-review see
         // the same brief.
-        const detail =
-          state.issue ?? (await readIssue(options.repo, issue.number, options.gh));
+        const detail = state.issue ?? (await readIssue(options.repo, issue.number, options.gh));
         state.issue = detail;
         let exhausted = false;
 
@@ -3345,11 +3246,7 @@ async function runPlan(
               issue: detail,
               batch: state.batch,
             });
-            await commitAll(
-              options.git,
-              state.worktreePath,
-              "fix: the review's findings",
-            );
+            await commitAll(options.git, state.worktreePath, "fix: the review's findings");
             const after = await headSha(options.git, state.worktreePath);
             if (after === before) {
               // The fix changed nothing: there is nothing to push and nothing
@@ -3421,9 +3318,7 @@ async function runPlan(
           outcome.stopReason.kind === "statedNoVerdict"
             ? `the review of pull request ${state.pullRequest} stated no verdict`
             : `the review did not pass after ${state.reviewCount} review(s)` +
-                (state.findings.length === 0
-                  ? ""
-                  : `: ${state.findings.join("; ")}`) +
+                (state.findings.length === 0 ? "" : `: ${state.findings.join("; ")}`) +
                 (outcome.stopReason.kind === "noChange" ? " — the fix changed nothing" : ""),
         );
       },
@@ -3471,11 +3366,7 @@ async function runPlan(
       if (state.slug === null) {
         return "no change to count";
       }
-      const digest = await computeDocumentsDigest(
-        options.run,
-        state.worktreePath,
-        state.slug,
-      );
+      const digest = await computeDocumentsDigest(options.run, state.worktreePath, state.slug);
       const directory = join(state.worktreePath, ".specify", "reviews");
       await mkdir(directory, { recursive: true });
       await writeFile(
@@ -3529,11 +3420,9 @@ async function runPlan(
       // label, derives as `Queue`, and the next run works it a second time.
       if (options.stopped?.() === true && state.pullRequest !== 0) {
         if (state.worktreePath !== "") {
-          await removeWorktree(options.git, options.checkout, state.worktreePath).catch(
-            () => {
-              // The next run removes a worktree it could not.
-            },
-          );
+          await removeWorktree(options.git, options.checkout, state.worktreePath).catch(() => {
+            // The next run removes a worktree it could not.
+          });
         }
         return;
       }
@@ -3550,11 +3439,9 @@ async function runPlan(
                 branch: workBranch(issue.number),
               }).catch(() => null);
         if (state.worktreePath !== "") {
-          await removeWorktree(options.git, options.checkout, state.worktreePath).catch(
-            () => {
-              // The next run removes a worktree it could not.
-            },
-          );
+          await removeWorktree(options.git, options.checkout, state.worktreePath).catch(() => {
+            // The next run removes a worktree it could not.
+          });
         }
         return kept ?? "";
       }
@@ -3611,11 +3498,7 @@ async function runPlan(
   return {
     issue: issue.number,
     outcome:
-      state.decision === "skip"
-        ? "skipped"
-        : state.decision === "split"
-          ? "split"
-          : "completed",
+      state.decision === "skip" ? "skipped" : state.decision === "split" ? "split" : "completed",
     steps: runOutcome.steps,
     record: runOutcome.record,
     title: issue.title,

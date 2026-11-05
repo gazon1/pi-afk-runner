@@ -60,11 +60,7 @@ describe("the gates the runner runs", () => {
 
     const summary = await runGates({ run, cwd: "/the/worktree", budgetMs: 60_000, gates: GATES });
 
-    expect(called).toEqual([
-      "bash ./check.sh --fast",
-      "just tcheck-evals",
-      "just docs-audit",
-    ]);
+    expect(called).toEqual(["bash ./check.sh --fast", "just tcheck-evals", "just docs-audit"]);
     expect(summary).toContain("./check.sh --fast — ok");
   });
 
@@ -108,7 +104,12 @@ describe("the gates the runner runs", () => {
       return "";
     };
 
-    const failure = await runGates({ run, cwd: "/the/worktree", budgetMs: 60_000, gates: GATES }).then(
+    const failure = await runGates({
+      run,
+      cwd: "/the/worktree",
+      budgetMs: 60_000,
+      gates: GATES,
+    }).then(
       () => null,
       (error: unknown) => error,
     );
@@ -135,7 +136,12 @@ describe("the gates the runner runs", () => {
       throw error;
     };
 
-    const failure = await runGates({ run, cwd: "/the/worktree", budgetMs: 60_000, gates: GATES }).then(
+    const failure = await runGates({
+      run,
+      cwd: "/the/worktree",
+      budgetMs: 60_000,
+      gates: GATES,
+    }).then(
       () => null,
       (error: unknown) => error,
     );
@@ -152,7 +158,12 @@ describe("the gates the runner runs", () => {
       throw new CommandTimedOut(1000, spec.command, spec.args, "half a build", "");
     };
 
-    const failure = await runGates({ run, cwd: "/the/worktree", budgetMs: 60_000, gates: GATES }).then(
+    const failure = await runGates({
+      run,
+      cwd: "/the/worktree",
+      budgetMs: 60_000,
+      gates: GATES,
+    }).then(
       () => null,
       (error: unknown) => error,
     );
@@ -222,7 +233,7 @@ describe("the gates the runner runs", () => {
     try {
       await writeFile(
         join(dir, "check.sh"),
-        "#!/bin/sh\nfor i in $(seq 1 20000); do echo \"line $i\"; done\nexit 1\n",
+        '#!/bin/sh\nfor i in $(seq 1 20000); do echo "line $i"; done\nexit 1\n',
         "utf8",
       );
       const log = join(dir, "gates.log");
@@ -282,10 +293,21 @@ describe("the gates the runner runs", () => {
     // The detail carries the last non-empty line, not the first: a build's
     // summary (or the bottom of a stack trace), never an arbitrary warning.
     const run: CommandRunner = async (spec) => {
-      throw new CommandFailed(1, spec.command, [...spec.args], "w: Foo.kt:12:5 Unused import\nFAIL: test failed\n\n", "");
+      throw new CommandFailed(
+        1,
+        spec.command,
+        [...spec.args],
+        "w: Foo.kt:12:5 Unused import\nFAIL: test failed\n\n",
+        "",
+      );
     };
 
-    const failure = await runGates({ run, cwd: "/the/worktree", budgetMs: 60_000, gates: GATES }).then(
+    const failure = await runGates({
+      run,
+      cwd: "/the/worktree",
+      budgetMs: 60_000,
+      gates: GATES,
+    }).then(
       () => null,
       (error: unknown) => error,
     );
@@ -303,7 +325,12 @@ describe("the gates the runner runs", () => {
       throw new CommandFailed(1, spec.command, [...spec.args], "", "");
     };
 
-    const failure = await runGates({ run, cwd: "/the/worktree", budgetMs: 60_000, gates: GATES }).then(
+    const failure = await runGates({
+      run,
+      cwd: "/the/worktree",
+      budgetMs: 60_000,
+      gates: GATES,
+    }).then(
       () => null,
       (error: unknown) => error,
     );

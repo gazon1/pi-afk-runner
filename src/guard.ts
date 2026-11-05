@@ -133,8 +133,7 @@ export const GUARD_POLICY: GuardPolicy = {
     "*": "allow",
     "gh issue create*": {
       action: "deny",
-      reason:
-        "File a leftover with the `agent_leftover` tool — it holds the bounds on the queue.",
+      reason: "File a leftover with the `agent_leftover` tool — it holds the bounds on the queue.",
     },
     "*./gw*": {
       action: "deny",
@@ -321,7 +320,7 @@ function segments(command: string): string[] {
       }
       continue;
     }
-    if (char === "\"" || char === "'") {
+    if (char === '"' || char === "'") {
       quote = char;
       current += char;
       continue;
@@ -364,7 +363,7 @@ function wordsOf(segment: string): string[] {
       current += char;
       continue;
     }
-    if (char === "\"" || char === "'") {
+    if (char === '"' || char === "'") {
       quote = char;
       started = true;
       continue;
@@ -543,9 +542,7 @@ function isSuite(run: CommandRun, entry: SuiteEntry, policy: ProgramPolicy): boo
  */
 export function runsATestSuite(command: string): boolean {
   const policy = GUARD_POLICY.program;
-  return runsOf(command).some((run) =>
-    policy.suites.some((entry) => isSuite(run, entry, policy)),
-  );
+  return runsOf(command).some((run) => policy.suites.some((entry) => isSuite(run, entry, policy)));
 }
 
 /**

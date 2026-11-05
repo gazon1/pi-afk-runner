@@ -99,19 +99,13 @@ export interface Lock {
  * so ending the child ends the lock — a forked holder would leave the lock
  * behind when the parent was killed.
  */
-export async function takeLock(
-  directory: string,
-  name: string = LOCK_NAME,
-): Promise<Lock> {
+export async function takeLock(directory: string, name: string = LOCK_NAME): Promise<Lock> {
   const path = join(directory, name);
 
   try {
     await mkdir(directory, { recursive: true });
   } catch (failure) {
-    throw new LockUnusable(
-      path,
-      failure instanceof Error ? failure.message : String(failure),
-    );
+    throw new LockUnusable(path, failure instanceof Error ? failure.message : String(failure));
   }
 
   const child = spawn(

@@ -31,9 +31,7 @@ import { fakeSession } from "./shared.js";
 describe("the journal file", () => {
   it("names the run and what the run was about", () => {
     // The first line says whose file this is, before a reader reads any of it.
-    expect(journalHeader("run-1", { kind: "issue", number: 42 })).toBe(
-      "# run run-1, issue 42",
-    );
+    expect(journalHeader("run-1", { kind: "issue", number: 42 })).toBe("# run run-1, issue 42");
     expect(journalHeader("run-2", { kind: "pull request", number: 7 })).toBe(
       "# run run-2, pull request 7",
     );
@@ -54,9 +52,7 @@ describe("the journal file", () => {
   it("puts the sweep's journal beside the pull requests' own", () => {
     // The sweep's journal is in the directory the per-pull-request
     // directories are in, not in one of them.
-    expect(sweepJournalDirectory("/repo")).toBe(
-      join("/repo", "build", "diagnostics", "merge"),
-    );
+    expect(sweepJournalDirectory("/repo")).toBe(join("/repo", "build", "diagnostics", "merge"));
   });
 
   it("is the run's own file", () => {
@@ -80,13 +76,10 @@ describe("the journal file", () => {
       const sweepFile = join(directory, "sweep.log");
       const pullRequestFile = join(directory, "pull-request.log");
       const session = fakeSession();
-      const factory = journalFactory(
-        async (sessionOptions) => {
-          sessionOptions.onEvent?.("the agent's own line");
-          return session;
-        },
-        sweepFile,
-      );
+      const factory = journalFactory(async (sessionOptions) => {
+        sessionOptions.onEvent?.("the agent's own line");
+        return session;
+      }, sweepFile);
       const wrapped = journalFactory(factory, pullRequestFile);
 
       await wrapped({ cwd: directory, systemPromptSections: {} });

@@ -20,7 +20,4 @@ try {
   // No git, or not a repository: the package version alone is the stamp.
 }
 
-writeFileSync(
-  new URL("../dist/build-info.json", import.meta.url),
-  `${JSON.stringify({ sha })}\n`,
-);
+writeFileSync(new URL("../dist/build-info.json", import.meta.url), `${JSON.stringify({ sha })}\n`);

@@ -29,12 +29,12 @@ interface Recorder {
 /** Watch one of the runner's streams. */
 function capture(stream: "stdout" | "stderr"): Recorder {
   const lines: string[] = [];
-  const spy = vi
-    .spyOn(process[stream], "write")
-    .mockImplementation(((chunk: string | Uint8Array) => {
-      lines.push(String(chunk));
-      return true;
-    }) as typeof process.stdout.write);
+  const spy = vi.spyOn(process[stream], "write").mockImplementation(((
+    chunk: string | Uint8Array,
+  ) => {
+    lines.push(String(chunk));
+    return true;
+  }) as typeof process.stdout.write);
   return { lines, restore: () => spy.mockRestore() };
 }
 
@@ -66,7 +66,9 @@ describe("the question the pool file is asked", () => {
       const code = await main(["--show-pool", "--agent-dir", agent]);
 
       expect(code).toBe(EXIT_OK);
-      expect(out.lines.join("")).toContain(`there is no pool file at ${join(agent, "models.yaml")}`);
+      expect(out.lines.join("")).toContain(
+        `there is no pool file at ${join(agent, "models.yaml")}`,
+      );
     } finally {
       await rm(join(agent, ".."), { recursive: true, force: true });
     }
@@ -115,7 +117,11 @@ describe("the question the pool file is asked", () => {
   it("says_why_a_file_it_cannot_read_is_wrong", async () => {
     const agent = await agentDirectory();
     // A key the runner does not know is an error, not something it ignores.
-    await writeFile(join(agent, "models.yaml"), "models:\n  - model: fake/beam\n    priorety: 100\n", "utf8");
+    await writeFile(
+      join(agent, "models.yaml"),
+      "models:\n  - model: fake/beam\n    priorety: 100\n",
+      "utf8",
+    );
     const err = capture("stderr");
     recorders.push(err);
     try {
@@ -132,13 +138,7 @@ describe("the question the pool file is asked", () => {
     const agent = await agentDirectory();
     const lockDirectory = join(agent, "..", "afk-runner");
     try {
-      const code = await main([
-        "--show-pool",
-        "--agent-dir",
-        agent,
-        "--lock-dir",
-        lockDirectory,
-      ]);
+      const code = await main(["--show-pool", "--agent-dir", agent, "--lock-dir", lockDirectory]);
 
       expect(code).toBe(EXIT_OK);
       // A lock nobody gives back keeps the next runner out: the question takes

@@ -31,9 +31,7 @@ const SPELLED = /join\(\s*[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\s*,\s*`issue-\
 
 describe("the path of an issue's worktree", () => {
   it("is the issue's own directory under the worktree root", () => {
-    expect(issueWorktreePath("/tmp/worktrees", 42)).toBe(
-      join("/tmp/worktrees", "issue-42"),
-    );
+    expect(issueWorktreePath("/tmp/worktrees", 42)).toBe(join("/tmp/worktrees", "issue-42"));
   });
 
   it("is spelled out in one place in the source", async () => {

@@ -266,9 +266,7 @@ describe("the model pool", () => {
 
   it("knows_the_words_a_provider_uses_when_it_has_no_credit_left", () => {
     // Anthropic says it this way, and the pool is here for exactly this.
-    expect(
-      isLimitFailure("Your credit balance is too low to access the Anthropic API"),
-    ).toBe(true);
+    expect(isLimitFailure("Your credit balance is too low to access the Anthropic API")).toBe(true);
     expect(
       isLimitFailure('Authentication failed for "deepseek". Credentials may have expired'),
     ).toBe(true);
@@ -287,7 +285,9 @@ describe("a session in the pool", () => {
     const session = new PoolSession({
       host,
       catalogue,
-      pool: parsePool("models:\n  - model: fake/beam\n    priority: 100\n  - model: fake/spare\n    priority: 50\n"),
+      pool: parsePool(
+        "models:\n  - model: fake/beam\n    priority: 100\n  - model: fake/spare\n    priority: 50\n",
+      ),
       reference: "fake/beam",
       state: newPoolState(),
       proxyConfigured: true,

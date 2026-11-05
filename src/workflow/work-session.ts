@@ -103,14 +103,8 @@ export async function runWorkSession(options: {
   const work = sub("work-session-scope")
     .then(node("scope"))
     .branch([
-      [
-        async ({ inputData }) => inputData.token === SCOPE_TOKEN.split,
-        asStep(split),
-      ],
-      [
-        async ({ inputData }) => inputData.token !== SCOPE_TOKEN.split,
-        asStep(workTurns),
-      ],
+      [async ({ inputData }) => inputData.token === SCOPE_TOKEN.split, asStep(split)],
+      [async ({ inputData }) => inputData.token !== SCOPE_TOKEN.split, asStep(workTurns)],
     ])
     .commit();
 
@@ -122,14 +116,8 @@ export async function runWorkSession(options: {
   }
   script.then(node("triage"));
   script.branch([
-    [
-      async ({ inputData }) => inputData.token === TRIAGE_TOKEN.skip,
-      asStep(closeSkip),
-    ],
-    [
-      async ({ inputData }) => inputData.token !== TRIAGE_TOKEN.skip,
-      asStep(work),
-    ],
+    [async ({ inputData }) => inputData.token === TRIAGE_TOKEN.skip, asStep(closeSkip)],
+    [async ({ inputData }) => inputData.token !== TRIAGE_TOKEN.skip, asStep(work)],
   ]);
 
   const run = await script.commit().createRun();

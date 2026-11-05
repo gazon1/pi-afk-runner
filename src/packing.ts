@@ -339,7 +339,10 @@ export interface PackDetails {
 }
 
 /** A refusal: the model sees it as a failed call, and why. */
-function refusal(reason: string, path: string): {
+function refusal(
+  reason: string,
+  path: string,
+): {
   content: { type: "text"; text: string }[];
   details: PackDetails;
   isError: true;
@@ -467,9 +470,7 @@ export function createPackTool(options: {
       const denied = outcome.paths.filter((file) => isProtectedPath(file));
       if (denied.length > 0) {
         const root = resolve(options.cwd, path);
-        const without = denied
-          .map((file) => relative(root, resolve(options.cwd, file)))
-          .join(",");
+        const without = denied.map((file) => relative(root, resolve(options.cwd, file))).join(",");
         try {
           outcome = await pack({
             ...request,

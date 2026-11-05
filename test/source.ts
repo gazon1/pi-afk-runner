@@ -21,9 +21,7 @@ export const SOURCE = join(dirname(fileURLToPath(import.meta.url)), "..", "src")
  * ones in the code.
  */
 export function withoutComments(source: string): string {
-  return source
-    .replace(/\/\*[\s\S]*?\*\//g, " ")
-    .replace(/(^|[^:])\/\/.*$/gm, "$1");
+  return source.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/(^|[^:])\/\/.*$/gm, "$1");
 }
 
 /** Every source file, and its code without the comments. */

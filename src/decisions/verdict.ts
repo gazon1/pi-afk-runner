@@ -33,10 +33,9 @@ export function createVerdictTool(holder: { value?: ReviewVerdict }) {
       "After calling it, do not write another assistant message in the same turn.",
     ],
     parameters: Type.Object({
-      verdict: Type.Union([
-        Type.Literal("pass"),
-        Type.Literal("fail"),
-      ], { description: "pass when nothing blocks the change, fail when something does" }),
+      verdict: Type.Union([Type.Literal("pass"), Type.Literal("fail")], {
+        description: "pass when nothing blocks the change, fail when something does",
+      }),
       findings: Type.Array(Type.String(), {
         description: "What the review found, one finding per entry. Empty when it passed.",
       }),

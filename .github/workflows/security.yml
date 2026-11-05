@@ -1,0 +1,49 @@
+name: Security
+
+# The checks that depend on data outside the repository: the vulnerability
+# database and the secret scan. They run on every pull request and on a
+# schedule, because a new advisory or a leaked credential appears without a
+# commit on our side.
+
+on:
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  vulnerabilities:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
+        with:
+          version: 2026.11.0
+
+      - name: known vulnerabilities in the lockfile
+        run: mise exec -- osv-scanner scan source --lockfile=package-lock.json
+
+  secrets:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
+        with:
+          version: 2026.11.0
+
+      - name: committed secrets, in the history and the tree
+        run: mise exec -- betterleaks git . --no-banner

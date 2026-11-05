@@ -274,11 +274,7 @@ export const runGh: GhRunner = (args) => runGhWithTimeout(args, GH_TIMEOUT_MS);
  * kills it — and a command that failed on its own terms says so in its exit
  * code and its stderr.
  */
-function ghFailure(
-  failure: unknown,
-  args: readonly string[],
-  timeoutMs: number,
-): Error {
+function ghFailure(failure: unknown, args: readonly string[], timeoutMs: number): Error {
   const error = failure as { code?: number; stderr?: string; killed?: boolean };
   if (error.killed === true) {
     return new GhCommandTimedOut(args, timeoutMs);
@@ -325,16 +321,18 @@ function labelNames(value: unknown): string[] {
   if (!Array.isArray(value)) {
     return [];
   }
-  return value.map((label) => {
-    if (typeof label === "string") {
-      return label;
-    }
-    if (typeof label === "object" && label !== null && "name" in label) {
-      const name = (label as { name: unknown }).name;
-      return typeof name === "string" ? name : "";
-    }
-    return "";
-  }).filter((name) => name.length > 0);
+  return value
+    .map((label) => {
+      if (typeof label === "string") {
+        return label;
+      }
+      if (typeof label === "object" && label !== null && "name" in label) {
+        const name = (label as { name: unknown }).name;
+        return typeof name === "string" ? name : "";
+      }
+      return "";
+    })
+    .filter((name) => name.length > 0);
 }
 
 function commentBodies(value: unknown): string[] {
@@ -444,10 +442,7 @@ export async function readQueue(repo: string, gh: GhRunner = runGh): Promise<Iss
 }
 
 /** Read the issues somebody has claimed — including a run that died holding one. */
-export async function readClaimed(
-  repo: string,
-  gh: GhRunner = runGh,
-): Promise<IssueSummary[]> {
+export async function readClaimed(repo: string, gh: GhRunner = runGh): Promise<IssueSummary[]> {
   return parseIssues(await gh(claimedArgs(repo)));
 }
 
@@ -459,10 +454,7 @@ export async function readClaimed(
  * of either would file it twice. The read of every open issue of the
  * repository is wider than that and three times the size.
  */
-export async function readKnownIssues(
-  repo: string,
-  gh: GhRunner = runGh,
-): Promise<IssueSummary[]> {
+export async function readKnownIssues(repo: string, gh: GhRunner = runGh): Promise<IssueSummary[]> {
   return parseIssues(await gh(knownIssuesArgs(repo)));
 }
 
@@ -589,17 +581,13 @@ export function newestReviewComment(comments: readonly string[]): string | null 
  * comment with no verdict decides nothing rather than falling back to an older
  * `pass`. A merge gate that guessed would land a change a review had blocked.
  */
-export function newestReviewVerdict(
-  comments: readonly string[],
-): "pass" | "fail" | null {
+export function newestReviewVerdict(comments: readonly string[]): "pass" | "fail" | null {
   const review = newestReviewComment(comments);
   if (review === null) {
     return null;
   }
   const stated = [
-    ...review.matchAll(
-      /^\s*\**\s*verdict\s*\**\s*:\s*\**\s*(pass|fail)\s*\**\s*\.?\s*$/gim,
-    ),
+    ...review.matchAll(/^\s*\**\s*verdict\s*\**\s*:\s*\**\s*(pass|fail)\s*\**\s*\.?\s*$/gim),
   ];
   return stated.length === 1 ? (stated[0]?.[1] as "pass" | "fail") : null;
 }
@@ -742,11 +730,7 @@ export async function createIssue(
 }
 
 /** The arguments that post a comment on an issue. */
-export function commentIssueArgs(
-  repo: string,
-  issueNumber: number,
-  body: string,
-): string[] {
+export function commentIssueArgs(repo: string, issueNumber: number, body: string): string[] {
   return ["issue", "comment", String(issueNumber), "--repo", repo, "--body", body];
 }
 
@@ -784,11 +768,7 @@ export async function linkIssue(
 }
 
 /** The arguments that close an issue, with an optional comment. */
-export function closeIssueArgs(
-  repo: string,
-  issueNumber: number,
-  body?: string,
-): string[] {
+export function closeIssueArgs(repo: string, issueNumber: number, body?: string): string[] {
   return [
     "issue",
     "close",
@@ -820,8 +800,7 @@ export async function closeIssue(
  * the text every run already reads. A line has to start with the marker, so
  * prose that happens to mention a parent does not block the issue.
  */
-export const DEPENDENCY_MARKER =
-  /^(?:\*\*)?(?:depends on|blocked by|parent)(?:\*\*)?\s*:/i;
+export const DEPENDENCY_MARKER = /^(?:\*\*)?(?:depends on|blocked by|parent)(?:\*\*)?\s*:/i;
 
 /**
  * The issue numbers a text says it waits for.
@@ -967,20 +946,8 @@ export function reviewCommentBody(options: {
 }
 
 /** The arguments that post a comment on a pull request. */
-export function postCommentArgs(
-  repo: string,
-  pullRequest: number,
-  body: string,
-): string[] {
-  return [
-    "pr",
-    "comment",
-    String(pullRequest),
-    "--repo",
-    repo,
-    "--body",
-    body,
-  ];
+export function postCommentArgs(repo: string, pullRequest: number, body: string): string[] {
+  return ["pr", "comment", String(pullRequest), "--repo", repo, "--body", body];
 }
 
 /** The arguments that add a label to a pull request. */

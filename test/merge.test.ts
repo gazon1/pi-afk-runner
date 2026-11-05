@@ -19,10 +19,7 @@ import {
   mergeReviewedPullRequests,
   type MergeOptions,
 } from "../src/merge.js";
-import {
-  type AgentSession,
-  type SessionFactory,
-} from "../src/session.js";
+import { type AgentSession, type SessionFactory } from "../src/session.js";
 import { VERDICT_TOOL_NAME } from "../src/decisions/index.js";
 import { createFixtureRepository, gitOutput } from "./git-sandbox.js";
 
@@ -69,9 +66,7 @@ function resolvingSession(content = "resolved\n"): SessionFactory {
 }
 
 /** A candidate the collab pipeline considers landable. */
-function reviewedPullRequest(
-  overrides: Partial<OpenPullRequest> = {},
-): OpenPullRequest {
+function reviewedPullRequest(overrides: Partial<OpenPullRequest> = {}): OpenPullRequest {
   return {
     number: 7,
     title: "an issue",
@@ -275,7 +270,9 @@ describe("the review verdict the merge gate reads", () => {
 
 describe("the merge pipeline", () => {
   it("test_only_a_reviewed_green_pull_request_is_merged", async () => {
-    const fixture = await createFixtureRepository({ files: { "scripts/setup-worktree.sh": SETUP } });
+    const fixture = await createFixtureRepository({
+      files: { "scripts/setup-worktree.sh": SETUP },
+    });
     try {
       await pushBranch(fixture);
       const { gh, merged, calls } = stubGh([reviewedPullRequest()]);
@@ -309,7 +306,9 @@ describe("the merge pipeline", () => {
   });
 
   it("test_another_authors_pull_request_is_not_a_candidate", async () => {
-    const fixture = await createFixtureRepository({ files: { "scripts/setup-worktree.sh": SETUP } });
+    const fixture = await createFixtureRepository({
+      files: { "scripts/setup-worktree.sh": SETUP },
+    });
     try {
       await pushBranch(fixture);
       const { gh, merged, calls } = stubGh([
@@ -330,7 +329,9 @@ describe("the merge pipeline", () => {
   });
 
   it("test_a_failed_or_missing_review_is_not_merged", async () => {
-    const fixture = await createFixtureRepository({ files: { "scripts/setup-worktree.sh": SETUP } });
+    const fixture = await createFixtureRepository({
+      files: { "scripts/setup-worktree.sh": SETUP },
+    });
     try {
       await pushBranch(fixture);
       const { gh, merged } = stubGh([
@@ -354,7 +355,9 @@ describe("the merge pipeline", () => {
   });
 
   it("test_a_red_ci_is_not_merged", async () => {
-    const fixture = await createFixtureRepository({ files: { "scripts/setup-worktree.sh": SETUP } });
+    const fixture = await createFixtureRepository({
+      files: { "scripts/setup-worktree.sh": SETUP },
+    });
     try {
       await pushBranch(fixture);
       const { gh, merged } = stubGh([reviewedPullRequest()]);
@@ -365,9 +368,7 @@ describe("the merge pipeline", () => {
           exit: 1,
         });
 
-      const result = await mergeReviewedPullRequests(
-        options(fixture, gh, { run: redRun }),
-      );
+      const result = await mergeReviewedPullRequests(options(fixture, gh, { run: redRun }));
 
       expect(merged).toEqual([]);
       expect(result.skipped[0]?.reason).toContain("not green");
@@ -377,7 +378,9 @@ describe("the merge pipeline", () => {
   });
 
   it("test_the_pull_request_is_read_again_before_it_is_merged", async () => {
-    const fixture = await createFixtureRepository({ files: { "scripts/setup-worktree.sh": SETUP } });
+    const fixture = await createFixtureRepository({
+      files: { "scripts/setup-worktree.sh": SETUP },
+    });
     try {
       await pushBranch(fixture);
       let lists = 0;
@@ -412,7 +415,9 @@ describe("the merge pipeline", () => {
   });
 
   it("test_a_branch_that_moved_after_the_check_is_not_merged", async () => {
-    const fixture = await createFixtureRepository({ files: { "scripts/setup-worktree.sh": SETUP } });
+    const fixture = await createFixtureRepository({
+      files: { "scripts/setup-worktree.sh": SETUP },
+    });
     try {
       await pushBranch(fixture);
       let lists = 0;
@@ -423,10 +428,10 @@ describe("the merge pipeline", () => {
           if (lists === 2) {
             // Someone pushes to the branch while this run was checking it.
             const sha = await commitOn(fixture, "later.txt", "moved\n", "the branch moves");
-            await gitOutput(
-              ["push", "-q", fixture.remote, `${sha}:refs/heads/agent/issue-42`],
-              { cwd: fixture.repo, env: fixture.env },
-            );
+            await gitOutput(["push", "-q", fixture.remote, `${sha}:refs/heads/agent/issue-42`], {
+              cwd: fixture.repo,
+              env: fixture.env,
+            });
           }
           return JSON.stringify([reviewedPullRequest()]);
         }
@@ -511,7 +516,9 @@ describe("the merge pipeline", () => {
   });
 
   it("test_a_merge_that_fails_without_a_conflict_does_not_start_the_agent", async () => {
-    const fixture = await createFixtureRepository({ files: { "scripts/setup-worktree.sh": SETUP } });
+    const fixture = await createFixtureRepository({
+      files: { "scripts/setup-worktree.sh": SETUP },
+    });
     try {
       // The branch has no history in common with the base: `git merge` refuses
       // it outright, and there is no conflict to resolve.
@@ -643,7 +650,9 @@ describe("the merge pipeline", () => {
     // Each pull request the sweep starts has a journal of its own. The sweep has
     // one too: a sweep killed between two pull requests leaves only those
     // behind, and nothing says what the sweep was doing.
-    const fixture = await createFixtureRepository({ files: { "scripts/setup-worktree.sh": SETUP } });
+    const fixture = await createFixtureRepository({
+      files: { "scripts/setup-worktree.sh": SETUP },
+    });
     try {
       const { gh } = stubGh([
         reviewedPullRequest({ number: 7, isDraft: true }),
@@ -677,7 +686,9 @@ describe("the merge pipeline", () => {
   });
 
   it("test_a_sweep_that_dies_before_it_reads_the_candidates_leaves_its_journal", async () => {
-    const fixture = await createFixtureRepository({ files: { "scripts/setup-worktree.sh": SETUP } });
+    const fixture = await createFixtureRepository({
+      files: { "scripts/setup-worktree.sh": SETUP },
+    });
     try {
       const gh = async (): Promise<string> => {
         throw new Error("gh is down");
@@ -837,7 +848,9 @@ describe("the merge pipeline", () => {
   });
 
   it("test_a_stopped_merge_ends_at_the_next_step_and_lands_nothing", async () => {
-    const fixture = await createFixtureRepository({ files: { "scripts/setup-worktree.sh": SETUP } });
+    const fixture = await createFixtureRepository({
+      files: { "scripts/setup-worktree.sh": SETUP },
+    });
     try {
       await pushBranch(fixture);
       const { gh, merged } = stubGh([reviewedPullRequest()]);

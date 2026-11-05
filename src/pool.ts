@@ -24,14 +24,7 @@ import { parse as parseYaml } from "yaml";
  * Mastra engine — so the level is the host's policy and the runner reports
  * it.
  */
-export type EffortLevel =
-  | "off"
-  | "minimal"
-  | "low"
-  | "medium"
-  | "high"
-  | "xhigh"
-  | "max";
+export type EffortLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 /** The levels a file may name. */
 const EFFORT_LEVELS = [
@@ -236,7 +229,7 @@ function parseModel(entry: unknown, index: number, source: string): PoolModel {
   if (!isRecord(entry)) {
     throw new Error(`${source}: model ${index} is not a mapping`);
   }
-   for (const key of Object.keys(entry)) {
+  for (const key of Object.keys(entry)) {
     if (!["model", "priority", "proxy", "peak", "timezone", "effort", "workers"].includes(key)) {
       throw new Error(`${source}: model ${index} has a key the pool does not know: ${key}`);
     }
@@ -254,7 +247,7 @@ function parseModel(entry: unknown, index: number, source: string): PoolModel {
     // A window that cannot be read would be a peak that never comes.
     parseWindow(window, source);
   }
-   const timezone = timezoneOf(entry.timezone, index, source);
+  const timezone = timezoneOf(entry.timezone, index, source);
   const workers = workersOf(entry.workers, index, source);
   return {
     reference,
@@ -409,9 +402,7 @@ function parseWindow(
  */
 export function windowHolds(window: string, minutes: number): boolean {
   const { from, to } = parseWindow(window);
-  return from <= to
-    ? minutes >= from && minutes < to
-    : minutes >= from || minutes < to;
+  return from <= to ? minutes >= from && minutes < to : minutes >= from || minutes < to;
 }
 
 /** The minutes since midnight in the zone, at the moment. */
