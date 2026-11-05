@@ -45,7 +45,7 @@
     "prepublishOnly": "npm run check"
   },
   "dependencies": {
-    "@ai-sdk/anthropic": "4.0.89",
+    "@ai-sdk/anthropic": "4.0.91",
     "@ai-sdk/openai-compatible": "^3.0.84",
     "@mastra/core": "1.81.0",
     "@mastra/memory": "1.40.0",
