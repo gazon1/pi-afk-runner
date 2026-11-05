@@ -96,7 +96,7 @@ file that names it and says what it means.
 pool file that cannot be read is a mistake in the command, and a command that holds the
 lock while its mistake is found keeps the next runner out for the whole search.
 
-**Why `--model` wins.** The pool is a policy about which model to use *by default*: it
+**Why `--model` wins.** The pool is a policy about which model to use _by default_: it
 ranks models by priority, by peak hours and by proxy. A model named on the command line
 is a decision about this run, and a policy does not overrule a decision.
 

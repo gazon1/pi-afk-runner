@@ -27,7 +27,7 @@ at all: the promise that the change meets their criteria was made to nobody
 and checked by nobody.
 
 And the batch left no trace. The batched issues were never written to — the
-issues a run files are linked to each other, and the issues a run *batches*
+issues a run files are linked to each other, and the issues a run _batches_
 are not. The record named the issue and the steps, and the batch was in
 neither: a reader of the queue saw the issues as unrelated, and a reader of
 the record could not say what the change was for.
@@ -82,8 +82,8 @@ the batched briefs for the plan; the scope turn asks for the same answer, and
 a second read of a hundred issues' briefs is a cost the run pays for nothing.
 
 The record and the links are what make the batch visible to a person. The
-issues a run *files* are linked to each other, because a reader of the queue
-should see that they are one piece of work; the issues a run *batches* are
+issues a run _files_ are linked to each other, because a reader of the queue
+should see that they are one piece of work; the issues a run _batches_ are
 the same piece of work seen from the other side, and the queue should say so
 too.
 

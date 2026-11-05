@@ -43,7 +43,7 @@ depend on the brief's role.
 ## Rationale
 
 The alternative is to post 73 briefs as comments. That is the convention the repository's own
-triage skill states, and it is the right thing for the *next* issue. But it is 73 human decisions
+triage skill states, and it is the right thing for the _next_ issue. But it is 73 human decisions
 about issues that were already judged specified enough to work, and the runner cannot make them:
 the brief's content is a human's judgement about the work, and the body already carries it.
 

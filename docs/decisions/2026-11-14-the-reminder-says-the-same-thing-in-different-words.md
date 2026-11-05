@@ -44,11 +44,11 @@ request the model reads as a request.
 ## Decision
 
 **The first reminder says it in full; the repeats say it in fewer words.** The engine's own
-reminder — the one that names the verdict tool — explains itself once: *you have read enough,
-stop exploring and call the tool now, with the verdict you reached and the findings you found*.
-The repeats drop the explanation and keep the request: *stop exploring and call the tool now*,
-then *call the tool now, with the verdict you reached and the findings you found*, then *call the
-tool now*.
+reminder — the one that names the verdict tool — explains itself once: _you have read enough,
+stop exploring and call the tool now, with the verdict you reached and the findings you found_.
+The repeats drop the explanation and keep the request: _stop exploring and call the tool now_,
+then _call the tool now, with the verdict you reached and the findings you found_, then _call the
+tool now_.
 
 **The repeats come round again after the last.** A turn that reads for a long time is told more
 than three times, and the words keep coming round rather than running out.

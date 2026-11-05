@@ -18,7 +18,7 @@ reasons, is yours to keep; the work is not in it.
    part the diff touches into one document.
 
 2. **Check it against the brief's acceptance criteria.** One by one. Not "does
-   it look right" — does *this* criterion hold, and can you show it?
+   it look right" — does _this_ criterion hold, and can you show it?
 
 3. **Check the things that are easy to get wrong.**
    - Does the change do what the brief asked, and only that?

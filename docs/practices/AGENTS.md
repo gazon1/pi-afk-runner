@@ -32,6 +32,7 @@
 перепроверяй, а не откатывай. `git fetch origin && git log --oneline HEAD..origin/main`.
 
 **Механическая защита от divergence (#268):**
+
 - `pre-rebase` hook (`.githooks/pre-rebase`) — блокирует rebase на локальный main,
   который отстаёт от `origin/main`; предупреждает о неpushнутых коммитах.
 - Проверки divergence в CI больше нет: runner checkout'ит detached-коммит без трекинговой
@@ -81,9 +82,9 @@ notes, pomodoro, profile, projects, reminders, search, settings, statistics, tag
 - Maestro flows: `Maestro/flows/`. Helpers: `Maestro/helpers/`. Конвенции: `Maestro/CONVENTIONS.md`.
 - Supabase локально: `docs/architecture/local-stack.md`. Ключи из `.env` стека.
 - Тесты arch: `shared/src/jvmTest/kotlin/com/singularity/todo/arch/`.
- В `jvmTest` их читает **один** владелец: `MigrationRoundTripSupport.applyExportedSchema(N, connection)`
-(и `schemaFile(N)` — путь к экспорту). Тест миграции пишет «посади вот это — проверь вот это»,
-а не SQL; свой экземпляр фикстуры — это copy-paste, который ловит `MigrationFixtureHasOneOwnerTest`.
+  В `jvmTest` их читает **один** владелец: `MigrationRoundTripSupport.applyExportedSchema(N, connection)`
+  (и `schemaFile(N)` — путь к экспорту). Тест миграции пишет «посади вот это — проверь вот это»,
+  а не SQL; свой экземпляр фикстуры — это copy-paste, который ловит `MigrationFixtureHasOneOwnerTest`.
 
 ## Канонический CRUD-паттерн (новой фичи)
 
@@ -101,14 +102,14 @@ compile-time проверку графа; аннотации (`@Single`, `@Facto
 KOIN-W003 (graph unverifiable). Используй list composition:
 `modules(listOf(...) + domainModule() + listOf(...))`.
 
-| DSL | Когда |
-|---|---|
-| `single { Repo(get()) }` | singleton |
-| `viewModelOf(::Vm)` | все VM без runtime-параметров (**prefer**) |
-| `viewModel { (p: Param) -> Vm(get(), p) }` | VM с runtime-параметрами |
+| DSL                                                     | Когда                                        |
+| ------------------------------------------------------- | -------------------------------------------- |
+| `single { Repo(get()) }`                                | singleton                                    |
+| `viewModelOf(::Vm)`                                     | все VM без runtime-параметров (**prefer**)   |
+| `viewModel { (p: Param) -> Vm(get(), p) }`              | VM с runtime-параметрами                     |
 | `koinViewModel()` / `koinViewModel { parametersOf(p) }` | инъекция VM в Composable (не `koinInject()`) |
-| `factory { Vm(...) }` | **Never** для VM — memory leak |
-| `koinInject()` | репозитории и сервисы (не VM) |
+| `factory { Vm(...) }`                                   | **Never** для VM — memory leak               |
+| `koinInject()`                                          | репозитории и сервисы (не VM)                |
 
 **Где лежат биндинги.** `core/di/Modules.kt` — **фасад-агрегатор** (`coreLoggingModule()` +
 `domainModule(): List<Module>`), не источник истины. Реальные биндинги — в per-domain
@@ -128,6 +129,7 @@ KOIN-W003 (graph unverifiable). Используй list composition:
 тест или разбираешь падение.
 
 Миграционные тесты помечены `@Tag("slow")`; запуск: `./gw :shared:jvmTest -Ptest.tags=slow`.
+
 ## expect/actual порты
 
 Порт — интерфейс в `commonMain`, два actual, `single<Port>` в обоих
@@ -148,13 +150,13 @@ KOIN-W003 (graph unverifiable). Используй list composition:
 проверки их результата. Нужен там, где правка живёт на сервере: политики RLS
 бакета `backups` и таблица `google_calendar_grants`.
 
-
 **Реестр гейтов — единственный список.** `scripts/ci/static-gates.sh` и
 `docs/scripts/gate-registry.md` генерируются из него, руками их не правь. Новый
 гейт = одна запись в реестре + строка
 `gate blocking|advisory <name> <cmd>`; `|| true` на строке `gate` запрещён.
 Branch protection требует **один** check — `CI gate`. Как зарегистрировать гейт —
 `docs/architecture/registering-a-gate.md`.
+
 ## CI/CD
 
 **CI/CD — `docs/architecture/ci.md`:** реестр гейтов и его проекции, поверхности
@@ -200,7 +202,7 @@ CI, ожидание прогона (`gh pr checks <pr> --watch --interval 60`),
    отправив ничего. Перенаправляй в файл (`cmd > /tmp/probe/push.log 2>&1`) и читай файл.
    Замер: 6 пушей в одной сессии ушли с 141 и «успешным» кодом выхода.
 9. **Пушить по SSH без keepalive, когда pre-push длинный** — git открывает соединение с
-   GitHub *до* хука, и пока хук крутит detekt (несколько минут), соединение простаивает:
+   GitHub _до_ хука, и пока хук крутит detekt (несколько минут), соединение простаивает:
    GitHub закрывает его, и пуш падает с 141, хотя хук только что напечатал
    `=== Pre-push OK ===`. Это тот же 141, но другая причина. Лечится keepalive:
    `git config core.sshCommand "ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=10"`.

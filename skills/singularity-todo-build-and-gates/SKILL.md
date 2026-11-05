@@ -8,7 +8,7 @@ description: How to build, test and lint the Singularity Todo KMP project, and h
 ## `./gw`, never `./gradlew`
 
 Parallel worktrees share `~/.gradle`, and a shared Gradle home is a shared
-cache lock *and* a shared daemon registry: the build pushes against the
+cache lock _and_ a shared daemon registry: the build pushes against the
 neighbours and takes several times longer. `./gw` gives the worktree a
 private `GRADLE_USER_HOME` (the caches and the JDK stay shared — nobody
 writes them at the same time). A detail, but on a machine with several
@@ -87,7 +87,7 @@ what it is. Custom rules live in `detekt-rules/` (e.g.
 signature that fits on one line is written on one line (ADR
 `2026-10-09-detekt-class-signature-gotcha`).
 
-The report is XML *per finding*: `scripts/detekt-summary.py` prints the same
+The report is XML _per finding_: `scripts/detekt-summary.py` prints the same
 thing by rule and by place in two or three screens. Dumping `detekt.xml` into
 the context is hundreds of lines for an answer that fits in the first twenty.
 
@@ -108,7 +108,7 @@ green.
 ## The gate tooling belongs to the checkout
 
 `sgate` is an editable install of `scripts/src/`, so a venv installed for
-another worktree measures *that* worktree: the gate is green and it checked
+another worktree measures _that_ worktree: the gate is green and it checked
 somebody else's code. `bash scripts/ci/preflight-gate-tools.sh` prints whose
 checkout it is (the `sgate` line; `FOREIGN` — not yours). Own venv per
 checkout:
@@ -171,5 +171,5 @@ The hook also carries the tree rules (on the pushable tree, not the working
 one): the `AGENTS.md` pointers (`scripts/check-agents-pointers.py`), the
 change's registry entry (`scripts/check-issue-registry.py`), the change's
 review verdict (`scripts/check-review-verdicts.py`). Together they take under
-two seconds; the full gate suite is deliberately *not* in the hook (1 m 17 s,
+two seconds; the full gate suite is deliberately _not_ in the hook (1 m 17 s,
 and two thirds of it is gates that have to run everything).

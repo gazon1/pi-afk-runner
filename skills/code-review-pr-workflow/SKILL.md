@@ -60,23 +60,28 @@ CI runs the full loop, and `./check.sh` without `--fast` is it: run that before 
 
 ```markdown
 ## What
+
 One or two sentences. The problem, not the diff.
 
 ## Why
+
 Why this approach over the obvious alternative. Link the ADR if there is one.
 
 ## How
+
 The shape of the change, not a file listing. Note anything a reviewer cannot infer
 from the diff (a refactor that touches X for consistency, a generated file, a
 deliberately deferred item).
 
 ## Verification
+
 - [ ] ./check.sh --fast
 - [ ] just tcheck-evals
 - [ ] just docs-audit
 - [ ] manual/UI verification where the change is visual
 
 ## Risk
+
 What could break, and how you would notice. "None — docs only" is a valid answer.
 ```
 
@@ -105,6 +110,7 @@ documents: sha256:<the digest of the change's contract documents>
 ---
 
 ## What was reviewed
+
 ...
 ```
 
@@ -289,7 +295,7 @@ something. A `fail` keeps the pull request red: the findings have to be dealt wi
 a later review has to say `pass` again. A review that finds something and a pull request
 that merges anyway are two different things, and only one of them is right.
 
-The comment has to *open* with the marker, and the verdict has to be the whole value of
+The comment has to _open_ with the marker, and the verdict has to be the whole value of
 its line: `**Verdict:** pass or fail` is a sentence about verdicts, and the check
 reads no verdict in it. The marker and the format are written down in three places, so
 a comment that quotes them is not a review — and the check is built to say so.
@@ -302,7 +308,7 @@ left nothing behind is a review the next reader cannot see.
 **The gate is counted again when the review lands.** The check runs on the pull
 request, so the run that opened it finds no review and is red. After the review is
 posted, re-run the workflow: apply the `agent-reviewed` label (a pull-request-scoped
-trigger), or push. A run triggered by a *comment* would not help — GitHub counts the
+trigger), or push. A run triggered by a _comment_ would not help — GitHub counts the
 checks of such a run on the default branch, so the green would land on main and not on
 the pull request.
 
@@ -326,6 +332,7 @@ All comments resolved → Phase 3 (Approved)
 ### Step 2 — Phase 1: Read and advise (do not block)
 
 If the PR is in Draft phase:
+
 1. Read the PR description and diff
 2. Provide high-level feedback only
 3. Do NOT block on style, naming, or minor issues
@@ -336,6 +343,7 @@ If the PR is in Draft phase:
 ### Step 3 — Phase 2: Full review
 
 If the PR is marked Ready:
+
 1. Run `just tcheck` locally on the branch (or trust CI)
 2. Read every changed file
 3. Check:
@@ -351,6 +359,7 @@ If the PR is marked Ready:
 ### Step 4 — Phase 3: Approve or confirm
 
 Once all comments are resolved:
+
 1. Re-read the diff — verify the resolution is correct
 2. If satisfied: approve
 3. If not satisfied: leave a comment explaining why
@@ -359,6 +368,7 @@ Once all comments are resolved:
 ### Step 5 — Post-merge
 
 If you merged the PR (author role):
+
 1. Verify CI is green on main
 2. Update PROGRESS.md if this is part of an epic
 3. File retro ADR if significant findings during review

@@ -48,8 +48,8 @@ The vulnerability and secret scans need the network and a database, so they live
 Three rules a check cannot express, and the check that backs each:
 
 - `contract/`, `docs/practices/`, `skills/` and `pipelines/` are copies from the target
-  repository. Fix the original and copy it again; never hand-edit or format a copy. oxfmt and
-  jactionlint are scoped away from them.
+  repository. A content change is fixed in the original and copied again; the formatter
+  reformats a copy, and the next copy will need the same pass.
 - `dist/` is built, never edited. The build writes it and CI checks the entry points it promises.
 - A lint, format or scan finding is fixed, not silenced. An exception is one path and one rule,
   carries a reason, and needs a human decision.
@@ -94,7 +94,7 @@ Nothing in a run builds either: the guard refuses `./gw`, `./gradlew`, `./check.
 `just` gates, and the prompts say the same. The agent judges its change by reading it, and the
 verify turn says what it did not check.
 
-A run that *is* told to run gates runs them in the `gates` step, and the **agent does not run
+A run that _is_ told to run gates runs them in the `gates` step, and the **agent does not run
 them**: an instruction to run a gate is not a gate. A gate that refuses the change goes back to
 the agent as a turn, with the gate's own output, and the gates run again on what it fixed.
 
@@ -121,15 +121,15 @@ never merges, and landing is the opt-in exception.
 
 The working practices are copied from the target repository and apply here too:
 
-| Document | What it settles |
-|---|---|
-| [docs/practices/AGENTS.md](docs/practices/AGENTS.md) | the house rules: the decision log, the commits, the long runs, the gates |
-| [docs/practices/CODING_STANDARDS.md](docs/practices/CODING_STANDARDS.md) | the conventions no gate can check: consistency, naming, the level of abstraction |
-| [docs/practices/tests.md](docs/practices/tests.md) | fakes over mocks, the tags, the diagnostics, the ban list |
-| [docs/practices/verification.md](docs/practices/verification.md) | the order of the checks, and what a failed test means |
-| [docs/practices/ci.md](docs/practices/ci.md) | the gate suite, and what CI's verdict means |
-| [docs/practices/registering-a-gate.md](docs/practices/registering-a-gate.md) | how a check becomes a gate |
-| [docs/practices/doc-maintenance.md](docs/practices/doc-maintenance.md) | when a document is written, changed or deleted |
+| Document                                                                     | What it settles                                                                  |
+| ---------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| [docs/practices/AGENTS.md](docs/practices/AGENTS.md)                         | the house rules: the decision log, the commits, the long runs, the gates         |
+| [docs/practices/CODING_STANDARDS.md](docs/practices/CODING_STANDARDS.md)     | the conventions no gate can check: consistency, naming, the level of abstraction |
+| [docs/practices/tests.md](docs/practices/tests.md)                           | fakes over mocks, the tags, the diagnostics, the ban list                        |
+| [docs/practices/verification.md](docs/practices/verification.md)             | the order of the checks, and what a failed test means                            |
+| [docs/practices/ci.md](docs/practices/ci.md)                                 | the gate suite, and what CI's verdict means                                      |
+| [docs/practices/registering-a-gate.md](docs/practices/registering-a-gate.md) | how a check becomes a gate                                                       |
+| [docs/practices/doc-maintenance.md](docs/practices/doc-maintenance.md)       | when a document is written, changed or deleted                                   |
 
 Two of them change here rather than transfer: the **tags** are a Kotlin convention and do not
 apply to a TypeScript suite, and the **ban list** names Kotlin tools.

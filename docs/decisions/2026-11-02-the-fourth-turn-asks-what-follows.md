@@ -122,4 +122,3 @@ nobody reads.
   target one.
 - The prompt may only name what exists where the agent runs: this turn names
   the tool the work session carries, and no skill.
-

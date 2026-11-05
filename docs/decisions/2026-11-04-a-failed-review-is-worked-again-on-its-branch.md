@@ -27,7 +27,7 @@ data. On a host whose checkout did not have the branch, `git worktree add -b` ma
 base, the push was refused as a non-fast-forward, and the run failed without touching the work.
 
 The two states that did read the pull request made it worse. `Reviewed` meant "count the review"
-and `Counted` meant "the runner is done with it", so an issue whose claim *survived* a failed
+and `Counted` meant "the runner is done with it", so an issue whose claim _survived_ a failed
 review — a release that could not reach GitHub, a run stopped between the review and the release —
 was reported as `already reviewed` or `already counted` for ever, and never worked again.
 
@@ -49,13 +49,13 @@ pointer at the pull request; it is not what makes a review count.
 
 **`Failed` plans `rework`.** The rework is a run that:
 
-| Step | What it does |
-|---|---|
-| claim | takes the claim over — the ref is replaced, the branch is kept — whether the claim is still on the issue or not |
-| worktree | continues the branch — from the local branch, or from the remote's tip when the checkout has none |
-| session | is told it is a rework: the failed review arrives as data above the issue, and a rule in the system prompt says the branch is the work in progress |
-| gates, push, pull request | as a work run; the push is a fast-forward and the open pull request is found, not duplicated |
-| review | reviews the new diff, and its comment decides the gate as the newest one |
+| Step                      | What it does                                                                                                                                       |
+| ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| claim                     | takes the claim over — the ref is replaced, the branch is kept — whether the claim is still on the issue or not                                    |
+| worktree                  | continues the branch — from the local branch, or from the remote's tip when the checkout has none                                                  |
+| session                   | is told it is a rework: the failed review arrives as data above the issue, and a rule in the system prompt says the branch is the work in progress |
+| gates, push, pull request | as a work run; the push is a fast-forward and the open pull request is found, not duplicated                                                       |
+| review                    | reviews the new diff, and its comment decides the gate as the newest one                                                                           |
 
 **A failed review keeps the claim.** The run that stops on a review no longer passes the claim
 back. The claim is what points the next run at the pull request, and it is what the target
@@ -92,7 +92,7 @@ question — "is this work done" — and its answer does not change when the cla
 
 **Why the claim is kept.** The release exists so a claim nobody is working does not hold an issue
 out of the queue. A failed review is different: the issue is not available to work again from
-scratch, it is available to *continue*, and the claim is the only thing that says which pull
+scratch, it is available to _continue_, and the claim is the only thing that says which pull
 request "continue" means. The staleness window still takes it over if the runner dies.
 
 **Why the review travels verbatim.** `fixPrompt` already gives a fix turn the findings verbatim
@@ -104,7 +104,7 @@ never had the branch made it from the base, wrote the change a second time, and 
 push. The work a previous run pushed is the work this run continues, and it is on the remote.
 
 **Why the re-review is not a second review of one diff.** The contract says the runner reviews
-once, because a `pass` after a `fail` on the *same* diff would turn a red pull request green
+once, because a `pass` after a `fail` on the _same_ diff would turn a red pull request green
 without the change moving. A rework moves the diff before it reviews, so the newest comment judges
 a change that was not judged before, which is what the re-review is for.
 

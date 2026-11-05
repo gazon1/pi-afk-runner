@@ -17,7 +17,7 @@ and the host's pool — the file the host owns and edits — could not say "this
 effort I pay for".
 
 The SDK has the levels (`off` to `max`) and clamps them to what a model can do. What it has is
-no place where the host's *policy* about a model lives: the SDK's own per-model overrides are the
+no place where the host's _policy_ about a model lives: the SDK's own per-model overrides are the
 host's Pi settings, and the pool is the runner's file.
 
 ## Idea

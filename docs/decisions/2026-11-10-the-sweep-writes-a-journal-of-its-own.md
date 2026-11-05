@@ -34,7 +34,7 @@ a reader who knows how to read one journal reads the other.
 
 **The sweep's journal is spelled in the same module as the other journals'.** Its directory is
 `build/diagnostics/merge/` — the directory the per-pull-request directories are in — and its header
-names the sweep. The sweep is not a *subject*: a subject names a run by its number, and the sweep
+names the sweep. The sweep is not a _subject_: a subject names a run by its number, and the sweep
 has none — it is the run that works on the pull requests. The file's name, its path and the writer
 that appends to it are the ones the other journals use.
 

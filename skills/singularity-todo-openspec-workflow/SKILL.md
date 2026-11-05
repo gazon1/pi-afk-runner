@@ -23,15 +23,15 @@ Is the behavior changing?
 
 When behavior does NOT change, OpenSpec is not needed:
 
-| Situation | Why skip | What to do instead |
-|---|---|---|
-| Bug fix with no behavior change | Fix is the spec | Ordinary PR |
-| Test-only changes | Tests are not behavior | Ordinary PR |
-| Dependency/version update | No behavior change | Ordinary PR |
-| Detekt/lint auto-fix | Mechanical rewrite | Ordinary PR |
-| Doc-only update | No code change | Ordinary PR |
-| Rename with no contract change | Renames are not behavior | Ordinary PR |
-| Adding a use case that follows an existing pattern | Already described | Check existing specs first |
+| Situation                                          | Why skip                 | What to do instead         |
+| -------------------------------------------------- | ------------------------ | -------------------------- |
+| Bug fix with no behavior change                    | Fix is the spec          | Ordinary PR                |
+| Test-only changes                                  | Tests are not behavior   | Ordinary PR                |
+| Dependency/version update                          | No behavior change       | Ordinary PR                |
+| Detekt/lint auto-fix                               | Mechanical rewrite       | Ordinary PR                |
+| Doc-only update                                    | No code change           | Ordinary PR                |
+| Rename with no contract change                     | Renames are not behavior | Ordinary PR                |
+| Adding a use case that follows an existing pattern | Already described        | Check existing specs first |
 
 **Rule:** always `openspec list --specs` before writing a new proposal — if a spec already describes this behavior, write a change to modify it, not a new proposal.
 
@@ -41,7 +41,7 @@ Before writing any OpenSpec artifact, read in this order:
 
 1. **The real code** — not grep, not a skill. Read the actual source files that implement the behavior. Grep misses wiring, initialization order, and implicit dependencies.
 2. **`openspec list --specs`** — what specs already exist for this area?
-3. **`openspec/specs/MODULE-INDEX.md`** — covered *and* uncovered modules, so you can tell whether you are adding a spec for code you are changing or backfilling one for code you are not.
+3. **`openspec/specs/MODULE-INDEX.md`** — covered _and_ uncovered modules, so you can tell whether you are adding a spec for code you are changing or backfilling one for code you are not.
 4. **`docs/agents/domain.md`** — single-context layout: domain docs at `docs/decisions/`, skills at `.agents/skills/`.
 5. **`docs/decisions/DIGEST.md`** — architecture rules that already apply.
 6. **Relevant ADRs** — the `Context/Decision/Rationale/Consequences` for this area.

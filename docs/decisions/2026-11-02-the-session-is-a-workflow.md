@@ -42,7 +42,7 @@ file it runs, and the file list is read from them: the state and the file
 cannot drift apart.
 
 **The engine runs the graph; the runner runs the turns.** The engine is given
-a *turn runner* instead of its own subagents. Its agents are separate
+a _turn runner_ instead of its own subagents. Its agents are separate
 sessions in separate worktrees, each with a model of its own — a fleet. This
 is one session: one system prompt, one set of tools, one context that every
 turn sees. The rule that the issue body is data lives in the **system
@@ -78,7 +78,7 @@ exactly the place a rule does not belong.
 
 Keeping the runner's rules out of the engine is what keeps the engine's
 behaviour from becoming the runner's behaviour by accident. The engine's
-default for a failed agent is a *recoverable* failure: it logs it, returns
+default for a failed agent is a _recoverable_ failure: it logs it, returns
 nothing, and carries on to the next state. A run that carried on past a
 failed turn would look like a run that worked, and the work would be judged
 on what it left behind.

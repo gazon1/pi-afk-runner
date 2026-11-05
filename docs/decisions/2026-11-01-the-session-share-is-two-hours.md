@@ -52,7 +52,7 @@ that is already the tight one.
 
 **Why the share and not the ceiling.** Under the shares model the ceiling is
 the sum, and the sum was never the binding constraint: the session's share
-was. A run of issue 1756 died with an hour of *session*, while the ceiling
+was. A run of issue 1756 died with an hour of _session_, while the ceiling
 was still an hour and a half away. Raising the ceiling without raising the
 share would have scaled every share down, and the session would have got
 less.

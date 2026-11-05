@@ -14,8 +14,8 @@ tags: [runner, extension, session, errors]
 
 The live front door reports through the host session it was handed: `publish` writes the run's
 status entry and its footer line, `talk` sends the notifications. Each of them wrapped its calls in
-a `catch {}` that caught everything, and the comment above said what the catch was for — *the
-session may be gone* — while the code said *anything at all*.
+a `catch {}` that caught everything, and the comment above said what the catch was for — _the
+session may be gone_ — while the code said _anything at all_.
 
 The two are not the same. A session switch, a fork or a reload retires the context the runner
 holds: the host says so and the calls on it throw
@@ -60,7 +60,7 @@ differently is one edit away.
 **Why the run does not go on after such a failure.** A run that keeps going after a mistake in its
 own reporting is a run whose report nobody can trust. The failure ends the run — in the command
 that started it, or in the background — and the lock is released on the way out. The one place
-where reporting happens *after* the run has already failed is the exception: there the failure of
+where reporting happens _after_ the run has already failed is the exception: there the failure of
 the report is written where a human can find it, because the run's own failure is what the human
 is there to read.
 
@@ -68,7 +68,7 @@ is there to read.
 
 - A bug in the front door's reporting is loud: it fails the command that started the run, or ends
   the run in the background. The run does not carry on with a report nobody can trust.
-- A failure of the report that is written *after* the run has failed is written down instead: the
+- A failure of the report that is written _after_ the run has failed is written down instead: the
   run has already ended, and its own failure is what the human reads.
 - What the human hears about a failed run is the run's own failure, not the reporting's: the
   failure is said first, and the stage is published afterwards.

@@ -64,13 +64,13 @@ awaitState { vm.state.value is UiState.Content }   // виртуальное в�
 
 ### BAN list
 
-| Запрещено | Почему | Альтернатива |
-|---|---|---|
-| `stateIn` в ViewModel | держит upstream active 5s, ломает тесты без subscriber | `MutableStateFlow + scope.launch { }.collect {}` |
-| `viewModelScope` в production | tight coupling, нетестируемо | инъектированный `AutoCloseableCoroutineScope` |
-| `runBlocking` в production | blocking поток, deadlock risk | `scope.launch { }` |
-| `delay(N)` в тестах | реальное время, не virtual time | `advanceUntilIdle()` + debounce mocking |
-| `vm.state.launchIn(scope)` | костыль вокруг `stateIn` | canonical VM pattern |
+| Запрещено                     | Почему                                                 | Альтернатива                                     |
+| ----------------------------- | ------------------------------------------------------ | ------------------------------------------------ |
+| `stateIn` в ViewModel         | держит upstream active 5s, ломает тесты без subscriber | `MutableStateFlow + scope.launch { }.collect {}` |
+| `viewModelScope` в production | tight coupling, нетестируемо                           | инъектированный `AutoCloseableCoroutineScope`    |
+| `runBlocking` в production    | blocking поток, deadlock risk                          | `scope.launch { }`                               |
+| `delay(N)` в тестах           | реальное время, не virtual time                        | `advanceUntilIdle()` + debounce mocking          |
+| `vm.state.launchIn(scope)`    | костыль вокруг `stateIn`                               | canonical VM pattern                             |
 
 ### Canonical VM pattern
 
@@ -105,8 +105,8 @@ recompiles and re-executes; `--rerun-tasks` — только отладочна�
 ```
 
 `scripts/check-test-tags-catalog.py` делает ту же сверку за секунды, без JVM, —
-он и стоит в гейтах; полный прогон нужен, чтобы *переписать* файл, а не чтобы
-*узнать*, что он устарел.
+он и стоит в гейтах; полный прогон нужен, чтобы _переписать_ файл, а не чтобы
+_узнать_, что он устарел.
 
 Тесты пишутся в `shared/src/{jvmTest,commonTest}`, двойники — в
 `test/fakes/FakeRepositories.kt` (fake, не моки). Скилл

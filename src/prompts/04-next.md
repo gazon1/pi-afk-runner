@@ -45,12 +45,15 @@ nobody else is going to notice them.
    What is true after the work, with the edge cases named.
 
    **Key interfaces:**
+
    - `TypeName`: what changes, and why
 
    **Acceptance criteria:**
+
    - [ ] A criterion somebody else can check
 
    **Out of scope:**
+
    - The adjacent thing this issue does not touch
    ```
 

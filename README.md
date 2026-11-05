@@ -33,11 +33,11 @@ this repository's own: [contract/merge.md](contract/merge.md).
 This is an **assembly**. The mechanics come from ready-made packages, pinned to exact versions in
 `package.json`:
 
-| Component | Version | What it does |
-|---|---|---|
-| `@mastra/core` | 1.81.0 | the engine: the agent, the workspace, the model gateway |
-| `@mastra/memory` | 1.40.0 | the memory a run's turns live in |
-| `@mastra/schema-compat` | 1.3.17 | the tool schemas, from typebox to Standard Schema |
+| Component               | Version | What it does                                            |
+| ----------------------- | ------- | ------------------------------------------------------- |
+| `@mastra/core`          | 1.81.0  | the engine: the agent, the workspace, the model gateway |
+| `@mastra/memory`        | 1.40.0  | the memory a run's turns live in                        |
+| `@mastra/schema-compat` | 1.3.17  | the tool schemas, from typebox to Standard Schema       |
 
 Three things are irreducibly ours: the **exclusive claim** (a remote ref carrying a nonce — a
 label cannot be a lock, because adding one is idempotent), the **binding to the contract above**,
@@ -148,7 +148,7 @@ Nothing else: a run that nobody told to gate runs no gate, and the contract's li
 fallback. A file that cannot be read ends the run where it stands — a runner that quietly fell
 back to a list the repository did not ask for would judge a tree by somebody else's rules.
 
-When a run *is* told to run gates, they run in the worktree, on the tree the agent left, in the
+When a run _is_ told to run gates, they run in the worktree, on the tree the agent left, in the
 `gates` step between the session and the push. A gate that does not pass ends the run there: the
 claim is released, the work stays on the local branch, and nothing is pushed. The record carries
 the tail of what the gate printed, so a failed run says which gate failed and why. The whole of
@@ -378,17 +378,17 @@ and it only lands what that pipeline opened and reviewed.
 
 ## What is in this repository
 
-| Directory | What it is |
-|---|---|
-| `src/` | the runner: the queue, the claim, the worktree, the session, the push, the pull request, the review, the record |
-| `test/` | the suite, in the repository it operates on's sandbox — real `git` in a temporary directory, stubbed `gh` and stubbed agent |
-| [docs/lifecycle.md](docs/lifecycle.md) | the life of an issue: the states it is derived into, the plans they run, and every way a run can end |
-| `contract/` | **a copy** of the contract this runner binds to, taken from the repository it operates on — see [contract/README.md](contract/README.md) |
-| `docs/decisions/` | the decisions behind the runner and the practices it inherits |
-| `docs/practices/` | the working practices: the agent's rules, the coding standards, the test rules, the order of the checks, the gate registry, the docs lifecycle |
-| `skills/` | the skills the runner's agent uses — the review, the gates, the change workflow, the decision log, the issue triage, and how to write for agents. The package ships them, and the work session's skill paths carry them, so a prompt may name one of them |
-| `pipelines/` | the CI workflow the runner's verdict tool reads |
-| `systemd/` | the service and the timer that run it unattended, and what the exit codes mean |
+| Directory                              | What it is                                                                                                                                                                                                                                                |
+| -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/`                                 | the runner: the queue, the claim, the worktree, the session, the push, the pull request, the review, the record                                                                                                                                           |
+| `test/`                                | the suite, in the repository it operates on's sandbox — real `git` in a temporary directory, stubbed `gh` and stubbed agent                                                                                                                               |
+| [docs/lifecycle.md](docs/lifecycle.md) | the life of an issue: the states it is derived into, the plans they run, and every way a run can end                                                                                                                                                      |
+| `contract/`                            | **a copy** of the contract this runner binds to, taken from the repository it operates on — see [contract/README.md](contract/README.md)                                                                                                                  |
+| `docs/decisions/`                      | the decisions behind the runner and the practices it inherits                                                                                                                                                                                             |
+| `docs/practices/`                      | the working practices: the agent's rules, the coding standards, the test rules, the order of the checks, the gate registry, the docs lifecycle                                                                                                            |
+| `skills/`                              | the skills the runner's agent uses — the review, the gates, the change workflow, the decision log, the issue triage, and how to write for agents. The package ships them, and the work session's skill paths carry them, so a prompt may name one of them |
+| `pipelines/`                           | the CI workflow the runner's verdict tool reads                                                                                                                                                                                                           |
+| `systemd/`                             | the service and the timer that run it unattended, and what the exit codes mean                                                                                                                                                                            |
 
 `contract/`, `docs/practices/`, `skills/` and `pipelines/` are copies from the repository this
 runner operates on. The runner **runs** that repository's copies — the ones here are for the

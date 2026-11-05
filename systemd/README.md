@@ -87,22 +87,22 @@ lock keeps the ticks from overlapping.
 
 The unit's status is the exit code, and the code names the step:
 
-| Code | What it says |
-|---|---|
-| 0 | the run finished, or the queue was empty |
-| 1 | an issue could not be worked — claimed elsewhere, already reviewed, or already counted |
-| 3 | no model was available — the pool had nothing that could answer |
-| 10 | the selection failed |
-| 20 | the claim failed |
-| 30 | the worktree failed |
-| 40 | the agent's session failed, or was cut off by the deadline |
-| 45 | the repository's gates did not pass — the run pushed nothing |
-| 50 | the push failed |
-| 60 | the pull request failed |
-| 70 | the review failed |
-| 80 | the re-count failed |
-| 75 | another runner holds the lock — the run skipped itself |
-| 76 | the lock could not be taken — the run refused to start |
+| Code | What it says                                                                           |
+| ---- | -------------------------------------------------------------------------------------- |
+| 0    | the run finished, or the queue was empty                                               |
+| 1    | an issue could not be worked — claimed elsewhere, already reviewed, or already counted |
+| 3    | no model was available — the pool had nothing that could answer                        |
+| 10   | the selection failed                                                                   |
+| 20   | the claim failed                                                                       |
+| 30   | the worktree failed                                                                    |
+| 40   | the agent's session failed, or was cut off by the deadline                             |
+| 45   | the repository's gates did not pass — the run pushed nothing                           |
+| 50   | the push failed                                                                        |
+| 60   | the pull request failed                                                                |
+| 70   | the review failed                                                                      |
+| 80   | the re-count failed                                                                    |
+| 75   | another runner holds the lock — the run skipped itself                                 |
+| 76   | the lock could not be taken — the run refused to start                                 |
 
 A `75` is not a failure: the timer fired while a run was still going, and the
 runner left the work to the run that is already doing it. A `76` **is** a

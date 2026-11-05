@@ -68,7 +68,7 @@ work is done. A split chains its pieces this way, so they run in order. The
 check is best-effort: a read that fails does not block, because guessing wrong
 in that direction holds an issue out of the queue for ever.
 
-> **Replaced on 2026-11-03.** The rule above settled a dependency on a *closed*
+> **Replaced on 2026-11-03.** The rule above settled a dependency on a _closed_
 > parent, which cannot tell a merge from a rejection. The rule now is in
 > `2026-11-03-a-dependency-is-settled-by-a-merge.md`: a dependency is settled
 > when the parent's pull request is **merged**. The rest of this record stands.

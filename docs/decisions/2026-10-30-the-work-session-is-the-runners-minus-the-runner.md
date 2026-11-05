@@ -28,20 +28,20 @@ this repository, one of them `./dist/extension.js`.
 
 **A session that discovers nothing has no model.** The natural fix — `noExtensions: true` — was
 measured too, and it closes the loop above: discovery finds only the guard. It also removes the
-host's model providers, because on this host the provider *is* an extension
+host's model providers, because on this host the provider _is_ an extension
 (`pi-commandcode-provider`, installed under the agent directory). Measured: `providers: []`, no
 model to run on, and `pickModel` throws.
 
 The guard has a third constraint of its own. `@gotgenes/pi-permission-system` reads its policy from
 files and from nowhere else, at two scopes: the agent directory — which is the host's, process-wide,
 and shared with every session a human has open — and the project, `<cwd>/.pi/…`, which here is the
-worktree. A session with no policy at all resolves every unmatched call to *ask*, and an ask in a
+worktree. A session with no policy at all resolves every unmatched call to _ask_, and an ask in a
 session with no dialog is a **deny**, so the work session would do nothing.
 
 And a fourth: **the guard never hears `session_start` in a session the SDK creates.**
 `createAgentSession` builds the extension runner and binds the tool-call gate, but `session_start`
 is the host's event, emitted by `AgentSession.bindExtensions`, which a host calls and the SDK does
-not. Measured: with the guard loaded and no `session_start`, *every* tool call — `read .env`,
+not. Measured: with the guard loaded and no `session_start`, _every_ tool call — `read .env`,
 `read README.md` — comes back `{"block":true,"reason":"… requires approval, but no interactive UI
 is available"}`, because the policy was never loaded and every call is an unmatched ask.
 

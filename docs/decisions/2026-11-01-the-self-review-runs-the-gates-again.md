@@ -74,7 +74,7 @@ runner reads, not prose it has to parse out of a message. A report the runner ca
 report it cannot hold the agent to.
 
 **Why the tree travels with the report.** A gate run on an earlier tree is not a gate run on this
-one. Without the tree, "the gates passed" says nothing about *which* tree passed, and the fix the
+one. Without the tree, "the gates passed" says nothing about _which_ tree passed, and the fix the
 self-review made after the gates ran is exactly the case the report would wave through.
 
 **Why the runner refuses rather than warns.** Green means one thing. A push that carries a change

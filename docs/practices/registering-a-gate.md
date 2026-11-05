@@ -5,12 +5,12 @@ four places, and each of them answers a different question; reading them in the
 wrong order is how a gate ends up registered in the registry and invisible to
 CI, or visible to CI and unknown to `sgate`.
 
-| Where | The question it answers |
-|---|---|
-| `scripts/src/sgate/commands/_registry.py` — `_REGISTERED` (`GateSpec`) | *What* the gate is: name, mode, dispatch |
-| `scripts/src/sgate/gate_manifest.py` — `PLACEMENTS` (`Placement`) | *Where* it runs: a shell line, a cluster, or elsewhere |
-| `scripts/src/sgate/commands/_registry.py` — `GATE_CONTROLS` (`Control`) | The one input change that must make it fail |
-| `scripts/src/sgate/gate_controls.py` — `SCRIPT_GATES` (`ScriptGate`) | That same control, in the form the harness runs |
+| Where                                                                   | The question it answers                                |
+| ----------------------------------------------------------------------- | ------------------------------------------------------ |
+| `scripts/src/sgate/commands/_registry.py` — `_REGISTERED` (`GateSpec`)  | _What_ the gate is: name, mode, dispatch               |
+| `scripts/src/sgate/gate_manifest.py` — `PLACEMENTS` (`Placement`)       | _Where_ it runs: a shell line, a cluster, or elsewhere |
+| `scripts/src/sgate/commands/_registry.py` — `GATE_CONTROLS` (`Control`) | The one input change that must make it fail            |
+| `scripts/src/sgate/gate_controls.py` — `SCRIPT_GATES` (`ScriptGate`)    | That same control, in the form the harness runs        |
 
 The first two are the declaration; the last two are the **positive control** —
 without one, a gate nobody has seen fail is a gate that is green by accident.
@@ -99,14 +99,14 @@ is the other way round: it writes by default, `--check` verifies.
 
 ## What fails when a step is skipped
 
-| Skipped | The gate that says so | Its message |
-|---|---|---|
-| the placement | `scripts/tests/test_gate_manifest.py` | `registered gates with no placement` |
-| the render | `the shell registry is current` | the file is not what the manifest renders |
-| the control | Part J of `check-gate-wiring.py` | `registry gate '…' has no positive control` |
-| the twin, or a twin that disagrees | Part J of `check-gate-wiring.py` | `the control for '…' and the registry entry disagree about …` |
-| the registry entry (the script alone) | Part H of `check-gate-wiring.py` | `scripts/check-….py can fail and is named by no gate surface` |
-| the shell line | `scripts/check-gate-registries.py` | a gate line with no registry entry, or the other way round |
+| Skipped                               | The gate that says so                 | Its message                                                   |
+| ------------------------------------- | ------------------------------------- | ------------------------------------------------------------- |
+| the placement                         | `scripts/tests/test_gate_manifest.py` | `registered gates with no placement`                          |
+| the render                            | `the shell registry is current`       | the file is not what the manifest renders                     |
+| the control                           | Part J of `check-gate-wiring.py`      | `registry gate '…' has no positive control`                   |
+| the twin, or a twin that disagrees    | Part J of `check-gate-wiring.py`      | `the control for '…' and the registry entry disagree about …` |
+| the registry entry (the script alone) | Part H of `check-gate-wiring.py`      | `scripts/check-….py can fail and is named by no gate surface` |
+| the shell line                        | `scripts/check-gate-registries.py`    | a gate line with no registry entry, or the other way round    |
 
 ## Traps
 

@@ -146,8 +146,8 @@ Peak as a filter keeps the promise simple: the pool uses models that are cheap r
 does not run. A demotion — "use the expensive one if nothing else is left" — would make every
 peak window a reason to pay.
 
-The periodic check answers the question the host actually has: *is something better available
-now?* Moving upwards only keeps it safe — a model that has become available is taken, and a
+The periodic check answers the question the host actually has: _is something better available
+now?_ Moving upwards only keeps it safe — a model that has become available is taken, and a
 model that is working is not abandoned. A model the provider no longer offers is not working,
 and leaving it is what the check is for.
 

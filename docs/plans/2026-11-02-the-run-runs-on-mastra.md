@@ -18,33 +18,33 @@ Verified against `@mastra/core` 1.81.0 (the types in
 
 ## 1. The boundary
 
-| | Before | Now |
-|---|---|---|
-| The runner's sessions (work, review, merge resolution) | a Pi session (`src/cli.ts` `piSessionFactory`) | **Mastra `Agent` + `Memory`** (`src/mastra/session.ts`) |
-| The graph engine | `@quintinshaw/pi-dynamic-workflows` | **the runner's own TypeScript** (`src/workflow.ts`) |
-| The decision tools | Pi `defineTool` + typebox | **one description (`src/tools.ts`), one adapter** (`src/mastra/tools.ts`) |
-| Skills | Pi `additionalSkillPaths`, `$name` in prompts | **Mastra skills by directory**; the `$name` rule stands |
-| The guard | `@gotgenes/pi-permission-system` | **the same rules, over Mastra's own hook** (`src/mastra/guard.ts`) |
-| The model | Pi `modelRuntime` (`pickModel`) | **a Mastra gateway** (the MiniMax one) |
-| The live door (`src/extension.ts`) | a Pi extension | **gone** — the runner is a command |
+|                                                        | Before                                         | Now                                                                       |
+| ------------------------------------------------------ | ---------------------------------------------- | ------------------------------------------------------------------------- |
+| The runner's sessions (work, review, merge resolution) | a Pi session (`src/cli.ts` `piSessionFactory`) | **Mastra `Agent` + `Memory`** (`src/mastra/session.ts`)                   |
+| The graph engine                                       | `@quintinshaw/pi-dynamic-workflows`            | **the runner's own TypeScript** (`src/workflow.ts`)                       |
+| The decision tools                                     | Pi `defineTool` + typebox                      | **one description (`src/tools.ts`), one adapter** (`src/mastra/tools.ts`) |
+| Skills                                                 | Pi `additionalSkillPaths`, `$name` in prompts  | **Mastra skills by directory**; the `$name` rule stands                   |
+| The guard                                              | `@gotgenes/pi-permission-system`               | **the same rules, over Mastra's own hook** (`src/mastra/guard.ts`)        |
+| The model                                              | Pi `modelRuntime` (`pickModel`)                | **a Mastra gateway** (the MiniMax one)                                    |
+| The live door (`src/extension.ts`)                     | a Pi extension                                 | **gone** — the runner is a command                                        |
 
 ## 2. What was replaced, and by what
 
-| Before | File | Now |
-|---|---|---|
-| Three script strings (`LINEAR_SCRIPT`, `WORK_SCRIPT`, `REVIEW_SCRIPT`) | `src/workflow.ts` | the runner's own graph: the states, the action nodes, the branch, the review loop |
-| `runEngine` / `turnAgent` | `src/workflow.ts` | the same; the `TurnRunner` seam stays as it is |
-| the review's `gate` (review → fix → review) | `src/workflow.ts` `runReviewGate` | the runner's own loop: the attempt, the retry, the cut-off |
-| the Pi session (`createAgentSession`, `DefaultResourceLoader`) | `src/cli.ts` | `new Agent(...)` + `agent.generate(prompt, {abortSignal, memory})` |
-| `AgentSession` (`prompt`/`abort`/`dispose`/`messages`) | `src/session.ts` | stays the **interface**; the implementation is `src/mastra/session.ts` |
-| `SessionFactory` | `src/session.ts` | stays the **seam**: `mastraSessionFactory` |
-| the five decision tools | `src/session.ts`, `src/leftovers.ts` | **described once** in `src/tools.ts`; `src/mastra/tools.ts` builds Mastra's object from it; the **holder pattern stays** |
-| skills discovery | `src/cli.ts` | the directories themselves, read by the runner (`src/mastra/skills.ts`) |
-| the guard's deny list | `src/guard.ts` | the **same list**, over Mastra's `beforeToolCall` hook |
-| the model | `src/cli.ts` `pickModel` | `Mastra` gateways; the MiniMax gateway (`src/mastra/gateways/minimax.ts`) |
-| usage (`usageFromMessage`) | `src/session.ts` | `answer.usage` — tokens only, no cost |
-| the Pi transcript | `src/extension.ts` | gone with the door; the run's own log file under `build/diagnostics/issue-<N>/` is what a human reads |
-| the version gate (`src/version.ts`) and the package's public API (`src/index.ts`) | — | **gone**: the package is a `bin` with no exports |
+| Before                                                                            | File                                 | Now                                                                                                                      |
+| --------------------------------------------------------------------------------- | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------ |
+| Three script strings (`LINEAR_SCRIPT`, `WORK_SCRIPT`, `REVIEW_SCRIPT`)            | `src/workflow.ts`                    | the runner's own graph: the states, the action nodes, the branch, the review loop                                        |
+| `runEngine` / `turnAgent`                                                         | `src/workflow.ts`                    | the same; the `TurnRunner` seam stays as it is                                                                           |
+| the review's `gate` (review → fix → review)                                       | `src/workflow.ts` `runReviewGate`    | the runner's own loop: the attempt, the retry, the cut-off                                                               |
+| the Pi session (`createAgentSession`, `DefaultResourceLoader`)                    | `src/cli.ts`                         | `new Agent(...)` + `agent.generate(prompt, {abortSignal, memory})`                                                       |
+| `AgentSession` (`prompt`/`abort`/`dispose`/`messages`)                            | `src/session.ts`                     | stays the **interface**; the implementation is `src/mastra/session.ts`                                                   |
+| `SessionFactory`                                                                  | `src/session.ts`                     | stays the **seam**: `mastraSessionFactory`                                                                               |
+| the five decision tools                                                           | `src/session.ts`, `src/leftovers.ts` | **described once** in `src/tools.ts`; `src/mastra/tools.ts` builds Mastra's object from it; the **holder pattern stays** |
+| skills discovery                                                                  | `src/cli.ts`                         | the directories themselves, read by the runner (`src/mastra/skills.ts`)                                                  |
+| the guard's deny list                                                             | `src/guard.ts`                       | the **same list**, over Mastra's `beforeToolCall` hook                                                                   |
+| the model                                                                         | `src/cli.ts` `pickModel`             | `Mastra` gateways; the MiniMax gateway (`src/mastra/gateways/minimax.ts`)                                                |
+| usage (`usageFromMessage`)                                                        | `src/session.ts`                     | `answer.usage` — tokens only, no cost                                                                                    |
+| the Pi transcript                                                                 | `src/extension.ts`                   | gone with the door; the run's own log file under `build/diagnostics/issue-<N>/` is what a human reads                    |
+| the version gate (`src/version.ts`) and the package's public API (`src/index.ts`) | —                                    | **gone**: the package is a `bin` with no exports                                                                         |
 
 ## 3. What did not change
 
@@ -63,6 +63,7 @@ prompt, not a user turn" (the untrusted input rule) — survives, and has its ow
 Each phase was its own step, green on `npm run check`.
 
 **Phase 1 — the Mastra agent beside Pi.** Done, and later dissolved into phase 4.
+
 - `src/mastra/agent.ts`: the `Agent` — the system prompt from `systemPromptSections`,
   the tools, the skills, the memory.
 - `src/mastra/session.ts`: `AgentSession` on Mastra — `prompt` → `agent.generate`,
@@ -82,6 +83,7 @@ Each phase was its own step, green on `npm run check`.
   says so on the last assistant message.
 
 **Phase 2 — the graph.** Done, but **not** as a Mastra workflow.
+
 - `src/workflow.ts` is the runner's own graph. The engine gave the runner three things
   — `phase()`, `agent()` and `gate()` — and those three are now the runner's own words.
 - The public API does not change: `WORKFLOW_STATES`, `WORKFLOW_ACTIONS`,
@@ -97,6 +99,7 @@ Each phase was its own step, green on `npm run check`.
   `TurnRunner` do not change.
 
 **Phase 3 — memory and observability.** Done, except the store.
+
 - `resourceId` is the worktree, `thread` is the run (`afk-runner`).
 - The store is `InMemoryStore`: the memory of a run lives in the process, so a run that
   restarts loses its context. A `MastraCompositeStore` / `LibSQLStore` is the next step,
@@ -104,6 +107,7 @@ Each phase was its own step, green on `npm run check`.
 - Usage and the record are read from the agent's answer.
 
 **Phase 4 — the switch.** Done.
+
 - Mastra is the only engine. `--engine pi|mastra` and `--agent-dir` are usage errors.
 - Removed: `@quintinshaw/pi-dynamic-workflows`, `@gotgenes/pi-permission-system`,
   `@earendil-works/pi-coding-agent`, `src/pi-tools.ts`, `src/version.ts`, `src/index.ts`,
@@ -112,15 +116,15 @@ Each phase was its own step, green on `npm run check`.
 
 ## 5. What was lost, and what came instead
 
-| Lost | Why | What came instead |
-|---|---|---|
-| Pi's OAuth and its catalogue of providers | a Mastra gateway is an API key | the MiniMax gateway; `--model` names a Mastra model reference |
-| `$skill` as an SDK discovery | Mastra's skills are directories | the `$name` convention stays; the runner reads the directories itself |
-| the Pi guard's deny mechanism | it is another mechanism | the runner's own deny filter, over the same patterns |
-| the turn's failure as `stopReason: "error"` | Mastra throws | the same `Error`, settled on the last assistant message |
-| the recoverable review failure | it was the engine's, not the runner's | a failed review stops the run: the finding stays on the issue |
-| the version gate | there is no SDK to gate | `@mastra/core` is pinned exactly, at 1.81.0 |
-| the package's public API | it exported a version check | the package is a `bin` |
+| Lost                                        | Why                                   | What came instead                                                     |
+| ------------------------------------------- | ------------------------------------- | --------------------------------------------------------------------- |
+| Pi's OAuth and its catalogue of providers   | a Mastra gateway is an API key        | the MiniMax gateway; `--model` names a Mastra model reference         |
+| `$skill` as an SDK discovery                | Mastra's skills are directories       | the `$name` convention stays; the runner reads the directories itself |
+| the Pi guard's deny mechanism               | it is another mechanism               | the runner's own deny filter, over the same patterns                  |
+| the turn's failure as `stopReason: "error"` | Mastra throws                         | the same `Error`, settled on the last assistant message               |
+| the recoverable review failure              | it was the engine's, not the runner's | a failed review stops the run: the finding stays on the issue         |
+| the version gate                            | there is no SDK to gate               | `@mastra/core` is pinned exactly, at 1.81.0                           |
+| the package's public API                    | it exported a version check           | the package is a `bin`                                                |
 
 ## 6. Risks
 

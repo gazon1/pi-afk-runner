@@ -14,16 +14,16 @@ so that:
 
 ## The files, and where they come from
 
-| Here | From `gazon1/sing` | What it is |
-|---|---|---|
-| `afk-runner.md` | `docs/architecture/afk-runner.md` | the binding, written for the author of the extension: the queue selector, the brief's marker, the review's marker and verdict, the re-count label, the registry entries, the worktree recipe |
-| `AGENT-BRIEF.md` | `.agents/skills/triage/AGENT-BRIEF.md` | the brief's format — the comment the runner reads as the contract for the work |
-| `scripts/setup-worktree.sh` | `scripts/setup-worktree.sh` | what the runner runs inside the worktree: the `core.bare` repair, the per-worktree `core.hooksPath`, the `.env` copy, the private Gradle home |
-| `scripts/check-review-verdicts.py` | `scripts/check-review-verdicts.py` | the digest of a change's contract documents, which the verdict file carries |
-| `scripts/openspec-import-all.py` | `scripts/openspec-import-all.py` | the importer that creates a change's registry entry |
-| `scripts/ci-verdict.py` | `scripts/ci-verdict.py` | the tool that reads a commit's CI verdict — **its exit code is the verdict** |
-| `scripts/ci/check-agent-review.py` | `scripts/ci/check-agent-review.py` | the gate that reads the review comment, and the oracle the runner's tests assert against |
-| `scripts/src/sgate/gatekit/verdicts.py` | `scripts/src/sgate/gatekit/verdicts.py` | the vocabulary a verdict is written in — the frontmatter shape, the two verdicts, the slug of a change. Both gates read it from here, and the runner writes the file it describes |
+| Here                                    | From `gazon1/sing`                      | What it is                                                                                                                                                                                   |
+| --------------------------------------- | --------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `afk-runner.md`                         | `docs/architecture/afk-runner.md`       | the binding, written for the author of the extension: the queue selector, the brief's marker, the review's marker and verdict, the re-count label, the registry entries, the worktree recipe |
+| `AGENT-BRIEF.md`                        | `.agents/skills/triage/AGENT-BRIEF.md`  | the brief's format — the comment the runner reads as the contract for the work                                                                                                               |
+| `scripts/setup-worktree.sh`             | `scripts/setup-worktree.sh`             | what the runner runs inside the worktree: the `core.bare` repair, the per-worktree `core.hooksPath`, the `.env` copy, the private Gradle home                                                |
+| `scripts/check-review-verdicts.py`      | `scripts/check-review-verdicts.py`      | the digest of a change's contract documents, which the verdict file carries                                                                                                                  |
+| `scripts/openspec-import-all.py`        | `scripts/openspec-import-all.py`        | the importer that creates a change's registry entry                                                                                                                                          |
+| `scripts/ci-verdict.py`                 | `scripts/ci-verdict.py`                 | the tool that reads a commit's CI verdict — **its exit code is the verdict**                                                                                                                 |
+| `scripts/ci/check-agent-review.py`      | `scripts/ci/check-agent-review.py`      | the gate that reads the review comment, and the oracle the runner's tests assert against                                                                                                     |
+| `scripts/src/sgate/gatekit/verdicts.py` | `scripts/src/sgate/gatekit/verdicts.py` | the vocabulary a verdict is written in — the frontmatter shape, the two verdicts, the slug of a change. Both gates read it from here, and the runner writes the file it describes            |
 
 `verdicts.py` is copied **alone**, without the rest of `sgate`. The package around it is a
 gate framework — a markdown table reader, a Kotlin source reader, a findings model — and none of
