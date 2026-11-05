@@ -129,7 +129,7 @@ export function fenceIssueBody(body: string): string {
  * the same: the findings quote the code, and a quoted line is not an
  * instruction.
  */
-export function fenceReview(review: string): string {
+function fenceReview(review: string): string {
   return [
     '<review source="pull-request-review" trust="the runner\'s own">',
     neutralise(review, "review"),
@@ -161,7 +161,7 @@ export { BRIEF_MARKER };
  * body itself when the issue carries no such comment. The system prompt says
  * which one this issue has.
  */
-export function issueData(issue: IssueDetail): string {
+function issueData(issue: IssueDetail): string {
   return [
     "## The issue, as data",
     "",
@@ -177,7 +177,7 @@ export function issueData(issue: IssueDetail): string {
  * brief of a candidate is read when the title leaves doubt — not for every
  * candidate, which is the whole cost of doing it the other way round.
  */
-export function fenceRelatedIssues(
+function fenceRelatedIssues(
   issues: readonly { readonly number: number; readonly title: string }[],
 ): string {
   return [
@@ -197,7 +197,7 @@ export function fenceRelatedIssues(
  * beside this issue is the turn's call. The block goes above the turn's
  * instruction, so the instruction the model reads last is the instruction.
  */
-export function relatedData(
+function relatedData(
   issues: readonly { readonly number: number; readonly title: string }[],
 ): string {
   return [
@@ -333,7 +333,7 @@ export const WORKTREE_SECTION = "worktree";
  * than of what this branch added. The runner reads those commits itself, before
  * the session: a fact the agent may skip discovering is not a fact it has.
  */
-export function worktreeRule(options: {
+function worktreeRule(options: {
   readonly branch: string;
   readonly baseBranch: string;
   readonly baseSha: string;
@@ -393,7 +393,7 @@ function reworkRule(rework: Rework): string {
 }
 
 /** The failed review, as data, in one block. */
-export function reworkData(rework: Rework): string {
+function reworkData(rework: Rework): string {
   return [
     "## The review that failed, as data",
     "",
@@ -447,7 +447,7 @@ export function skillsDirectory(): string {
  * starts: a session that begins and then discovers it has nothing to say has
  * already spent the run.
  */
-export async function readNodePrompts(
+async function readNodePrompts(
   directory: string = promptsDirectory(),
 ): Promise<Map<string, string>> {
   const prompts = new Map<string, string>();

@@ -60,7 +60,7 @@ export const GH_DEFAULT_PAGE_SIZE = 30;
  * duplicate check reads. Five hundred is far above any of them, and the cost
  * of asking for more than you need is one request.
  */
-export const ISSUE_PAGE_SIZE = 500;
+const ISSUE_PAGE_SIZE = 500;
 
 /** An issue, as far as the runner cares. */
 export interface IssueSummary {
@@ -117,7 +117,7 @@ export function queueArgs(repo: string): string[] {
  * waiting. A duplicate check needs the other half as well, and the label alone
  * is the whole set — the waiting ones and the claimed ones, in one answer.
  */
-export function knownIssuesArgs(repo: string): string[] {
+function knownIssuesArgs(repo: string): string[] {
   return [
     "issue",
     "list",
@@ -228,7 +228,7 @@ export type GhRunner = (args: readonly string[]) => Promise<string>;
 export const GH_TIMEOUT_MS = COMMAND_TIMEOUT_MS;
 
 /** A `gh` command that failed, with the reason gh gave in the message. */
-export class GhCommandFailed extends Error {
+class GhCommandFailed extends Error {
   readonly exitCode: number;
   readonly stderr: string;
 
@@ -397,7 +397,7 @@ function toPullRequestSummary(value: unknown): PullRequestSummary | null {
  * the calls grew with the queue's history rather than with the work in front
  * of it.
  */
-export function allOpenPullRequestsArgs(repo: string): string[] {
+function allOpenPullRequestsArgs(repo: string): string[] {
   return [
     "pr",
     "list",
@@ -529,7 +529,7 @@ export function openPullRequestsArgs(repo: string, base: string): string[] {
 }
 
 /** Parse the JSON `gh pr list --json` produces. */
-export function parseOpenPullRequests(json: string): OpenPullRequest[] {
+function parseOpenPullRequests(json: string): OpenPullRequest[] {
   const parsed: unknown = JSON.parse(json);
   if (!Array.isArray(parsed)) {
     return [];
@@ -681,7 +681,7 @@ export async function readIssue(
 }
 
 /** The arguments that create an issue. */
-export function createIssueArgs(options: {
+function createIssueArgs(options: {
   readonly repo: string;
   readonly title: string;
   readonly body: string;
@@ -706,7 +706,7 @@ export function createIssueArgs(options: {
 /**
  * The number of an issue, from the URL `gh issue create` prints.
  */
-export function issueNumberFromUrl(url: string): number | null {
+function issueNumberFromUrl(url: string): number | null {
   const match = /\/issues\/(\d+)/.exec(url.trim());
   return match === null ? null : Number(match[1]);
 }
@@ -800,7 +800,7 @@ export async function closeIssue(
  * the text every run already reads. A line has to start with the marker, so
  * prose that happens to mention a parent does not block the issue.
  */
-export const DEPENDENCY_MARKER = /^(?:\*\*)?(?:depends on|blocked by|parent)(?:\*\*)?\s*:/i;
+const DEPENDENCY_MARKER = /^(?:\*\*)?(?:depends on|blocked by|parent)(?:\*\*)?\s*:/i;
 
 /**
  * The issue numbers a text says it waits for.
@@ -873,7 +873,7 @@ export function createPullRequestArgs(options: {
 /**
  * The number of a pull request, from the URL `gh pr create` prints.
  */
-export function pullRequestNumberFromUrl(url: string): number | null {
+function pullRequestNumberFromUrl(url: string): number | null {
   const match = /\/pull\/(\d+)/.exec(url);
   if (match === null) {
     return null;

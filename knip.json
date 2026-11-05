@@ -1,5 +1,4 @@
 {
   "$schema": "https://unpkg.com/knip@6.44.1/schema.json",
-  "ignoreExportsUsedInFile": true,
   "ignoreBinaries": ["flock"]
 }

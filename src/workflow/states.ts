@@ -6,7 +6,7 @@
  */
 
 /** What a node of the graph is: a turn of the session, or work the runner does. */
-export type NodeKind = "turn" | "action";
+type NodeKind = "turn" | "action";
 
 /**
  * The work session's turn states, and the prompt file each one runs.
@@ -66,7 +66,7 @@ export interface StateName {
  * the related turn has decided which issues to batch, and they are read from
  * the repository at that moment.
  */
-export type StateText = string | (() => string | Promise<string>);
+type StateText = string | (() => string | Promise<string>);
 
 /** A state of a session's workflow: one turn or action. */
 export interface WorkflowState extends StateName {

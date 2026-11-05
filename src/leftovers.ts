@@ -71,7 +71,7 @@ export function countLeftovers(brief: string): number {
 }
 
 /** What one filing did. */
-export interface LeftoverOutcome {
+interface LeftoverOutcome {
   /** Whether the issue was filed. */
   readonly filed: boolean;
   /** The issue's number, when it was filed. */

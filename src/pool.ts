@@ -24,7 +24,7 @@ import { parse as parseYaml } from "yaml";
  * Mastra engine — so the level is the host's policy and the runner reports
  * it.
  */
-export type EffortLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+type EffortLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 /** The levels a file may name. */
 const EFFORT_LEVELS = [
@@ -85,10 +85,10 @@ export interface Pool {
 }
 
 /** How often the pool is checked again when the file does not say: five minutes. */
-export const DEFAULT_CHECK_EVERY_MS = 300_000;
+const DEFAULT_CHECK_EVERY_MS = 300_000;
 
 /** The name of the pool file in the agent's directory. */
-export const POOL_FILE = "models.yaml";
+const POOL_FILE = "models.yaml";
 
 /**
  * What the runner knows about the models it may use.
@@ -406,7 +406,7 @@ export function windowHolds(window: string, minutes: number): boolean {
 }
 
 /** The minutes since midnight in the zone, at the moment. */
-export function minutesOfDay(now: Date, timezone?: string): number {
+function minutesOfDay(now: Date, timezone?: string): number {
   if (timezone === undefined) {
     return now.getHours() * 60 + now.getMinutes();
   }
@@ -479,7 +479,7 @@ export interface PoolChoice {
  * The models in the order they are tried: the bigger priority first, and the
  * file's own order between equals.
  */
-export function orderedModels(pool: Pool): readonly PoolModel[] {
+function orderedModels(pool: Pool): readonly PoolModel[] {
   return [...pool.models].sort((left, right) => right.priority - left.priority);
 }
 

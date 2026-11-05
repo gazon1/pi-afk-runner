@@ -67,3 +67,21 @@ jobs:
               }
             }
           '
+
+      # The published tarball must carry the shipped files: dist, skills, the
+      # prune-grammars script and the bin entry. A forgotten file is cheap to
+      # catch here and expensive after a release.
+      - name: the published tarball contains the shipped files
+        run: |
+          set -euo pipefail
+          npm pack --dry-run --json > /tmp/pack.json
+          node -e '
+            const fs = require("node:fs");
+            const pack = JSON.parse(fs.readFileSync("/tmp/pack.json", "utf8"));
+            const files = (pack[0] && pack[0].files || []).map((f) => f.path);
+            for (const required of ["dist/cli.js", "skills", "scripts/prune-grammars.mjs"]) {
+              const ok = files.some((f) => f === required || f.startsWith(required + "/"));
+              if (!ok) throw new Error("the tarball is missing " + required);
+            }
+            console.log("tarball ok:", files.length, "files");
+          '

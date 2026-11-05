@@ -36,10 +36,10 @@ import { join } from "node:path";
 const CONFLICT_EXIT_CODE = 75;
 
 /** The name of the lock file a sweep — or a queue's first issue — takes. */
-export const LOCK_NAME = "runner.lock";
+const LOCK_NAME = "runner.lock";
 
 /** The name of the lock file a merge takes: one merge at a time, beside the work. */
-export const MERGE_LOCK_NAME = "merge.lock";
+const MERGE_LOCK_NAME = "merge.lock";
 
 /** The lock a work run takes: the issue's own when one is named, else the sweep's. */
 export function workLockName(issue: number | undefined): string {

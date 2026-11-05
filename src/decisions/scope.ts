@@ -17,7 +17,7 @@ import { SCOPE_TOKEN, type ScopeToken } from "../workflow/index.js";
 export const SCOPE_DECISION_TOOL_NAME = "agent_scope_decision";
 
 /** How many pieces a too-large issue may be split into. */
-export const MAX_SPLIT_SUBTASKS = 8;
+const MAX_SPLIT_SUBTASKS = 8;
 
 /** One piece of a split issue. */
 export interface ScopeSubtask {

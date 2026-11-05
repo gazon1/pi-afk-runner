@@ -1,5 +1,6 @@
 node_modules/
 dist/
+coverage/
 *.log
 
 # the runner writes its lock and its run records here

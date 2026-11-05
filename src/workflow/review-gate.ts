@@ -25,7 +25,7 @@ import {
 import { answerSchema, type Failure } from "./steps.js";
 
 /** Why the review loop stopped. One value per stop. */
-export type ReviewGateStopReason =
+type ReviewGateStopReason =
   | { readonly kind: "passed" }
   | { readonly kind: "failed" }
   | { readonly kind: "noChange" }

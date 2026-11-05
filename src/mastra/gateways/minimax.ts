@@ -17,7 +17,7 @@ import {
 const MINIMAX_URL = "https://api.minimax.io/anthropic/v1";
 
 /** The environment variable the key is read from. */
-export const MINIMAX_API_KEY = "MINIMAX_API_KEY";
+const MINIMAX_API_KEY = "MINIMAX_API_KEY";
 
 /** The provider the gateway's models are named under. */
 export const MINIMAX_PROVIDER = "minimax";

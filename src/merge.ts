@@ -24,7 +24,7 @@ import { dirname, join } from "node:path";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 
 import { budgetShares } from "./budget.js";
-import { errorMessage } from "./cli.js";
+import { errorMessage } from "./errors.js";
 import {
   RECOUNT_LABEL,
   mergePullRequest,
@@ -87,7 +87,7 @@ import {
 export { WORK_BRANCH_PATTERN };
 
 /** The repository's own gate — the command the work prompt names. */
-export const GATE_SCRIPT = "./check.sh";
+const GATE_SCRIPT = "./check.sh";
 
 /**
  * How many gates the merge pipeline runs: one.
@@ -107,7 +107,7 @@ const CONFLICT_MARKER = "^<<<<<<< ";
  * It runs only when the branch had to move: a conflict, or a gate the base's
  * arrival broke. It resolves and commits; the runner pushes and reviews.
  */
-export const MERGE_PROMPT = [
+const MERGE_PROMPT = [
   "A pull request branch had to be brought up to date with its base, and the",
   "worktree is in the middle of it. Resolve it.",
   "",
@@ -128,7 +128,7 @@ export const MERGE_PROMPT = [
 ].join("\n");
 
 /** A pull request the merge pipeline considered. */
-export interface MergeSubject {
+interface MergeSubject {
   readonly pullRequest: number;
   readonly title: string;
 }

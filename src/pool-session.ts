@@ -386,7 +386,7 @@ export interface SessionChannel {
  * session's own channel. A reader of that one file then sees the session's
  * calls and the model they were made against, in the order they happened.
  */
-export function poolEventChannel(options: {
+function poolEventChannel(options: {
   /** The pool's own channel — the command line and the record. */
   readonly pool: (line: string) => void;
   /**

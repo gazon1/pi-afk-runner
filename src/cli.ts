@@ -31,6 +31,7 @@ import { defineCommand, parseArgs as parseCittyArgs, renderUsage, type ArgsDef }
 import { EnvHttpProxyAgent, fetch as undiciFetch, setGlobalDispatcher } from "undici";
 
 import { DEFAULT_DEADLINE_MS, defaultDeadlineMs } from "./budget.js";
+import { errorMessage } from "./errors.js";
 import { readGateSettings, resolveGateSettings, type GateSettings } from "./gates.js";
 import { readClaimed, readQueue, runGh, type GhRunner } from "./gh.js";
 import { runCommand, runGit, type CommandRunner, type GitRunner } from "./git.js";
@@ -190,13 +191,7 @@ export function defaultAgentDirectory(): string {
   return join(homedir(), ".pi", "agent");
 }
 
-/** The message of a failure, whatever it was thrown as. */
-export function errorMessage(failure: unknown): string {
-  return failure instanceof Error ? failure.message : String(failure);
-}
-
-/**
- * The issue the line being written belongs to.
+/** The issue the line being written belongs to.
  *
  * A sweep that works several issues at once writes them all to one stream, and
  * a line that does not say which issue it is about is a line nobody can read.

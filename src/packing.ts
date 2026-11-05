@@ -61,7 +61,7 @@ import { isProtectedPath } from "./guard.js";
 import { defineTool, type AnyToolSpec } from "./tools.js";
 
 /** The name of the tool that packs the repository. */
-export const PACK_TOOL_NAME = "agent_pack_codebase";
+const PACK_TOOL_NAME = "agent_pack_codebase";
 
 /**
  * The most a pack may cost the model.
@@ -70,7 +70,7 @@ export const PACK_TOOL_NAME = "agent_pack_codebase";
  * conversation, and those are what the turn is made of. Sixty thousand tokens
  * is a document the model reads and a context that still holds the rest.
  */
-export const MAX_PACK_TOKENS = 60_000;
+const MAX_PACK_TOKENS = 60_000;
 
 /** What one pack did. */
 export interface PackOutcome {

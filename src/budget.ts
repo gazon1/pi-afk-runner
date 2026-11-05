@@ -18,7 +18,7 @@ import { GATE_TIMEOUT_MS } from "./gates.js";
  * hour cut a run short in the middle of the verification, and a cut turn's
  * changes are never committed.
  */
-export const SESSION_SHARE_MS = 2 * 60 * 60 * 1000;
+const SESSION_SHARE_MS = 2 * 60 * 60 * 1000;
 
 /**
  * The gates' share of the run's budget.
@@ -26,7 +26,7 @@ export const SESSION_SHARE_MS = 2 * 60 * 60 * 1000;
  * An hour per gate — and a run that runs no gate reserves none. The share
  * follows the gates a run actually runs.
  */
-export const GATES_SHARE_MS = 0;
+const GATES_SHARE_MS = 0;
 
 /**
  * The gates' share of a run that runs a given number of gates.
@@ -34,12 +34,12 @@ export const GATES_SHARE_MS = 0;
  * The share follows the gates a run actually runs: a run with one gate gets
  * one gate's share, and a run with five does not starve its gates.
  */
-export function gatesShareMs(gateCount: number): number {
+function gatesShareMs(gateCount: number): number {
   return gateCount * GATE_TIMEOUT_MS;
 }
 
 /** The review session's share of the run's budget. */
-export const REVIEW_SHARE_MS = 30 * 60 * 1000;
+const REVIEW_SHARE_MS = 30 * 60 * 1000;
 
 /** The default ceiling on a run: the three shares, added up. */
 export const DEFAULT_DEADLINE_MS = SESSION_SHARE_MS + GATES_SHARE_MS + REVIEW_SHARE_MS;

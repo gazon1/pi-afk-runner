@@ -11,7 +11,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 /** Where the runner's source is. */
-export const SOURCE = join(dirname(fileURLToPath(import.meta.url)), "..", "src");
+const SOURCE = join(dirname(fileURLToPath(import.meta.url)), "..", "src");
 
 /**
  * The source without its comments.
@@ -20,7 +20,7 @@ export const SOURCE = join(dirname(fileURLToPath(import.meta.url)), "..", "src")
  * cannot disagree with the code, so the spellings the tests look for are the
  * ones in the code.
  */
-export function withoutComments(source: string): string {
+function withoutComments(source: string): string {
   return source.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/(^|[^:])\/\/.*$/gm, "$1");
 }
 
