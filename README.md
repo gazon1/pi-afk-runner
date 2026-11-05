@@ -399,9 +399,13 @@ prompt names is a skill the runner carries rather than one the host happens to h
 ## Development
 
 ```bash
+mise install    # the toolchain pinned in mise.toml
 npm ci          # install what the lockfile says
-npm run check   # typecheck, lint, test, build
+./check.sh      # the whole gate; CI runs this
 ```
+
+`npm run check` is the fast subset — typecheck, lint, format, Knip, test, build — and
+`npm run format` writes the formatter's changes.
 
 ## Licence
 

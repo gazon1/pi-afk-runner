@@ -149,10 +149,7 @@ export async function runReviewGate(options: {
     id: "review-gate",
     inputSchema: answerSchema,
     outputSchema: answerSchema,
-  }).dountil(
-    round,
-    async () => gate.stop !== undefined || gate.reviews >= options.attempts,
-  );
+  }).dountil(round, async () => gate.stop !== undefined || gate.reviews >= options.attempts);
 
   const run = await script.commit().createRun();
   const result = await run.start({ inputData: { token: "review" } });

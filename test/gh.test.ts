@@ -62,7 +62,12 @@ describe("the queue", () => {
   it("parses what gh returns", () => {
     const issues = parseIssues(
       JSON.stringify([
-        { number: 7, title: "an issue", updatedAt: "2026-10-30T09:00:00Z", labels: [{ name: QUEUE_LABEL }] },
+        {
+          number: 7,
+          title: "an issue",
+          updatedAt: "2026-10-30T09:00:00Z",
+          labels: [{ name: QUEUE_LABEL }],
+        },
       ]),
     );
     expect(issues).toEqual([

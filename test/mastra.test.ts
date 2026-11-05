@@ -92,9 +92,7 @@ function textTurn(text: string): unknown {
 /** A turn the model answers with: a call of a tool, with its arguments. */
 function toolTurn(name: string, args: unknown, id = "call-1"): unknown {
   return {
-    content: [
-      { type: "tool-call", toolCallId: id, toolName: name, input: JSON.stringify(args) },
-    ],
+    content: [{ type: "tool-call", toolCallId: id, toolName: name, input: JSON.stringify(args) }],
     finishReason: "tool-calls",
     usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
     warnings: [],
@@ -207,7 +205,6 @@ describe("the tools of the Mastra engine", () => {
     );
     await expect(callMastra(tool, { value: "x" })).rejects.toThrow("the queue is full");
   });
-
 });
 
 describe("the guard on the Mastra engine", () => {
@@ -268,7 +265,9 @@ describe("the guard on the Mastra engine", () => {
     }
     // The word alone is not the suite: reading how the target gates itself is
     // the work, and the work is allowed.
-    expect(denyReason({ command: 'grep -rn "unittest discover" .github/workflows/ci.yml' })).toBeNull();
+    expect(
+      denyReason({ command: 'grep -rn "unittest discover" .github/workflows/ci.yml' }),
+    ).toBeNull();
   });
 
   it("refuses the suite of every runner the policy names, and lets a search through", () => {
@@ -320,7 +319,9 @@ describe("the guard on the Mastra engine", () => {
       expect(denyReason({ command }) ?? "").toContain("Refused");
     }
     // A shell that runs something else is not a suite.
-    expect(denyReason({ command: 'bash -c "grep -rn unittest .github/workflows/ci.yml"' })).toBeNull();
+    expect(
+      denyReason({ command: 'bash -c "grep -rn unittest .github/workflows/ci.yml"' }),
+    ).toBeNull();
   });
 
   it("refuses a command that asks to run for too long", () => {

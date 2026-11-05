@@ -40,11 +40,6 @@ export const WORKFLOW_ACTIONS = [
   { name: "split", phase: "Split", action: "split" },
 ] as const;
 
-/** The decisions: each one picks what follows it. */
-export const DECISION_STATES: readonly string[] = WORKFLOW_STATES.filter(
-  (state) => state.role === "decision",
-).map((state) => state.name);
-
 /** The turns the work is made of. */
 export const WORK_STATES: readonly string[] = WORKFLOW_STATES.filter(
   (state) => state.role === "work",

@@ -70,9 +70,7 @@ describe("the skills a prompt names", () => {
       "utf8",
     );
     const carried = await skillDirectories({ cwd: worktree });
-    const copies = carried.filter(
-      (directory) => nameOf(directory) === "code-review-pr-workflow",
-    );
+    const copies = carried.filter((directory) => nameOf(directory) === "code-review-pr-workflow");
     expect(copies).toHaveLength(1);
     expect(copies[0]).toBe(targetSkill);
   });

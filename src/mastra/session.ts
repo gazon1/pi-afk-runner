@@ -14,7 +14,13 @@ import type { Agent } from "@mastra/core/agent";
 import { InMemoryStore } from "@mastra/core/storage";
 import { Memory } from "@mastra/memory";
 
-import type { AgentSession, RunUsage, SessionFactory, TurnFeedback, TurnMessage } from "../session.js";
+import type {
+  AgentSession,
+  RunUsage,
+  SessionFactory,
+  TurnFeedback,
+  TurnMessage,
+} from "../session.js";
 import type { ToolSpec } from "../tools.js";
 import { createMastraAgent, systemPrompt } from "./agent.js";
 import { logTurn, refusalLine, toolCallLine } from "./log.js";
@@ -293,9 +299,7 @@ export async function createMastraSession(options: {
               return;
             }
             streamed.add(payload.toolCallId);
-            options.onEvent(
-              toolCallLine({ toolName: payload.toolName, args: payload.args }),
-            );
+            options.onEvent(toolCallLine({ toolName: payload.toolName, args: payload.args }));
           },
           // The model that reads forever is told, between its steps, that the
           // turn ends with a tool. Without this the turn is cut off by the

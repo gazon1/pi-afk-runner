@@ -54,9 +54,7 @@ function failureMessage(failure: unknown): string {
  * where it stands: a runner that quietly falls back to the contract's gates
  * would judge a tree by a list the repository did not ask for.
  */
-export async function readGateSettings(
-  checkout: string,
-): Promise<GateSettings | undefined> {
+export async function readGateSettings(checkout: string): Promise<GateSettings | undefined> {
   const path = join(checkout, GATE_CONFIG_FILE);
   let raw: string;
   try {
@@ -90,12 +88,9 @@ export async function readGateSettings(
   }
   if (
     settings.gateTimeoutMs !== undefined &&
-    (!Number.isInteger(settings.gateTimeoutMs) ||
-      (settings.gateTimeoutMs as number) <= 0)
+    (!Number.isInteger(settings.gateTimeoutMs) || (settings.gateTimeoutMs as number) <= 0)
   ) {
-    throw new Error(
-      `${GATE_CONFIG_FILE}: "gateTimeoutMs" must be a whole number of milliseconds`,
-    );
+    throw new Error(`${GATE_CONFIG_FILE}: "gateTimeoutMs" must be a whole number of milliseconds`);
   }
 
   return {

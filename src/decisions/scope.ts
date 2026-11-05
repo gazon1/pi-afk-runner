@@ -96,9 +96,7 @@ export function createScopeDecisionTool(holder: { value?: ScopeDecision }) {
             `a split is bounded at ${MAX_SPLIT_SUBTASKS} subtasks — this one has ${subtasks.length}`,
           );
         }
-        const notABrief = subtasks.find(
-          (task) => !task.brief.trimStart().startsWith(BRIEF_MARKER),
-        );
+        const notABrief = subtasks.find((task) => !task.brief.trimStart().startsWith(BRIEF_MARKER));
         if (notABrief !== undefined) {
           return scopeRefusal(
             `the subtask "${notABrief.title}" does not open with \`${BRIEF_MARKER}\``,
@@ -115,9 +113,7 @@ export function createScopeDecisionTool(holder: { value?: ScopeDecision }) {
       };
       holder.value = decision;
       return {
-        content: [
-          { type: "text", text: `Scope decision recorded: ${decision.decision}` },
-        ],
+        content: [{ type: "text", text: `Scope decision recorded: ${decision.decision}` }],
         details: decision,
       };
     },

@@ -8,8 +8,8 @@
 #
 set -euo pipefail
 
-if [[ -d node_modules ]]; then
-  echo "setup-worktree: node_modules already here"
+if [[ -x node_modules/.bin/oxfmt ]]; then
+  echo "setup-worktree: node_modules already here, with the dev tools"
   exit 0
 fi
 

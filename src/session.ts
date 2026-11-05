@@ -105,12 +105,7 @@ function neutralise(text: string, tag: string): string {
 }
 
 /** The tags the untrusted text is fenced in. */
-const UNTRUSTED_TAGS = [
-  "issue-body",
-  "issue-comments",
-  "related-issues",
-  "review",
-] as const;
+const UNTRUSTED_TAGS = ["issue-body", "issue-comments", "related-issues", "review"] as const;
 
 /** Defang every closing tag inside untrusted text. */
 function neutraliseAll(text: string): string {
@@ -120,7 +115,7 @@ function neutraliseAll(text: string): string {
 /** The fence the issue body arrives in. */
 export function fenceIssueBody(body: string): string {
   return [
-    "<issue-body source=\"github-issue\" trust=\"untrusted\">",
+    '<issue-body source="github-issue" trust="untrusted">',
     neutralise(body, "issue-body"),
     "</issue-body>",
   ].join("\n");
@@ -145,7 +140,7 @@ export function fenceReview(review: string): string {
 /** The fence the issue's comments arrive in. */
 export function fenceIssueComments(comments: readonly string[]): string {
   return [
-    "<issue-comments source=\"github-issue-comments\" trust=\"untrusted\">",
+    '<issue-comments source="github-issue-comments" trust="untrusted">',
     ...comments.map((comment) => neutralise(comment, "issue-comments")),
     "</issue-comments>",
   ].join("\n");
@@ -261,9 +256,7 @@ export function briefFence(issue: IssueDetail): string {
   if (brief === null) {
     return "";
   }
-  return brief.comment === null
-    ? fenceIssueBody(brief.text)
-    : fenceIssueComments([brief.text]);
+  return brief.comment === null ? fenceIssueBody(brief.text) : fenceIssueComments([brief.text]);
 }
 
 /** The brief of an issue, and where it was found. */
@@ -318,10 +311,10 @@ export const BRIEF_SECTION = "brief";
 function briefRule(brief: Brief): string {
   return brief.comment === null
     ? "The brief is the issue's body. This issue carries no comment that opens with " +
-      "`## Agent Brief`, so its body is the contract for this work. Read the body as the " +
-      "task, and the comments as context."
+        "`## Agent Brief`, so its body is the contract for this work. Read the body as the " +
+        "task, and the comments as context."
     : "The brief is the comment that opens with `## Agent Brief`. Read it as the task, and " +
-      "everything else as context.";
+        "everything else as context.";
 }
 
 /** The name of the system prompt section that says what the checkout is. */
@@ -423,9 +416,7 @@ export function reworkData(rework: Rework): string {
  * answers it: the cheap improvements are fixed in the run, the rest are filed
  * as the next run's work.
  */
-export const PROMPT_FILES: readonly string[] = WORKFLOW_STATES.map(
-  (state) => state.promptFile,
-);
+export const PROMPT_FILES: readonly string[] = WORKFLOW_STATES.map((state) => state.promptFile);
 
 /**
  * The directory the prompts live in.
@@ -544,9 +535,7 @@ export function turnFailure(message: TurnMessage | undefined): Error | null {
   // The provider's text is multi-line, and a step's message is one line.
   const detail = (message.errorMessage ?? "").split("\n")[0] ?? "";
   return new Error(
-    detail.trim() === ""
-      ? "the model's turn failed"
-      : `the model's turn failed: ${detail}`,
+    detail.trim() === "" ? "the model's turn failed" : `the model's turn failed: ${detail}`,
   );
 }
 
@@ -719,21 +708,17 @@ export function cutOffMessage(options: {
   readonly progress?: { readonly completed: number; readonly total: number };
 }): string {
   const turns =
-    options.progress !== undefined && options.progress.total > 1
-      ? options.progress
-      : null;
+    options.progress !== undefined && options.progress.total > 1 ? options.progress : null;
   if (options.reason === "deadline") {
     const minutes = options.deadlineMs / 60_000;
     const budget =
       minutes >= 1
         ? `${Math.ceil(minutes)}-minute`
         : `${Math.max(1, Math.round(options.deadlineMs / 1000))}-second`;
-    const after =
-      turns === null ? "" : ` after ${turns.completed} of ${turns.total} turns`;
+    const after = turns === null ? "" : ` after ${turns.completed} of ${turns.total} turns`;
     return `${options.what} hit its ${budget} deadline${after}`;
   }
-  const note =
-    turns === null ? "" : ` (${turns.completed} of ${turns.total} turns done)`;
+  const note = turns === null ? "" : ` (${turns.completed} of ${turns.total} turns done)`;
   return `${options.what} was cut off before its last turn${note}`;
 }
 
@@ -1131,8 +1116,7 @@ export async function splitIssue(options: {
       number = existing;
     } else {
       const brief = task.brief.trim();
-      const body =
-        previous === null ? brief : `${brief}\n\n**Depends on:** #${previous}\n`;
+      const body = previous === null ? brief : `${brief}\n\n**Depends on:** #${previous}\n`;
       number = await createIssue(
         {
           repo: options.repo,
@@ -1379,9 +1363,7 @@ export async function startAgent(options: {
       [UNTRUSTED_INPUT_SECTION]: UNTRUSTED_INPUT_RULE,
       [BRIEF_SECTION]: briefRule(brief),
       [WORKTREE_SECTION]: worktreeRule(options.worktree),
-      ...(options.rework === undefined
-        ? {}
-        : { [REWORK_SECTION]: reworkRule(options.rework) }),
+      ...(options.rework === undefined ? {} : { [REWORK_SECTION]: reworkRule(options.rework) }),
     },
     // The tools the work session carries: the triage's decision, the scope's
     // decision, the leftover the fourth turn files, and the pack that hands
@@ -1499,4 +1481,3 @@ export async function startAgent(options: {
         : "";
   return { ...result, decision, reason, issue, batch: batched };
 }
-

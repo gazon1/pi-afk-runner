@@ -98,15 +98,7 @@ export async function claimIssue(options: ClaimOptions): Promise<ClaimOutcome> {
 
   // The label first: it is what a human sees, and it is what starts the
   // staleness clock.
-  await gh([
-    "issue",
-    "edit",
-    String(issue.number),
-    "--repo",
-    repo,
-    "--add-label",
-    CLAIM_LABEL,
-  ]);
+  await gh(["issue", "edit", String(issue.number), "--repo", repo, "--add-label", CLAIM_LABEL]);
 
   // The claim object this runner wrote, when it gets that far. The remote's
   // ref is compared against it: a ref that holds it is this runner's own
@@ -300,15 +292,7 @@ export async function removeClaimLabel(
   repo: string,
   issueNumber: number,
 ): Promise<void> {
-  await gh([
-    "issue",
-    "edit",
-    String(issueNumber),
-    "--repo",
-    repo,
-    "--remove-label",
-    CLAIM_LABEL,
-  ]);
+  await gh(["issue", "edit", String(issueNumber), "--repo", repo, "--remove-label", CLAIM_LABEL]);
 }
 
 /**

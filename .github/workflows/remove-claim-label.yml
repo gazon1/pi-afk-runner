@@ -9,14 +9,20 @@ on:
     types: [closed]
     branches: [main]
 
-permissions:
-  issues: write
-  pull-requests: read
+permissions: {}
+
+concurrency:
+  group: remove-claim-label-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 jobs:
   remove-claim-label:
     if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+      pull-requests: read
     steps:
       - name: take `agent-in-progress` off the issue the pull request fixed
         env:

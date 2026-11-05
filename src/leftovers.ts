@@ -83,7 +83,10 @@ export interface LeftoverOutcome {
 }
 
 /** A refusal: the model sees it as a failed call, and why. */
-function refusal(title: string, reason: string): {
+function refusal(
+  title: string,
+  reason: string,
+): {
   content: { type: "text"; text: string }[];
   details: LeftoverOutcome;
   isError: true;

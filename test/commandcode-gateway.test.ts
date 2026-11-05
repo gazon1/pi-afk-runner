@@ -33,7 +33,9 @@ function sentBody(): unknown {
 }
 
 /** The gateway's model, ready to be asked. */
-async function model(modelId: string): Promise<Awaited<ReturnType<CommandCodeGateway["resolveLanguageModel"]>>> {
+async function model(
+  modelId: string,
+): Promise<Awaited<ReturnType<CommandCodeGateway["resolveLanguageModel"]>>> {
   const gateway = new CommandCodeGateway();
   return gateway.resolveLanguageModel({
     modelId,
@@ -50,7 +52,9 @@ describe("the Command Code gateway", () => {
   it("gives_the_engines_own_message_the_reasoning_the_provider_asks_for", async () => {
     stubProvider();
 
-    await (await model("reflection/beam:free")).doGenerate({
+    await (
+      await model("reflection/beam:free")
+    ).doGenerate({
       prompt: [
         { role: "user", content: [{ type: "text", text: "read the file" }] },
         {
@@ -81,7 +85,9 @@ describe("the Command Code gateway", () => {
     // The history was cut here: the engine's own message is the first one, and
     // the model's own reasoning comes later. The provider wants a reasoning on
     // every assistant message, whatever the order.
-    await (await model("reflection/beam:free")).doGenerate({
+    await (
+      await model("reflection/beam:free")
+    ).doGenerate({
       prompt: [
         {
           role: "assistant",
@@ -106,7 +112,9 @@ describe("the Command Code gateway", () => {
   it("leaves_a_model_that_does_not_reason_alone", async () => {
     stubProvider();
 
-    await (await model("some-model")).doGenerate({
+    await (
+      await model("some-model")
+    ).doGenerate({
       prompt: [
         { role: "user", content: [{ type: "text", text: "read the file" }] },
         {

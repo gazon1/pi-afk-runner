@@ -2,7 +2,7 @@ name: CI
 
 # The package's own gate. It is not the repository's gate suite — this repository is a
 # package, not an application — so it is one job that runs everything the package declares:
-# the type check, the lint, the tests, and the build.
+# the type check, the lint, the format check, Knip, the tests, the build, and jactionlint.
 
 on:
   push:
@@ -21,29 +21,31 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: actions/setup-node@v6
+      # mise installs the toolchain pinned in mise.toml — Node and the binaries the
+      # aggregate gate runs — so CI and a developer run the same versions. The action
+      # is pinned by commit and the mise binary by version.
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
         with:
-          node-version: '22'
-          cache: npm
+          version: 2026.11.0
+
+      # The toolchain cache is mise's; this one is for the packages. Without it every
+      # run downloads the whole lockfile again.
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ~/.npm
+          key: npm-${{ hashFiles('package-lock.json') }}
+          restore-keys: npm-
 
       # `npm ci` rather than `npm install`: the lockfile is the record of what was tested,
       # and a gate that installs something else than what was reviewed is not a gate.
       - run: npm ci
 
-      - name: typecheck
-        run: npm run typecheck
-
-      - name: lint
-        run: npm run lint
-
-      - name: test
-        run: npm test
-
-      - name: build
-        run: npm run build
+      # The same command a developer runs. A step-by-step copy of it drifts.
+      - run: ./check.sh
 
       # The built package is what the command runs, so the gate checks that the
       # build produced the entry points the manifest promises. The manifest is

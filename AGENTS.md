@@ -30,14 +30,33 @@ review that opens with `<!-- agent-review -->`; nothing merges itself.
 ## The check
 
 ```bash
-npm run check   # typecheck, lint, test, build
+mise install    # once: Node and the linters pinned in mise.toml
+npm ci          # install what the lockfile says
+./check.sh      # typecheck, lint, format, Knip, test, build, jactionlint
 ```
 
-One command, four checks. `npx vitest run` alone is not enough — the build copies the prompt
-files next to the module, and a command that does not build is a command that cannot run.
+One command, and CI runs the same one. `npm run check` is the fast subset — typecheck, lint,
+format, Knip, test, build — for a change that does not touch `.github/`. `npx vitest run` alone
+is not enough: the build copies the prompt files next to the module, and a command that does not
+build is a command that cannot run.
 
-**Do not run the target repository's gates here.** `./check.sh`, `just gate` and the Gradle build
-belong to the repository the runner operates on; there is no Gradle in this repository.
+The vulnerability and secret scans need the network and a database, so they live in
+`.github/workflows/security.yml` and run on every pull request and weekly. Run them by hand with
+`mise exec -- osv-scanner scan source --lockfile=package-lock.json` and
+`mise exec -- betterleaks git .` when a change touches dependencies.
+
+Three rules a check cannot express, and the check that backs each:
+
+- `contract/`, `docs/practices/`, `skills/` and `pipelines/` are copies from the target
+  repository. Fix the original and copy it again; never hand-edit or format a copy. oxfmt and
+  jactionlint are scoped away from them.
+- `dist/` is built, never edited. The build writes it and CI checks the entry points it promises.
+- A lint, format or scan finding is fixed, not silenced. An exception is one path and one rule,
+  carries a reason, and needs a human decision.
+
+**Do not run the target repository's gates here.** The `./check.sh`, `just gate` and Gradle build
+of the repository this runner operates on belong to that checkout; there is no Gradle in this
+repository. The `./check.sh` above is this package's own gate.
 
 ## The engine
 

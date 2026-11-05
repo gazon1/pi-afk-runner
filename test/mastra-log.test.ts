@@ -29,9 +29,8 @@ function answerWith(call: unknown, text: string): TurnAnswer {
 describe("the lines the runner prints", () => {
   it("marks the agent's speech, and drops the blank lines", () => {
     const lines: string[] = [];
-    logTurn(
-      answerWith(undefined, "Running the gates.\n\nThe gates are green."),
-      (line) => lines.push(line),
+    logTurn(answerWith(undefined, "Running the gates.\n\nThe gates are green."), (line) =>
+      lines.push(line),
     );
     expect(lines).toEqual(["· Running the gates.", "· The gates are green."]);
   });
@@ -41,10 +40,7 @@ describe("the lines the runner prints", () => {
     const level = chalk.level;
     try {
       chalk.level = 0;
-      logTurn(
-        answerWith({ command: "npm run check" }, "done"),
-        (line) => lines.push(line),
-      );
+      logTurn(answerWith({ command: "npm run check" }, "done"), (line) => lines.push(line));
       expect(lines[0]).toBe("  → agent_test: npm run check");
     } finally {
       chalk.level = level;
@@ -62,9 +58,7 @@ describe("the lines the runner prints", () => {
 
   it("says nothing when there is nothing to say", () => {
     const lines: string[] = [];
-    logTurn({ toolCalls: [], text: "" } as unknown as TurnAnswer, (line) =>
-      lines.push(line),
-    );
+    logTurn({ toolCalls: [], text: "" } as unknown as TurnAnswer, (line) => lines.push(line));
     expect(lines).toEqual([]);
   });
 

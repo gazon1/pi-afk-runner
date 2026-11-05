@@ -84,10 +84,7 @@ export function treeEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEn
  * must not pass — git stops when the next directory it would enter is the
  * ceiling itself.
  */
-export function sandboxEnv(
-  root: string,
-  base: NodeJS.ProcessEnv = process.env,
-): NodeJS.ProcessEnv {
+export function sandboxEnv(root: string, base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const env = treeEnv(base);
   env.GIT_CEILING_DIRECTORIES = root;
   Object.assign(env, SANDBOX_IDENTITY);
@@ -143,10 +140,7 @@ export async function git(args: readonly string[], options: GitOptions): Promise
 }
 
 /** A git command that must succeed, with its standard output trimmed. */
-export async function gitOutput(
-  args: readonly string[],
-  options: GitOptions,
-): Promise<string> {
+export async function gitOutput(args: readonly string[], options: GitOptions): Promise<string> {
   return (await git(args, options)).trim();
 }
 
@@ -156,10 +150,7 @@ export async function gitOutput(
  * This is the assertion that catches the failure the sandbox exists to prevent:
  * a fixture that ran against somebody else's repository.
  */
-export async function assertOwnRepository(
-  repo: string,
-  env: NodeJS.ProcessEnv,
-): Promise<void> {
+export async function assertOwnRepository(repo: string, env: NodeJS.ProcessEnv): Promise<void> {
   const toplevel = await gitOutput(["rev-parse", "--show-toplevel"], { cwd: repo, env });
   if (toplevel === "") {
     throw new Error(`${repo} is not inside a git repository`);

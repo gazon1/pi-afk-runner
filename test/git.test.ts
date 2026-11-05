@@ -129,10 +129,14 @@ describe("the git the runner runs", () => {
 
     // The private refs are removed with `update-ref --stdin`: a list of refs,
     // also on the standard input.
-    await runGitWithTimeout(["update-ref", "--stdin"], {
-      cwd: fixture.repo,
-      input: `create refs/afk/test ${sha}\n`,
-    }, 30_000);
+    await runGitWithTimeout(
+      ["update-ref", "--stdin"],
+      {
+        cwd: fixture.repo,
+        input: `create refs/afk/test ${sha}\n`,
+      },
+      30_000,
+    );
     expect(
       (
         await runGitWithTimeout(["rev-parse", "refs/afk/test"], { cwd: fixture.repo }, 30_000)
@@ -175,7 +179,11 @@ describe("the failure a git call raises", () => {
   it("is the exit code for a git that refused", () => {
     const failure = gitFailure(
       undefined,
-      { exitCode: 128, stdOut: [Buffer.from("out")], stdErr: [Buffer.from("fatal: no such ref\n")] },
+      {
+        exitCode: 128,
+        stdOut: [Buffer.from("out")],
+        stdErr: [Buffer.from("fatal: no such ref\n")],
+      },
       { ...context, args: ["rev-parse"] },
     );
 
@@ -187,10 +195,14 @@ describe("the failure a git call raises", () => {
   it("is a timeout for a git that was killed at the bound", () => {
     // A git that was killed at the bound never answered: it has no exit code,
     // and the bound is the only thing that killed it.
-    const failure = gitFailure(new Error("Abort signal received"), { exitCode: null, stdOut: [], stdErr: [] }, {
-      ...context,
-      aborted: true,
-    });
+    const failure = gitFailure(
+      new Error("Abort signal received"),
+      { exitCode: null, stdOut: [], stdErr: [] },
+      {
+        ...context,
+        aborted: true,
+      },
+    );
 
     expect(failure).toBeInstanceOf(CommandTimedOut);
     expect((failure as CommandTimedOut).timeoutMs).toBe(100);
@@ -225,10 +237,7 @@ describe("the work in the tree", () => {
 
       // A new file is work too.
       await writeFile(join(fixture.repo, "new.ts"), "export const a = 1;\n", "utf8");
-      expect(await changedPaths(runner, fixture.repo, base)).toEqual([
-        "README.md",
-        "new.ts",
-      ]);
+      expect(await changedPaths(runner, fixture.repo, base)).toEqual(["README.md", "new.ts"]);
 
       // The host's own state is the host's business: git ignores it, and the
       // runner does not count it. The ignore file itself is work — it is a

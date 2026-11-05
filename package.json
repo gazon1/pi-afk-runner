@@ -36,8 +36,11 @@
     "build": "npx --package=typescript@5.6.3 -y tsc -p tsconfig.json && node --eval \"require('fs').cpSync('src/prompts','dist/prompts',{recursive:true})\" && node scripts/build-info.mjs",
     "typecheck": "npx --package=typescript@5.6.3 -y tsc -p tsconfig.json --noEmit && npx --package=typescript@5.6.3 -y tsc -p tsconfig.test.json",
     "lint": "oxlint --deny-warnings src test",
+    "format": "oxfmt 'src/**/*.ts' 'test/**/*.ts' 'scripts/**/*.mjs' package.json tsconfig.json tsconfig.test.json knip.json .oxfmtrc.json",
+    "format:check": "oxfmt --check 'src/**/*.ts' 'test/**/*.ts' 'scripts/**/*.mjs' package.json tsconfig.json tsconfig.test.json knip.json .oxfmtrc.json",
+    "knip": "knip",
     "test": "vitest run",
-    "check": "npm run typecheck && npm run lint && npm run test && npm run build",
+    "check": "npm run typecheck && npm run lint && npm run format:check && npm run knip && npm run test && npm run build",
     "postinstall": "node scripts/prune-grammars.mjs",
     "prepublishOnly": "npm run check"
   },
@@ -57,6 +60,8 @@
   },
   "devDependencies": {
     "@types/node": "26.6.6",
+    "knip": "6.44.1",
+    "oxfmt": "0.76.0",
     "oxlint": "1.90.0",
     "typescript": "^5.6.3",
     "vitest": "5.0.5"

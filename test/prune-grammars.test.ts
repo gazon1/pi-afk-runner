@@ -170,26 +170,22 @@ describe("the step that drops the grammars", () => {
 });
 
 describe("the runner installed as a dependency", () => {
-  it(
-    "leaves no grammars in the installed tree",
-    async () => {
-      const installed = await tree();
-      await writeFile(join(installed, "package.json"), "{}\n");
+  it("leaves no grammars in the installed tree", async () => {
+    const installed = await tree();
+    await writeFile(join(installed, "package.json"), "{}\n");
 
-      await run("npm", ["pack", "--pack-destination", installed], { cwd: REPOSITORY });
-      const packed = (await readdir(installed)).filter((name) => name.endsWith(".tgz"));
-      expect(packed).toHaveLength(1);
+    await run("npm", ["pack", "--pack-destination", installed], { cwd: REPOSITORY });
+    const packed = (await readdir(installed)).filter((name) => name.endsWith(".tgz"));
+    expect(packed).toHaveLength(1);
 
-      await run("npm", ["install", join(installed, packed[0]!), "--no-audit", "--no-fund"], {
-        cwd: installed,
-      });
+    await run("npm", ["install", join(installed, packed[0]!), "--no-audit", "--no-fund"], {
+      cwd: installed,
+    });
 
-      const grammars = await directoriesNamed(join(installed, "node_modules"), "tree-sitter-wasms");
-      expect(grammars.length).toBeGreaterThan(0);
-      for (const found of grammars) {
-        expect(await wasmFiles(found)).toEqual([]);
-      }
-    },
-    600_000,
-  );
+    const grammars = await directoriesNamed(join(installed, "node_modules"), "tree-sitter-wasms");
+    expect(grammars.length).toBeGreaterThan(0);
+    for (const found of grammars) {
+      expect(await wasmFiles(found)).toEqual([]);
+    }
+  }, 600_000);
 });

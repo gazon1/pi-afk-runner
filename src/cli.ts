@@ -48,11 +48,7 @@ import {
 } from "./pool.js";
 import { createPoolSession, type PoolHost } from "./pool-session.js";
 import { proxyFromEnvironment } from "./proxy.js";
-import {
-  mergeReviewedPullRequests,
-  type MergeOptions,
-  type MergeResult,
-} from "./merge.js";
+import { mergeReviewedPullRequests, type MergeOptions, type MergeResult } from "./merge.js";
 import {
   RunFailed,
   emptyQueueSentence,
@@ -238,25 +234,64 @@ async function inIssue<T>(issue: number, workers: number, run: () => Promise<T>)
  * drift.
  */
 export const ARGS = {
-  repo: { type: "string", description: "the repository the issue lives in (default: the checkout's origin)" },
-  issue: { type: "string", description: "the issue to work (default: the queue's first eligible one)" },
+  repo: {
+    type: "string",
+    description: "the repository the issue lives in (default: the checkout's origin)",
+  },
+  issue: {
+    type: "string",
+    description: "the issue to work (default: the queue's first eligible one)",
+  },
   all: { type: "boolean", description: "work every eligible issue, one after another" },
   workers: { type: "string", description: "how many issues --all works at once (default: 1)" },
-  merge: { type: "boolean", description: "land the reviewed, green pull requests the runner opened" },
-  checkout: { type: "string", description: "the checkout the worktree is made from (default: the cwd)" },
+  merge: {
+    type: "boolean",
+    description: "land the reviewed, green pull requests the runner opened",
+  },
+  checkout: {
+    type: "string",
+    description: "the checkout the worktree is made from (default: the cwd)",
+  },
   remote: { type: "string", description: "the remote the base comes from (default: origin)" },
   base: { type: "string", description: "the branch the base is read from (default: main)" },
-  "lock-dir": { type: "string", description: "where the lock lives (default: <checkout>/build/afk-runner)" },
-  "worktree-root": { type: "string", description: "where the worktrees are created (default: <checkout>/../afk-worktrees)" },
-  model: { type: "string", description: "the model the agent runs on (default: the pool's best model)" },
+  "lock-dir": {
+    type: "string",
+    description: "where the lock lives (default: <checkout>/build/afk-runner)",
+  },
+  "worktree-root": {
+    type: "string",
+    description: "where the worktrees are created (default: <checkout>/../afk-worktrees)",
+  },
+  model: {
+    type: "string",
+    description: "the model the agent runs on (default: the pool's best model)",
+  },
   "agent-dir": { type: "string", description: "the host's own directory (default: ~/.pi/agent)" },
   pool: { type: "string", description: "the model pool file (default: <agent-dir>/models.yaml)" },
-  "show-pool": { type: "boolean", description: "print what the pool file means now, and run nothing" },
-  "batch-related": { type: "boolean", description: "fetch the related ready-for-agent issues and work them in one batch" },
-  gate: { type: "string", description: "the gates to run, separated by commas — they replace the repository's own list" },
-  "gate-timeout-ms": { type: "string", description: "how long one gate may take (default: 3600000)" },
-  "deadline-ms": { type: "string", description: "the ceiling on the run (default: the three shares, added up)" },
-  "stale-after-ms": { type: "string", description: "how long a claim may sit (default: 604800000 — a week)" },
+  "show-pool": {
+    type: "boolean",
+    description: "print what the pool file means now, and run nothing",
+  },
+  "batch-related": {
+    type: "boolean",
+    description: "fetch the related ready-for-agent issues and work them in one batch",
+  },
+  gate: {
+    type: "string",
+    description: "the gates to run, separated by commas — they replace the repository's own list",
+  },
+  "gate-timeout-ms": {
+    type: "string",
+    description: "how long one gate may take (default: 3600000)",
+  },
+  "deadline-ms": {
+    type: "string",
+    description: "the ceiling on the run (default: the three shares, added up)",
+  },
+  "stale-after-ms": {
+    type: "string",
+    description: "how long a claim may sit (default: 604800000 — a week)",
+  },
 } as const satisfies ArgsDef;
 
 /**
@@ -318,8 +353,7 @@ export function parseArgs(argv: readonly string[]): CliOptions {
   const remote = text(parsed["remote"]) ?? "origin";
   const baseBranch = text(parsed["base"]) ?? "main";
   const lockDirectory = text(parsed["lock-dir"]) ?? join(checkout, "build", "afk-runner");
-  const worktreeRoot =
-    text(parsed["worktree-root"]) ?? join(dirname(checkout), "afk-worktrees");
+  const worktreeRoot = text(parsed["worktree-root"]) ?? join(dirname(checkout), "afk-worktrees");
   const model = text(parsed["model"]);
   const agentDirectory = text(parsed["agent-dir"]) ?? defaultAgentDirectory();
   const pool = text(parsed["pool"]);
@@ -420,9 +454,7 @@ export function repoFromRemoteUrl(url: string): string | null {
     /^(?:[a-z][a-z0-9+.-]*:\/\/)?(?:[^@/]+@)?[^/:]+[:/]([^/]+)\/([^/]+?)(?:\.git)?\/?$/i.exec(
       url.trim(),
     );
-  return match?.[1] !== undefined && match[2] !== undefined
-    ? `${match[1]}/${match[2]}`
-    : null;
+  return match?.[1] !== undefined && match[2] !== undefined ? `${match[1]}/${match[2]}` : null;
 }
 
 /**
@@ -438,7 +470,9 @@ export async function resolveRepo(
   if (options.repo !== undefined) {
     return { ...options, repo: options.repo };
   }
-  const remote = (await git(["remote", "get-url", options.remote], { cwd: options.checkout })).trim();
+  const remote = (
+    await git(["remote", "get-url", options.remote], { cwd: options.checkout })
+  ).trim();
   const repo = repoFromRemoteUrl(remote);
   if (repo === null) {
     throw new Error(
@@ -540,7 +574,10 @@ export interface CliDependencies {
   readonly gh?: GhRunner;
   readonly run?: CommandRunner;
   readonly session?: SessionFactory;
-  readonly lock?: (directory: string, name: string) => Promise<Awaited<ReturnType<typeof takeLock>>>;
+  readonly lock?: (
+    directory: string,
+    name: string,
+  ) => Promise<Awaited<ReturnType<typeof takeLock>>>;
 }
 
 /**
@@ -636,7 +673,11 @@ export async function prepareRun(
   argv: readonly string[],
   dependencies: CliDependencies = {},
 ): Promise<
-  | { readonly ok: true; readonly options: ResolvedOptions; readonly lock: Awaited<ReturnType<typeof takeLock>> }
+  | {
+      readonly ok: true;
+      readonly options: ResolvedOptions;
+      readonly lock: Awaited<ReturnType<typeof takeLock>>;
+    }
   | { readonly ok: false; readonly failure: unknown }
 > {
   let options: CliOptions;
@@ -660,9 +701,7 @@ export async function prepareRun(
     settings = resolveGateSettings({
       cli: {
         ...(resolved.gates === undefined ? {} : { gates: resolved.gates }),
-        ...(resolved.gateTimeoutMs === undefined
-          ? {}
-          : { gateTimeoutMs: resolved.gateTimeoutMs }),
+        ...(resolved.gateTimeoutMs === undefined ? {} : { gateTimeoutMs: resolved.gateTimeoutMs }),
       },
       repo: await readGateSettings(resolved.checkout),
     });
@@ -813,10 +852,7 @@ export function sweepIssueLine(result: RunResult): string {
  * The tokens and the cost are the sweep's own — the sum of what the issues
  * cost — and they are absent when none of them reported any.
  */
-export function sweepTotal(
-  results: readonly RunResult[],
-  issues: number,
-): string {
+export function sweepTotal(results: readonly RunResult[], issues: number): string {
   const parts = [`total: ${results.length} of ${issues} issues worked`];
   const duration = results.reduce((sum, result) => sum + (result.durationMs ?? 0), 0);
   parts.push(formatDuration(duration));
@@ -990,7 +1026,8 @@ export async function main(
     const move = created.setModel;
     // The model this worker is on, when the pool chose one: it counts against
     // that model's worker cap for as long as the session lives.
-    const assigned = chosen !== undefined && chosen.pooled && !injected ? chosen.reference : undefined;
+    const assigned =
+      chosen !== undefined && chosen.pooled && !injected ? chosen.reference : undefined;
     if (assigned !== undefined) {
       poolState.inUse.set(assigned, (poolState.inUse.get(assigned) ?? 0) + 1);
     }
@@ -1022,9 +1059,7 @@ export async function main(
       return tracked;
     }
     if (move === undefined) {
-      throw new Error(
-        "the session cannot be moved onto another model — the model pool needs it",
-      );
+      throw new Error("the session cannot be moved onto another model — the model pool needs it");
     }
     const host: PoolHost = {
       prompt: (text) => tracked.prompt(text),
@@ -1086,9 +1121,7 @@ export async function main(
           process.stdout.write(`[${record.step}] ${record.outcome}${detail}\n`);
         },
         onSubject: (subject) => {
-          process.stdout.write(
-            `pull request #${subject.pullRequest} · ${subject.title}\n`,
-          );
+          process.stdout.write(`pull request #${subject.pullRequest} · ${subject.title}\n`);
         },
       });
     }
@@ -1130,11 +1163,7 @@ export async function main(
  * The code the sweep ends with is the code of the failure of the issue with
  * the smallest number — see {@link sweepExitCode}.
  */
-async function sweep(
-  runOptions: RunOptions,
-  repo: string,
-  workers: number,
-): Promise<number> {
+async function sweep(runOptions: RunOptions, repo: string, workers: number): Promise<number> {
   let issues: readonly { readonly number: number }[];
   try {
     issues = [
@@ -1196,9 +1225,7 @@ async function sweep(
     }
   };
 
-  await Promise.all(
-    Array.from({ length: Math.min(workers, numbers.length) }, () => worker()),
-  );
+  await Promise.all(Array.from({ length: Math.min(workers, numbers.length) }, () => worker()));
   process.stdout.write(`${sweepTotal(results, numbers.length)}\n`);
   if (noModel) {
     process.stderr.write("the sweep stopped: no model was available\n");
@@ -1222,10 +1249,7 @@ interface WorkOutcome {
 }
 
 /** Work one issue, and say what happened through the exit code. */
-async function work(
-  runOptions: RunOptions,
-  namedIssue: number | undefined,
-): Promise<WorkOutcome> {
+async function work(runOptions: RunOptions, namedIssue: number | undefined): Promise<WorkOutcome> {
   try {
     const result = await runOnce(runOptions);
     if (result.outcome === "empty") {
@@ -1234,16 +1258,12 @@ async function work(
     }
     if (result.outcome === "unworkable") {
       const issueNum = result.issue ?? namedIssue;
-      process.stderr.write(
-        `issue ${issueNum} could not be worked — ${result.reason}\n`,
-      );
+      process.stderr.write(`issue ${issueNum} could not be worked — ${result.reason}\n`);
       return { code: 1 };
     }
     if (result.outcome === "skipped" || result.outcome === "split") {
       const what =
-        result.outcome === "skipped"
-          ? "closed as not needed"
-          : "split into smaller issues";
+        result.outcome === "skipped" ? "closed as not needed" : "split into smaller issues";
       const why = result.reason === "" ? "" : ` — ${result.reason}`;
       process.stdout.write(`issue ${result.issue} was ${what}${why}\n`);
       return { code: EXIT_OK };
@@ -1331,8 +1351,7 @@ async function mergeAll(options: MergeOptions): Promise<number> {
 
 /** Run the command, when this file is the program that was started. */
 const startedDirectly =
-  process.argv[1] !== undefined &&
-  import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
+  process.argv[1] !== undefined && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
 
 if (startedDirectly) {
   main(process.argv.slice(2)).then(

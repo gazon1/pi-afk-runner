@@ -64,7 +64,7 @@ function packerOf(outcome: PackOutcome): {
 
 /** A pack that holds a small document. */
 const SMALL: PackOutcome = {
-  text: "<files>\n<file path=\"src/a.ts\">the code</file>\n</files>",
+  text: '<files>\n<file path="src/a.ts">the code</file>\n</files>',
   paths: ["src/a.ts"],
   tokens: 42,
   suspicious: [],
@@ -79,7 +79,7 @@ describe("the pack tool", () => {
 
     expect(result.isError).toBeUndefined();
     expect(result.content[0]?.text).toContain("Packed 1 file(s), 42 tokens.");
-    expect(result.content[0]?.text).toContain("<file path=\"src/a.ts\">");
+    expect(result.content[0]?.text).toContain('<file path="src/a.ts">');
     expect(calls).toHaveLength(1);
     expect(calls[0]?.path).toBe("src");
   });
@@ -266,7 +266,7 @@ describe("the real packer", () => {
       " */",
       "class Greeter(private val name: String) {",
       "    // A line comment.",
-      "    fun greet(): String = \"Hello, $name\"",
+      '    fun greet(): String = "Hello, $name"',
       "}",
       "",
     ].join("\n");

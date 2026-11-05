@@ -212,8 +212,7 @@ export class PoolSession implements AgentSession {
       // model for a worse one. A model the provider no longer offers is not a
       // working model, and the runner does leave it.
       const upwards = (current?.priority ?? 0) < best.priority;
-      const stillThere =
-        current !== undefined && this.isReachable(reachable, current.reference);
+      const stillThere = current !== undefined && this.isReachable(reachable, current.reference);
       if (!this.options.state.exhausted.has(this.current) && !upwards && stillThere) {
         return;
       }
