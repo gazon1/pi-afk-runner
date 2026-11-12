@@ -62,7 +62,7 @@
   "devDependencies": {
     "@types/node": "26.6.6",
     "@vitest/coverage-v8": "5.0.5",
-    "dependency-cruiser": "17.4.3",
+    "dependency-cruiser": "18.7.2",
     "knip": "6.44.1",
     "oxfmt": "0.76.0",
     "oxlint": "1.90.0",
